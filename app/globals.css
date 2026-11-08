@@ -1,0 +1,142 @@
+@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import "tailwindcss";
+
+@layer base {
+  body {
+    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+    color: #0f172a;
+    background-color: #f8fafc;
+    text-rendering: optimizeLegibility;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    letter-spacing: -0.011em;
+  }
+}
+
+.font-display {
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  letter-spacing: -0.02em;
+  font-weight: 700;
+}
+
+.font-body {
+  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+}
+
+.font-mono, .tabular-nums {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Aptos font styling specifically for report cards */
+@font-face {
+  font-family: 'Aptos';
+  src: local('Aptos'), local('Aptos Display'), local('Calibri'), local('Segoe UI'), system-ui, sans-serif;
+  font-weight: 400 700;
+  font-style: normal;
+}
+
+.font-aptos {
+  font-family: 'Aptos', 'Calibri', 'Segoe UI', -apple-system, sans-serif !important;
+}
+
+/* Print specific styles */
+@media print {
+  body * {
+    visibility: hidden;
+  }
+  .printable-report-card, .printable-report-card * {
+    visibility: visible;
+  }
+  .printable-report-card {
+    position: absolute;
+    left: 0;
+    top: 0;
+    width: 100%;
+    margin: 0;
+    padding: 0;
+    box-shadow: none !important;
+  }
+  .no-print {
+    display: none !important;
+  }
+  @page {
+    size: A4 portrait;
+    margin: 10mm;
+  }
+}
+
+/* Custom scrollbar for spreadsheet view */
+.excel-grid-container::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+
+.excel-grid-container::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+.excel-grid-container::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+.excel-grid-container::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Hide Next.js dev tools floating badge and overlay portal */
+nextjs-portal,
+[data-nextjs-toast],
+[data-nextjs-dialog-overlay],
+[data-nextjs-portal],
+button[aria-label="Open Next.js Dev Tools"],
+div[data-nextjs-toast-wrapper] {
+  display: none !important;
+  visibility: hidden !important;
+  opacity: 0 !important;
+  pointer-events: none !important;
+}
+
+/* Excel Spreadsheet Cursor (white thick cross with dark border) */
+.cursor-excel-cell {
+  cursor: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='20' height='20' viewBox='0 0 20 20'%3E%3Cpath fill='%23ffffff' stroke='%230f172a' stroke-width='1.5' stroke-linejoin='miter' d='M7.5 1.5h5v6h6v5h-6v6h-5v-6h-6v-5h6v-6z'/%3E%3C/svg%3E") 10 10, cell;
+}
+
+/* Cell selection styling - prevent browser text invert highlight */
+.excel-cell-selection {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.excel-cell-selection input {
+  user-select: none;
+  -webkit-user-select: none;
+}
+.excel-cell-selection input::selection {
+  background: transparent;
+}
+.excel-cell-selection.is-editing input {
+  user-select: text;
+  -webkit-user-select: text;
+}
+.excel-cell-selection.is-editing input::selection {
+  background: #bfdbfe;
+  color: #0f172a;
+}
+
+
+/* Ensure marks table cell input selection never highlights in black invert */
+
+
+
+
+/* Ensure marks table cell input selection never turns white or black */
+input[data-excel-cell="true"]::selection {
+  background-color: transparent !important;
+  color: #0f172a !important;
+}
+
+input[data-excel-cell="true"]::-moz-selection {
+  background-color: transparent !important;
+  color: #0f172a !important;
+}

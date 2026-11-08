@@ -1,0 +1,6 @@
+{
+  "name": "School ERP - Student Records & Report Cards",
+  "description": "Comprehensive School ERP for Student Information, Examinations, Excel Marks Entry, Custom Grade Calculation Engine, and Report Card Generation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
