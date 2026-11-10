@@ -44,7 +44,14 @@ function safeParseJsonResponse(rawText: string): { success: boolean; data?: any;
   const trimmed = rawText.trim();
   try {
     const parsed = JSON.parse(trimmed);
-    return { success: true, data: parsed };
+    const isSuccess =
+      parsed.success === true ||
+      parsed.status === 'success' ||
+      parsed.status === 200 ||
+      Array.isArray(parsed) ||
+      Array.isArray(parsed.data) ||
+      Array.isArray(parsed.students);
+    return { success: isSuccess, data: parsed };
   } catch {
     const lower = trimmed.toLowerCase();
     if (
@@ -72,6 +79,94 @@ function safeParseJsonResponse(rawText: string): { success: boolean; data?: any;
       error: `Invalid response format from Google Apps Script: ${trimmed.slice(0, 150)}`,
     };
   }
+}
+
+function normalizeStudentList(rawData: any): any[] {
+  let list: any[] = [];
+  if (Array.isArray(rawData)) {
+    list = rawData;
+  } else if (rawData && typeof rawData === 'object') {
+    if (Array.isArray(rawData.students)) {
+      list = rawData.students;
+    } else if (Array.isArray(rawData.data)) {
+      list = rawData.data;
+    }
+  }
+
+  const knownSubjects = [
+    'English',
+    'Hindi',
+    'Marathi',
+    'Maths',
+    'Mathematics',
+    'Science',
+    'Social Science',
+    'Computer Science',
+  ];
+
+  return list.map((item: any, idx: number) => {
+    if (!item || typeof item !== 'object') return item;
+    const rollNo = parseInt(
+      String(
+        item.rollNo ??
+          item['Roll No'] ??
+          item['Roll'] ??
+          item['ROLL NO'] ??
+          item['roll'] ??
+          idx + 1
+      ),
+      10
+    ) || (idx + 1);
+
+    const name = String(
+      item.name ??
+        item['Student Name'] ??
+        item['Name'] ??
+        item['NAME OF THE STUDENTS'] ??
+        item['studentName'] ??
+        ''
+    ).trim();
+
+    const section = String(
+      item.section ??
+        item['Section'] ??
+        item['SECTION'] ??
+        item['Class'] ??
+        '9 Diamond'
+    ).trim();
+
+    const marks: Record<string, number | 'AB' | null> = {};
+    if (item.marks && typeof item.marks === 'object') {
+      Object.assign(marks, item.marks);
+    }
+
+    for (const [k, v] of Object.entries(item)) {
+      const cleanKey = k.replace(/\s*\(\d+\)/g, '').trim();
+      for (const sub of knownSubjects) {
+        if (cleanKey.toLowerCase() === sub.toLowerCase()) {
+          const targetSub = sub === 'Mathematics' ? 'Maths' : sub;
+          if (marks[targetSub] === undefined) {
+            if (v === 'AB' || String(v).trim().toUpperCase() === 'AB') {
+              marks[targetSub] = 'AB';
+            } else if (v !== null && v !== undefined && v !== '') {
+              const num = typeof v === 'number' ? v : parseFloat(String(v));
+              if (!isNaN(num)) marks[targetSub] = num;
+            }
+          }
+        }
+      }
+    }
+
+    return {
+      id: String(item.id || `sheet_${section}_${rollNo}`),
+      rollNo,
+      name,
+      section,
+      marks,
+      breakdowns: item.breakdowns || undefined,
+      subjectRemarks: item.subjectRemarks || undefined,
+    };
+  });
 }
 
 export async function GET(req: NextRequest) {
@@ -118,7 +213,16 @@ export async function GET(req: NextRequest) {
       );
     }
 
-    return NextResponse.json(result.data);
+    const normalizedStudents = normalizeStudentList(result.data);
+
+    return NextResponse.json({
+      success: true,
+      status: 'success',
+      count: normalizedStudents.length,
+      students: normalizedStudents,
+      data: normalizedStudents,
+      raw: result.data,
+    });
   } catch (err: any) {
     return NextResponse.json(
       { success: false, error: err.message || 'Failed to communicate with Google Apps Script' },

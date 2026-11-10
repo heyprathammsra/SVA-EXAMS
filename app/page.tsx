@@ -1,7 +1,5 @@
 'use client';
 
-export const dynamic = 'force-dynamic';
-
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import * as XLSX from 'xlsx';
 import Image from 'next/image';
@@ -87,6 +85,7 @@ import {
   CLASS_TEACHER_REMARK_PRESETS,
 } from '@/lib/remarks-utils';
 import AdminConfigPanel from '@/components/AdminConfigPanel';
+import TotalCalculationFormulaCard from '@/components/TotalCalculationFormulaCard';
 import GoogleSheetsConnectCard from '@/components/GoogleSheetsConnectCard';
 import {
   downloadSinglePDF,
@@ -4628,6 +4627,70 @@ export default function SchoolErpPage() {
                   </div>
                 )}
               </div>
+            </div>
+
+            {/* Total Calculation & Formula Card (Config & applied formula for every class) */}
+            <div className="mt-5">
+              <TotalCalculationFormulaCard
+                baseExamConfig={baseExamConfig}
+                activeExamId={selectedExam}
+                selectedClass={selectedClass}
+                students={students}
+                onUpdateExamConfig={(examId, updated, classScope) => {
+                  setExamConfigs((prev) => ({
+                    ...prev,
+                    [examId]: updated,
+                  }));
+                  if (examId === selectedExam) {
+                    const updatedStudents = students.map((st) => {
+                      if (
+                        classScope &&
+                        classScope !== 'ALL' &&
+                        st.section !== classScope &&
+                        st.class !== classScope &&
+                        getClassGradeFromSection(st.section) !== classScope
+                      ) {
+                        return st;
+                      }
+                      const effectiveCfg = getEffectiveExamConfigForClass(updated, st.section);
+                      const nextMarks = { ...st.marks };
+                      const nextBreakdowns = { ...(st.breakdowns || {}) };
+                      effectiveCfg.subjects.forEach((sub) => {
+                        if (sub.components && sub.components.length > 1) {
+                          const bd =
+                            nextBreakdowns[sub.name] ||
+                            generateDefaultBreakdown(
+                              nextMarks[sub.name],
+                              sub.name,
+                              st.section
+                            );
+                          nextBreakdowns[sub.name] = bd;
+                          nextMarks[sub.name] = computeSubjectTotalFromBreakdown(
+                            sub.name,
+                            st.section,
+                            bd,
+                            sub.components
+                          );
+                        }
+                      });
+                      return {
+                        ...st,
+                        marks: nextMarks,
+                        breakdowns: nextBreakdowns,
+                      };
+                    });
+                    setStudents(updatedStudents);
+                    syncStoresForExam(selectedExam, updatedStudents);
+                    triggerAutoSync(updatedStudents);
+                  }
+                  showToast(
+                    `Updated ${updated.name}${
+                      classScope && classScope !== 'ALL' ? ` (${classScope})` : ' (All Classes)'
+                    }`
+                  );
+                }}
+                showToast={showToast}
+              />
             </div>
           </div>
         )}
