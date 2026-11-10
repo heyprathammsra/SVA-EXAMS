@@ -1,26 +1,26 @@
-@import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
 @import "tailwindcss";
 
 @layer base {
   body {
-    font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
-    color: #0f172a;
+    font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    color: #1e293b;
     background-color: #f8fafc;
     text-rendering: optimizeLegibility;
     -webkit-font-smoothing: antialiased;
     -moz-osx-font-smoothing: grayscale;
-    letter-spacing: -0.011em;
+    line-height: 1.5;
   }
 }
 
 .font-display {
-  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
   letter-spacing: -0.02em;
   font-weight: 700;
 }
 
 .font-body {
-  font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 }
 
 .font-mono, .tabular-nums {
@@ -120,8 +120,8 @@ div[data-nextjs-toast-wrapper] {
   -webkit-user-select: text;
 }
 .excel-cell-selection.is-editing input::selection {
-  background: #bfdbfe;
-  color: #0f172a;
+  background: rgba(99, 102, 241, 0.18);
+  color: #1e1b4b;
 }
 
 
@@ -130,13 +130,28 @@ div[data-nextjs-toast-wrapper] {
 
 
 
-/* Ensure marks table cell input selection never turns white or black */
-input[data-excel-cell="true"]::selection {
-  background-color: transparent !important;
-  color: #0f172a !important;
+/* Selection & Option Highlighting */
+::selection {
+  background: rgba(99, 102, 241, 0.16) !important;
+  color: #1e1b4b !important;
 }
 
-input[data-excel-cell="true"]::-moz-selection {
-  background-color: transparent !important;
-  color: #0f172a !important;
+::-moz-selection {
+  background: rgba(99, 102, 241, 0.16) !important;
+  color: #1e1b4b !important;
 }
+
+/* Dropdown Options styling & highlight background */
+select option {
+  background-color: #ffffff;
+  color: #0f172a;
+}
+
+select option:checked,
+select option:hover,
+select option:focus,
+select option:active {
+  background-color: #eef2ff !important;
+  color: #312e81 !important;
+}
+

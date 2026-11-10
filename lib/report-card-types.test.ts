@@ -7,6 +7,11 @@ import {
   computeClassResults,
   SubjectConfig,
   StudentReportRow,
+  getDefaultSubjectComponents,
+  computeSubjectTotalFromBreakdown,
+  InternalComponentConfig,
+  syncBreakdownWithTotal,
+  mergePulledStudentsWithRoster,
 } from './report-card-types';
 
 const SAMPLE_SUBJECTS: SubjectConfig[] = [
@@ -93,3 +98,231 @@ test('computeClassResults assigns correct ranks per class group', () => {
   assert.equal(bhavnaRes?.rank, 1);
   assert.equal(aaravRes?.rank, 2);
 });
+
+test('getDefaultSubjectComponents and computeSubjectTotalFromBreakdown support custom internal exams combined with main exam', () => {
+  const defaultEng = getDefaultSubjectComponents('English', 'SA-1');
+  assert.equal(defaultEng.length, 5);
+  assert.equal(defaultEng.reduce((sum, c) => sum + c.maxMarks, 0), 100);
+
+  const customComponents: InternalComponentConfig[] = [
+    { key: 'unitTest1', label: 'Unit Test 1', maxMarks: 10, isMainExam: false, linkedExamId: 'PT-1' },
+    { key: 'oralExam', label: 'Oral Exam', maxMarks: 10, isMainExam: false },
+    { key: 'writtenExam', label: 'SA-1', maxMarks: 80, isMainExam: true },
+  ];
+
+  const total = computeSubjectTotalFromBreakdown(
+    'English',
+    'Diamond',
+    { unitTest1: 9, oralExam: 8, writtenExam: 71 },
+    customComponents
+  );
+  assert.equal(total, 88);
+
+  const partialAbsentTotal = computeSubjectTotalFromBreakdown(
+    'English',
+    'Diamond',
+    { unitTest1: 9, oralExam: 'AB', writtenExam: 71 },
+    customComponents
+  );
+  assert.equal(partialAbsentTotal, 80);
+
+  const hindiPartialAbsent = computeSubjectTotalFromBreakdown(
+    'Hindi',
+    'Diamond',
+    { listening: 17, speaking: 'AB', project: 13, saExam: 33 }
+  );
+  assert.equal(hindiPartialAbsent, 63);
+
+  const allAbsentTotal = computeSubjectTotalFromBreakdown(
+    'English',
+    'Diamond',
+    { unitTest1: 'AB', oralExam: 'AB', writtenExam: 'AB' },
+    customComponents
+  );
+  assert.equal(allAbsentTotal, 'AB');
+});
+
+test('evaluateCustomFormula handles internal component integration (SUM_INTERNAL, SUM_MAIN, [Subject:Internal], and weights)', () => {
+  const subjects: SubjectConfig[] = [
+    {
+      name: 'English',
+      maxMarks: 100,
+      passMarks: 33,
+      components: [
+        { key: 'penPaper', label: 'Pen Paper', maxMarks: 5, isMainExam: false },
+        { key: 'multipleAssessment', label: 'Multiple Assessment', maxMarks: 5, isMainExam: false },
+        { key: 'writtenExam', label: 'Main SA-1', maxMarks: 90, isMainExam: true },
+      ],
+    },
+    {
+      name: 'Maths',
+      maxMarks: 100,
+      passMarks: 33,
+      components: [
+        { key: 'penPaper', label: 'Pen Paper', maxMarks: 10, isMainExam: false },
+        { key: 'writtenExam', label: 'Main SA-1', maxMarks: 90, isMainExam: true },
+      ],
+    },
+  ];
+
+  const marks = { English: 88, Maths: 92 };
+  const breakdowns = {
+    English: { penPaper: 4, multipleAssessment: 4, writtenExam: 80 },
+    Maths: { penPaper: 9, writtenExam: 83 },
+  };
+
+  // 1. SUM_MAIN + SUM_INTERNAL: 80 + 83 = 163 main, 8 + 9 = 17 internal => 180 / 200
+  const res1 = evaluateCustomFormula('SUM_MAIN + SUM_INTERNAL', marks, subjects, breakdowns);
+  assert.equal(res1.obtained, 180);
+  assert.equal(res1.max, 200);
+
+  // 2. SUM_MAIN + (SUM_INTERNAL * 0.5): 163 + (17 * 0.5) = 171.5, max 180 + (20 * 0.5) = 190
+  const res2 = evaluateCustomFormula('SUM_MAIN + (SUM_INTERNAL * 0.5)', marks, subjects, breakdowns);
+  assert.equal(res2.obtained, 171.5);
+  assert.equal(res2.max, 190);
+
+  // 3. Subject specific tokens: [English:Internal] + [English:Main] => 8 + 80 = 88 / 100
+  const res3 = evaluateCustomFormula('[English:Internal] + [English:Main]', marks, subjects, breakdowns);
+  assert.equal(res3.obtained, 88);
+  assert.equal(res3.max, 100);
+
+  // 4. Paper aliases: P1_MAIN + P1_INT => 80 + 8 = 88 / 100
+  const res4 = evaluateCustomFormula('P1_MAIN + P1_INT', marks, subjects, breakdowns);
+  assert.equal(res4.obtained, 88);
+  assert.equal(res4.max, 100);
+
+  // 5. Direct internal component: [English:Pen Paper] => 4 / 5
+  const res5 = evaluateCustomFormula('[English:Pen Paper]', marks, subjects, breakdowns);
+  assert.equal(res5.obtained, 4);
+  assert.equal(res5.max, 5);
+});
+
+test('computeClassResults and getEffectiveExamConfigForClass support All Classes vs Specific Class overrides', () => {
+  const students: StudentReportRow[] = [
+    {
+      id: 'STU-SPARKLE',
+      rollNo: '01',
+      name: 'Sparkle Student',
+      admissionNo: 'ADM-S1',
+      class: 'Class 6',
+      section: 'Sparkle',
+      marks: { English: 90, Hindi: 80, Maths: 90, Science: 80 },
+      breakdowns: {
+        English: { penPaper: 5, multipleAssessment: 5, subjectEnrichment: 5, portfolio: 5, writtenExam: 70 },
+        Hindi: { penPaper: 4, multipleAssessment: 4, subjectEnrichment: 4, portfolio: 4, writtenExam: 64 },
+        Maths: { penPaper: 5, multipleAssessment: 5, subjectEnrichment: 5, portfolio: 5, writtenExam: 70 },
+        Science: { penPaper: 4, multipleAssessment: 4, subjectEnrichment: 4, portfolio: 4, writtenExam: 64 },
+      },
+    },
+    {
+      id: 'STU-DIAMOND',
+      rollNo: '01',
+      name: 'Diamond Student',
+      admissionNo: 'ADM-D1',
+      class: 'Class 9',
+      section: 'Diamond',
+      marks: { English: 90, Hindi: 80, Maths: 90, Science: 80 },
+      breakdowns: {
+        English: { penPaper: 5, multipleAssessment: 5, subjectEnrichment: 5, portfolio: 5, writtenExam: 70 },
+        Hindi: { penPaper: 4, multipleAssessment: 4, subjectEnrichment: 4, portfolio: 4, writtenExam: 64 },
+        Maths: { penPaper: 5, multipleAssessment: 5, subjectEnrichment: 5, portfolio: 5, writtenExam: 70 },
+        Science: { penPaper: 4, multipleAssessment: 4, subjectEnrichment: 4, portfolio: 4, writtenExam: 64 },
+      },
+    },
+  ];
+
+  const subjects100: SubjectConfig[] = [
+    { name: 'English', maxMarks: 100, passMarks: 33 },
+    { name: 'Hindi', maxMarks: 100, passMarks: 33 },
+    { name: 'Maths', maxMarks: 100, passMarks: 33 },
+    { name: 'Science', maxMarks: 100, passMarks: 33 },
+  ];
+
+  // All Classes default is SUM (340/400), but Diamond has Specific Class override SUM_MAIN (268/320)
+  const results = computeClassResults(students, subjects100, 'SUM', undefined, undefined, {
+    Diamond: {
+      totalFormula: 'CUSTOM',
+      customFormula: 'SUM_MAIN',
+    },
+  });
+
+  const sparkleRes = results.find((r) => r.student.id === 'STU-SPARKLE');
+  const diamondRes = results.find((r) => r.student.id === 'STU-DIAMOND');
+
+  assert.equal(sparkleRes?.totalObtained, 340);
+  assert.equal(sparkleRes?.totalMax, 400);
+
+  assert.equal(diamondRes?.totalObtained, 268);
+  assert.equal(diamondRes?.totalMax, 320);
+});
+
+test('syncBreakdownWithTotal and mergePulledStudentsWithRoster keep marks and breakdowns synchronized', () => {
+  const subjectNames = ['English', 'Hindi', 'Marathi', 'Maths', 'Science', 'Social Science', 'Computer Science'];
+  const sa1Config = {
+    id: 'SA-1',
+    name: 'SA-1',
+    code: 'SA-1',
+    totalFormula: 'SUM' as const,
+    subjects: subjectNames.map((name) => ({
+      name,
+      maxMarks: 100,
+      passMarks: 33,
+      components: getDefaultSubjectComponents(name, 'SA-1'),
+    })),
+  };
+  const engComponents = sa1Config.subjects.find((s) => s.name === 'English')?.components;
+
+  // 1. Syncing a new total mark updates breakdown so computeSubjectTotalFromBreakdown matches exact mark
+  const bd94 = syncBreakdownWithTotal(94, 'English', 'Sparkle', engComponents);
+  assert.ok(bd94);
+  assert.equal(
+    computeSubjectTotalFromBreakdown('English', 'Sparkle', bd94, engComponents),
+    94
+  );
+
+  // 2. Syncing null returns undefined so cleared cells stay cleared
+  const bdNull = syncBreakdownWithTotal(null, 'English', 'Sparkle', engComponents, bd94);
+  assert.equal(bdNull, undefined);
+
+  // 3. Merging pulled students from Google Sheets updates marks and reconciles breakdowns while preserving metadata
+  const existingRoster: StudentReportRow[] = [
+    {
+      id: 'sva-sparkle-1',
+      rollNo: '01',
+      name: 'Aarav Sharma',
+      admissionNo: 'SVA-2026-SPA-01',
+      class: 'Class 6',
+      section: 'Sparkle',
+      dob: '2012-05-14',
+      fatherName: 'Rajesh Sharma',
+      motherName: 'Sunita Sharma',
+      marks: { English: 75, Hindi: 70, Marathi: 80, Maths: 85, Science: 78, 'Social Science': 82, 'Computer Science': 90 },
+    },
+  ];
+
+  const pulledFromSheets: StudentReportRow[] = [
+    {
+      id: 'sheet-row-1',
+      rollNo: '1',
+      name: 'Aarav Sharma',
+      admissionNo: 'sheet-row-1',
+      class: 'Class 6',
+      section: 'Sparkle',
+      marks: { English: 96, Hindi: 88, Marathi: 91, Maths: 99, Science: 94, 'Social Science': 90, 'Computer Science': 98 },
+      customRemarks: 'Synced from Google Sheets',
+    },
+  ];
+
+  const merged = mergePulledStudentsWithRoster(existingRoster, pulledFromSheets, sa1Config);
+  assert.equal(merged.length, 1);
+  assert.equal(merged[0].id, 'sva-sparkle-1');
+  assert.equal(merged[0].fatherName, 'Rajesh Sharma');
+  assert.equal(merged[0].marks.English, 96);
+  assert.equal(merged[0].marks.Maths, 99);
+
+  // Compute result for merged student in SA-1 and verify the pulled marks are reflected in totalObtained
+  const computed = computeStudentResult(merged[0], sa1Config.subjects, 'SUM');
+  assert.equal(computed.totalObtained, 96 + 88 + 91 + 99 + 94 + 90 + 98);
+});
+
+

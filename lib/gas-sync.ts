@@ -190,7 +190,7 @@ function doPost(e) {
       var scores = [eng, hin, mar, mat, sci, soc, comp].filter(function(v) { return typeof v === "number"; });
       var total = scores.length > 0 ? scores.reduce(function(a, b) { return a + b; }, 0) : "";
       var pct = scores.length > 0 ? (total / totalMax) * 100 : 0;
-      var pctStr = scores.length > 0 ? pct.toFixed(1) + "%" : "";
+      var pctStr = scores.length > 0 ? pct.toFixed(2) + "%" : "";
 
       var grade = "-";
       if (scores.length > 0) {

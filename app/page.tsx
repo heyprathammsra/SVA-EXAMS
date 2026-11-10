@@ -1,5 +1,7 @@
 'use client';
 
+export const dynamic = 'force-dynamic';
+
 import React, { useState, useMemo, useRef, useEffect, useCallback } from 'react';
 import * as XLSX from 'xlsx';
 import Image from 'next/image';
@@ -66,7 +68,14 @@ import {
   generateDefaultBreakdown,
   computeSubjectTotalFromBreakdown,
   isClass9Section,
+  InternalComponentConfig,
+  getDefaultSubjectComponents,
+  getEffectiveExamConfigForClass,
+  getClassGradeFromSection,
+  syncBreakdownWithTotal,
+  mergePulledStudentsWithRoster,
 } from '@/lib/report-card-types';
+import CustomSelect from '@/components/CustomSelect';
 import {
   getDefaultSubjectRemark,
   getDefaultClassTeacherRemark,
@@ -78,6 +87,7 @@ import {
   CLASS_TEACHER_REMARK_PRESETS,
 } from '@/lib/remarks-utils';
 import AdminConfigPanel from '@/components/AdminConfigPanel';
+import TotalCalculationFormulaCard from '@/components/TotalCalculationFormulaCard';
 import GoogleSheetsConnectCard from '@/components/GoogleSheetsConnectCard';
 import {
   downloadSinglePDF,
@@ -166,14 +176,24 @@ const INITIAL_EXAM_CONFIGS: Record<string, ExamConfig> = {
     name: 'SA-1 (Summative Assessment 1)',
     code: 'SA-1',
     totalFormula: 'SUM',
-    subjects: SVA_SUBJECTS.map((s) => ({ ...s, maxMarks: 100, passMarks: 33 })),
+    subjects: SVA_SUBJECTS.map((s) => ({
+      ...s,
+      maxMarks: 100,
+      passMarks: 33,
+      components: getDefaultSubjectComponents(s.name, 'SA-1'),
+    })),
   },
   'SA-2': {
     id: 'SA-2',
     name: 'SA-2 (Summative Assessment 2)',
     code: 'SA-2',
     totalFormula: 'SUM',
-    subjects: SVA_SUBJECTS.map((s) => ({ ...s, maxMarks: 100, passMarks: 33 })),
+    subjects: SVA_SUBJECTS.map((s) => ({
+      ...s,
+      maxMarks: 100,
+      passMarks: 33,
+      components: getDefaultSubjectComponents(s.name, 'SA-2'),
+    })),
   },
 };
 
@@ -229,6 +249,7 @@ interface InternalAssessmentModalProps {
     subjectName: string;
   };
   selectedExam: string;
+  components?: InternalComponentConfig[];
   onClose: () => void;
   onSave: (studentId: string, subjectName: string, updatedBd: SubjectBreakdown) => void;
 }
@@ -236,30 +257,34 @@ interface InternalAssessmentModalProps {
 function InternalAssessmentModal({
   data,
   selectedExam,
+  components,
   onClose,
   onSave,
 }: InternalAssessmentModalProps) {
   const { student, subjectName } = data;
-  const isClass9 = isClass9Section(student.section);
-  const isHindi = subjectName.toLowerCase() === 'hindi';
+  const activeComponents =
+    components && components.length > 0
+      ? components
+      : getDefaultSubjectComponents(subjectName, selectedExam);
+  const totalMaxMarks = activeComponents.reduce((sum, c) => sum + (c.maxMarks || 0), 0);
   const currentBd =
     student.breakdowns?.[subjectName] ||
     generateDefaultBreakdown(student.marks[subjectName], subjectName, student.section);
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 animate-in fade-in duration-150">
-      <div className="bg-white border border-slate-200/90 rounded-2xl shadow-2xl w-full max-w-lg overflow-hidden p-6 flex flex-col gap-5 animate-in zoom-in-95 duration-150 relative">
-        <div className="flex items-start justify-between pb-3 border-b border-slate-200">
+    <div
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+      className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+    >
+      <div className="bg-white border border-slate-200/90 rounded-xl shadow-xl w-full max-w-md overflow-hidden p-5 flex flex-col gap-4 animate-in zoom-in-95 duration-150 relative">
+        <div className="flex items-start justify-between pb-3 border-b border-slate-200/80">
           <div>
-            <div className="flex items-center gap-2">
-              <span className="px-2 py-0.5 text-[10px] font-bold bg-blue-50 text-blue-700 rounded-md border border-blue-200 uppercase tracking-wide">
-                {isClass9 && isHindi
-                  ? 'Class 9 Hindi Internal Assessment'
-                  : 'CBSE 80 + 20 Internal Assessment'}
-              </span>
-              <span className="text-xs text-slate-400 font-mono">{selectedExam}</span>
+            <div className="text-[11px] font-medium text-slate-500 uppercase tracking-wide">
+              Internal + Main Exam Breakdown · {selectedExam}
             </div>
-            <h3 className="text-base font-bold text-slate-900 mt-1">
+            <h3 className="text-base font-semibold text-slate-900 mt-0.5">
               {student.name} · {subjectName}
             </h3>
             <p className="text-xs text-slate-500">
@@ -268,328 +293,93 @@ function InternalAssessmentModal({
           </div>
           <button
             onClick={onClose}
-            className="text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+            className="text-slate-400 hover:text-slate-600 p-1 rounded-md hover:bg-slate-100 transition-colors cursor-pointer"
           >
-            <X className="w-5 h-5" />
+            <X className="w-4 h-4" />
           </button>
         </div>
 
-        {isClass9 && isHindi ? (
-          // CLASS 9 HINDI PATTERN (Listening 20, Speaking 20, Project 15, SA 45 = 100)
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const formData = new FormData(e.currentTarget);
-              const parseField = (val: string, max: number) => {
-                const t = (val || '').trim();
-                if (t.toUpperCase() === 'AB') return 'AB';
-                const num = parseFloat(t);
-                return isNaN(num) ? 0 : Math.min(max, Math.max(0, num));
-              };
-              const updated: SubjectBreakdown = {
-                ...currentBd,
-                listening: parseField(formData.get('listening') as string, 20),
-                speaking: parseField(formData.get('speaking') as string, 20),
-                project: parseField(formData.get('project') as string, 15),
-                saExam: parseField(formData.get('saExam') as string, 45),
-              };
-              onSave(student.id, subjectName, updated);
-            }}
-            className="space-y-4"
-          >
-            <div className="p-3 bg-amber-50/70 border border-amber-200/80 rounded-xl text-xs text-amber-900">
-              <strong>Class 9 Hindi Specific Blueprint:</strong> Listening (20) + Speaking (20) + Project (15) + SA Exam (45) = <strong>Total 100 Marks</strong>
-            </div>
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            const formData = new FormData(e.currentTarget);
+            const parseField = (val: string, max: number): number | 'AB' => {
+              const t = (val || '').trim();
+              if (t.toUpperCase() === 'AB') return 'AB';
+              const num = parseFloat(t);
+              return isNaN(num) ? 0 : Math.min(max, Math.max(0, num));
+            };
+            const updated: SubjectBreakdown = { ...currentBd };
+            activeComponents.forEach((comp) => {
+              updated[comp.key] = parseField(
+                formData.get(comp.key) as string,
+                comp.maxMarks
+              );
+            });
+            onSave(student.id, subjectName, updated);
+          }}
+          className="space-y-3.5"
+        >
+          <div className="p-2.5 bg-slate-50 border border-slate-200/80 rounded-lg text-xs text-slate-700">
+            <span className="font-medium text-slate-900">{subjectName} ({selectedExam}) Blueprint:</span>{' '}
+            {activeComponents.map((c) => `${c.label} (${c.maxMarks})`).join(' + ')} ={' '}
+            <strong className="font-semibold text-slate-900">Total {totalMaxMarks} Marks</strong>
+          </div>
 
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              <div className="space-y-1">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>Listening</span>
-                  <span className="text-slate-400 font-mono">Max 20</span>
-                </label>
-                <input
-                  type="text"
-                  name="listening"
-                  defaultValue={currentBd.listening ?? 18}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50"
-                />
-              </div>
+          <div className="grid grid-cols-2 gap-2.5 text-xs">
+            {activeComponents.map((comp) => {
+              const rawDefault = currentBd[comp.key];
+              const fallbackVal =
+                rawDefault !== undefined && rawDefault !== null
+                  ? rawDefault
+                  : comp.isMainExam && typeof student.marks[subjectName] === 'number'
+                  ? Math.min(comp.maxMarks, Math.round(Number(student.marks[subjectName]) * (comp.maxMarks / (totalMaxMarks || 100))))
+                  : Math.round(comp.maxMarks * 0.8);
+              return (
+                <div
+                  key={comp.key}
+                  className={`space-y-1 ${
+                    comp.isMainExam && activeComponents.length % 2 === 1
+                      ? 'col-span-2 pt-1 border-t border-slate-100'
+                      : ''
+                  }`}
+                >
+                  <label className="font-medium text-slate-700 flex justify-between">
+                    <span>
+                      {comp.label}
+                      {comp.linkedExamId ? ` (Linked: ${comp.linkedExamId})` : ''}
+                    </span>
+                    <span className="text-slate-400 font-mono text-[11px]">Max {comp.maxMarks}</span>
+                  </label>
+                  <input
+                    type="text"
+                    name={comp.key}
+                    defaultValue={fallbackVal}
+                    className={`w-full px-2.5 py-1.5 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:border-slate-900 bg-white text-xs ${
+                      comp.isMainExam ? 'font-semibold text-sm' : ''
+                    }`}
+                  />
+                </div>
+              );
+            })}
+          </div>
 
-              <div className="space-y-1">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>Speaking</span>
-                  <span className="text-slate-400 font-mono">Max 20</span>
-                </label>
-                <input
-                  type="text"
-                  name="speaking"
-                  defaultValue={currentBd.speaking ?? 17}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>Project</span>
-                  <span className="text-slate-400 font-mono">Max 15</span>
-                </label>
-                <input
-                  type="text"
-                  name="project"
-                  defaultValue={currentBd.project ?? 13}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>SA-1 Exam</span>
-                  <span className="text-slate-400 font-mono">Max 45</span>
-                </label>
-                <input
-                  type="text"
-                  name="saExam"
-                  defaultValue={currentBd.saExam ?? 36}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50 font-bold"
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors cursor-pointer"
-              >
-                Save Hindi Marks (Total 100)
-              </button>
-            </div>
-          </form>
-        ) : subjectName.toLowerCase() === 'computer science' ? (
-          // COMPUTER SCIENCE (CS) PATTERN: PRACTICALS 20 + SA-1 80 = TOTAL 100
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const formData = new FormData(e.currentTarget);
-              const parseField = (val: string, max: number) => {
-                const t = (val || '').trim();
-                if (t.toUpperCase() === 'AB') return 'AB';
-                const num = parseFloat(t);
-                return isNaN(num) ? 0 : Math.min(max, Math.max(0, num));
-              };
-              const intVal = parseField(formData.get('internalMarks') as string, 20);
-              const paperVal = parseField(formData.get('writtenExam') as string, 80);
-              const numInt = typeof intVal === 'number' ? intVal : 0;
-              const q = Math.floor(numInt / 4);
-              const rem = numInt - q * 4;
-              const updated: SubjectBreakdown = {
-                ...currentBd,
-                internalMarks: intVal,
-                penPaper: intVal === 'AB' ? 'AB' : q + (rem > 0 ? 1 : 0),
-                multipleAssessment: intVal === 'AB' ? 'AB' : q + (rem > 1 ? 1 : 0),
-                subjectEnrichment: intVal === 'AB' ? 'AB' : q + (rem > 2 ? 1 : 0),
-                portfolio: intVal === 'AB' ? 'AB' : q,
-                writtenExam: paperVal,
-              };
-              onSave(student.id, subjectName, updated);
-            }}
-            className="space-y-4"
-          >
-            <div className="p-3 bg-blue-50/70 border border-blue-200/80 rounded-xl text-xs text-blue-900">
-              <strong>Computer Science ({selectedExam}) Blueprint:</strong> Practicals (20) + {selectedExam} Paper (80) = <strong>Total 100 Marks</strong>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              <div className="space-y-1">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>Practicals 20</span>
-                  <span className="text-slate-400 font-mono">Max 20</span>
-                </label>
-                <input
-                  type="text"
-                  name="internalMarks"
-                  defaultValue={
-                    currentBd.internalMarks ??
-                    ((typeof currentBd.penPaper === 'number' ? currentBd.penPaper : 5) +
-                      (typeof currentBd.multipleAssessment === 'number' ? currentBd.multipleAssessment : 5) +
-                      (typeof currentBd.subjectEnrichment === 'number' ? currentBd.subjectEnrichment : 5) +
-                      (typeof currentBd.portfolio === 'number' ? currentBd.portfolio : 5))
-                  }
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50 font-bold text-sm"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>{selectedExam} 80</span>
-                  <span className="text-slate-400 font-mono">Max 80</span>
-                </label>
-                <input
-                  type="text"
-                  name="writtenExam"
-                  defaultValue={
-                    currentBd.writtenExam ??
-                    (typeof student.marks[subjectName] === 'number'
-                      ? Math.min(80, Math.round(Number(student.marks[subjectName]) * 0.8))
-                      : 60)
-                  }
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50 font-bold text-sm"
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors cursor-pointer"
-              >
-                Save CS Marks (Total 100)
-              </button>
-            </div>
-          </form>
-        ) : (
-          // STANDARD CBSE 80 + 20 PATTERN (Pen Paper Test 5 + Multiple Assessments 5 + Subject Enrichment 5 + Portfolio 5 + SA 80 = 100)
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              const formData = new FormData(e.currentTarget);
-              const parseField = (val: string, max: number) => {
-                const t = (val || '').trim();
-                if (t.toUpperCase() === 'AB') return 'AB';
-                const num = parseFloat(t);
-                return isNaN(num) ? 0 : Math.min(max, Math.max(0, num));
-              };
-              const pp = parseField(formData.get('penPaper') as string, 5);
-              const ma = parseField(formData.get('multipleAssessment') as string, 5);
-              const se = parseField(formData.get('subjectEnrichment') as string, 5);
-              const pf = parseField(formData.get('portfolio') as string, 5);
-              const we = parseField(formData.get('writtenExam') as string, 80);
-              const intSum =
-                pp === 'AB' || ma === 'AB' || se === 'AB' || pf === 'AB'
-                  ? 'AB'
-                  : (typeof pp === 'number' ? pp : 0) +
-                    (typeof ma === 'number' ? ma : 0) +
-                    (typeof se === 'number' ? se : 0) +
-                    (typeof pf === 'number' ? pf : 0);
-              const updated: SubjectBreakdown = {
-                ...currentBd,
-                penPaper: pp,
-                multipleAssessment: ma,
-                subjectEnrichment: se,
-                portfolio: pf,
-                internalMarks: intSum,
-                writtenExam: we,
-              };
-              onSave(student.id, subjectName, updated);
-            }}
-            className="space-y-4"
-          >
-            <div className="p-3 bg-blue-50/70 border border-blue-200/80 rounded-xl text-xs text-blue-900">
-              <strong>{subjectName} ({selectedExam}) Blueprint:</strong> Pen Paper Test (5) + Multiple Assessments (5) + Subject Enrichment (5) + Portfolio (5) + {selectedExam} (80) = <strong>Total 100 Marks</strong>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3 text-xs">
-              <div className="space-y-1">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>Pen Paper Test 5</span>
-                  <span className="text-slate-400 font-mono">Max 5</span>
-                </label>
-                <input
-                  type="text"
-                  name="penPaper"
-                  defaultValue={currentBd.penPaper ?? 4}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>Multiple Assessments 5</span>
-                  <span className="text-slate-400 font-mono">Max 5</span>
-                </label>
-                <input
-                  type="text"
-                  name="multipleAssessment"
-                  defaultValue={currentBd.multipleAssessment ?? 4}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>Subject Enrichment 5</span>
-                  <span className="text-slate-400 font-mono">Max 5</span>
-                </label>
-                <input
-                  type="text"
-                  name="subjectEnrichment"
-                  defaultValue={currentBd.subjectEnrichment ?? 5}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50"
-                />
-              </div>
-
-              <div className="space-y-1">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>Portfolio 5</span>
-                  <span className="text-slate-400 font-mono">Max 5</span>
-                </label>
-                <input
-                  type="text"
-                  name="portfolio"
-                  defaultValue={currentBd.portfolio ?? 5}
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50"
-                />
-              </div>
-
-              <div className="col-span-2 space-y-1 pt-1 border-t border-slate-100">
-                <label className="font-semibold text-slate-700 flex justify-between">
-                  <span>{selectedExam} 80</span>
-                  <span className="text-slate-400 font-mono">Max 80</span>
-                </label>
-                <input
-                  type="text"
-                  name="writtenExam"
-                  defaultValue={
-                    currentBd.writtenExam ??
-                    (typeof student.marks[subjectName] === 'number'
-                      ? Math.min(80, Math.round(Number(student.marks[subjectName]) * 0.8))
-                      : 60)
-                  }
-                  className="w-full px-3 py-2 border border-slate-200 rounded-lg font-mono text-slate-900 focus:outline-none focus:ring-1 focus:ring-blue-600 bg-slate-50 font-bold text-sm"
-                />
-              </div>
-            </div>
-
-            <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-4 py-2 text-xs font-semibold text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                className="px-5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors cursor-pointer"
-              >
-                Save Marks (Total 100)
-              </button>
-            </div>
-          </form>
-        )}
+          <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200/80">
+            <button
+              type="button"
+              onClick={onClose}
+              className="px-3.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
+            >
+              Cancel
+            </button>
+            <button
+              type="submit"
+              className="px-4 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors cursor-pointer"
+            >
+              Save Marks (Total {totalMaxMarks})
+            </button>
+          </div>
+        </form>
       </div>
     </div>
   );
@@ -603,10 +393,23 @@ export default function SchoolErpPage() {
   
   // Exam selection & Exam Configuration Store
   const [selectedExam, setSelectedExam] = useState<string>('SA-1');
-  const [examConfigs, setExamConfigs] = useState<Record<string, ExamConfig>>(INITIAL_EXAM_CONFIGS);
+  const [examConfigs, setExamConfigs] = useState<Record<string, ExamConfig>>(() => {
+    if (typeof window !== 'undefined') {
+      try {
+        const saved = localStorage.getItem('sva_exam_configs_v1');
+        if (saved) {
+          const parsed = JSON.parse(saved);
+          if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
+            return { ...INITIAL_EXAM_CONFIGS, ...parsed };
+          }
+        }
+      } catch {}
+    }
+    return INITIAL_EXAM_CONFIGS;
+  });
 
-  // Current active exam config
-  const currentExamConfig: ExamConfig = useMemo(() => {
+  // Base exam config (global across classes, including classOverrides)
+  const baseExamConfig: ExamConfig = useMemo(() => {
     return (
       examConfigs[selectedExam] || {
         id: selectedExam,
@@ -617,6 +420,11 @@ export default function SchoolErpPage() {
       }
     );
   }, [examConfigs, selectedExam]);
+
+  // Effective exam config for currently selected class filter
+  const currentExamConfig: ExamConfig = useMemo(() => {
+    return getEffectiveExamConfigForClass(baseExamConfig, selectedClass);
+  }, [baseExamConfig, selectedClass]);
 
   // Dynamic subjects based on active exam config
   const activeSubjects: SubjectConfig[] = useMemo(() => {
@@ -694,9 +502,19 @@ export default function SchoolErpPage() {
     []
   );
 
+  const [isHorizontalScrollActive, setIsHorizontalScrollActive] = useState(false);
+  const horizontalScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   const scrollHorizontalBy = useCallback(
     (container: HTMLDivElement | null, direction: 'left' | 'right') => {
       if (!container) return;
+      setIsHorizontalScrollActive(true);
+      if (horizontalScrollTimeoutRef.current) {
+        clearTimeout(horizontalScrollTimeoutRef.current);
+      }
+      horizontalScrollTimeoutRef.current = setTimeout(() => {
+        setIsHorizontalScrollActive(false);
+      }, 450);
       const step = 360;
       const delta = direction === 'left' ? -step : step;
       container.scrollBy({ left: delta, behavior: 'smooth' });
@@ -704,7 +522,7 @@ export default function SchoolErpPage() {
     []
   );
 
-  // Multi-exam marks store so marks are preserved and isolated per exam
+  // Multi-exam marks & breakdowns stores so marks and internal components are preserved and isolated per exam
   const [examMarksStore, setExamMarksStore] = useState<Record<string, Record<string, Record<string, number | 'AB' | null>>>>(() => {
     const store: Record<string, Record<string, Record<string, number | 'AB' | null>>> = {
       'PT-1': {},
@@ -730,32 +548,31 @@ export default function SchoolErpPage() {
     return store;
   });
 
-  const handleExamChange = (newExam: string) => {
-    // 1. Sync current marks to store under the currently selected exam
-    setExamMarksStore((prev) => {
-      const currentMarks: Record<string, Record<string, number | 'AB' | null>> = {};
-      students.forEach((s) => {
-        currentMarks[s.id] = { ...s.marks };
+  const [examBreakdownsStore, setExamBreakdownsStore] = useState<
+    Record<string, Record<string, Record<string, SubjectBreakdown>>>
+  >(() => {
+    const bdStore: Record<string, Record<string, Record<string, SubjectBreakdown>>> = {
+      'PT-1': {},
+      'PT-2': {},
+      'PT-3': {},
+      'PT-4': {},
+      'SA-1': {},
+      'SA-2': {},
+    };
+    ['SA-1', 'SA-2'].forEach((ex) => {
+      ALL_SVA_STUDENTS.forEach((st) => {
+        const bds: Record<string, SubjectBreakdown> = {};
+        Object.entries(st.marks).forEach(([sub, val]) => {
+          const normSub = sub === 'Mathematics' ? 'Maths' : sub;
+          const total = typeof val === 'number' ? Math.round(val) : val;
+          bds[normSub] =
+            st.breakdowns?.[normSub] || generateDefaultBreakdown(total, normSub, st.section);
+        });
+        bdStore[ex][st.id] = bds;
       });
-      return {
-        ...prev,
-        [selectedExam]: currentMarks,
-      };
     });
-
-    // 2. Load marks for new exam into active student state
-    const targetMarks = examMarksStore[newExam];
-    if (targetMarks) {
-      setStudents((prev) =>
-        prev.map((s) => {
-          const m = targetMarks[s.id];
-          return m ? { ...s, marks: { ...m } } : s;
-        })
-      );
-    }
-    setSelectedExam(newExam);
-    showToast(`Switched ledger to ${newExam}`);
-  };
+    return bdStore;
+  });
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('all');
@@ -782,38 +599,61 @@ export default function SchoolErpPage() {
   }, [activeSubjects, selectedSubject]);
 
   const activeInternalSubject = selectedSubject !== 'all' ? selectedSubject : internalActiveSubject;
-  const isC9ClassActive = isClass9Section(selectedClass);
-  const isC9HindiActive = isC9ClassActive && activeInternalSubject.toLowerCase() === 'hindi';
-  const isCsActive = activeInternalSubject.toLowerCase() === 'computer science';
+  const activeSubConfig = useMemo(
+    () =>
+      activeSubjects.find(
+        (s) => s.name.toLowerCase() === activeInternalSubject.toLowerCase()
+      ),
+    [activeSubjects, activeInternalSubject]
+  );
 
   const internalFields = useMemo(() => {
-    if (isC9HindiActive) {
-      return [
-        { key: 'listening' as const, label: 'LISTENING', max: 20, subLabel: '20', colWidth: 'w-[92px] min-w-[92px]' },
-        { key: 'speaking' as const, label: 'SPEAKING', max: 20, subLabel: '20', colWidth: 'w-[92px] min-w-[92px]' },
-        { key: 'project' as const, label: 'PROJECT', max: 15, subLabel: '15', colWidth: 'w-[88px] min-w-[88px]' },
-        { key: 'saExam' as const, label: selectedExam, max: 45, subLabel: '45', colWidth: 'w-[92px] min-w-[92px]' },
-      ];
+    const customComps = activeSubConfig?.components;
+    if (customComps && customComps.length > 0) {
+      return customComps.map((comp) => ({
+        key: comp.key,
+        label: comp.label.toUpperCase(),
+        max: comp.maxMarks,
+        subLabel: String(comp.maxMarks),
+        colWidth:
+          comp.label.length > 14
+            ? 'w-[130px] min-w-[130px]'
+            : 'w-[105px] min-w-[105px]',
+        linkedExamId: comp.linkedExamId,
+        isMainExam: comp.isMainExam,
+      }));
     }
-    if (isCsActive) {
-      return [
-        { key: 'internalMarks' as const, label: 'PRACTICALS', max: 20, subLabel: '20', colWidth: 'w-[105px] min-w-[105px]' },
-        { key: 'writtenExam' as const, label: selectedExam, max: 80, subLabel: '80', colWidth: 'w-[105px] min-w-[105px]' },
-      ];
+    if (selectedExam === 'SA-1' || selectedExam === 'SA-2') {
+      return getDefaultSubjectComponents(activeInternalSubject, selectedExam).map(
+        (comp) => ({
+          key: comp.key,
+          label: comp.label.toUpperCase(),
+          max: comp.maxMarks,
+          subLabel: String(comp.maxMarks),
+          colWidth:
+            comp.label.length > 14
+              ? 'w-[130px] min-w-[130px]'
+              : 'w-[105px] min-w-[105px]',
+          linkedExamId: comp.linkedExamId,
+          isMainExam: comp.isMainExam,
+        })
+      );
     }
-    return [
-      { key: 'penPaper' as const, label: 'PEN PAPER TEST', max: 5, subLabel: '5', colWidth: 'w-[110px] min-w-[110px]' },
-      { key: 'multipleAssessment' as const, label: 'MULTIPLE ASSESSMENTS', max: 5, subLabel: '5', colWidth: 'w-[130px] min-w-[130px]' },
-      { key: 'subjectEnrichment' as const, label: 'SUBJECT ENRICHMENT', max: 5, subLabel: '5', colWidth: 'w-[130px] min-w-[130px]' },
-      { key: 'portfolio' as const, label: 'PORTFOLIO', max: 5, subLabel: '5', colWidth: 'w-[95px] min-w-[95px]' },
-      { key: 'writtenExam' as const, label: selectedExam, max: 80, subLabel: '80', colWidth: 'w-[92px] min-w-[92px]' },
-    ];
-  }, [isC9HindiActive, isCsActive, selectedExam]);
+    return [];
+  }, [activeSubConfig, activeInternalSubject, selectedExam]);
 
   const internalFieldKeys = useMemo(
     () => internalFields.map((f) => f.key as string),
     [internalFields]
   );
+
+  const isSubjectWiseTable = selectedSubject !== 'all' && internalFields.length > 1;
+  const activeGridColumnKeys = useMemo(() => {
+    if (isSubjectWiseTable) {
+      return internalFieldKeys;
+    }
+    return displayedSubjects.map((s) => s.name);
+  }, [isSubjectWiseTable, internalFieldKeys, displayedSubjects]);
 
   // Excel & PDF Export Hub selection Matrix
   const [exportExam, setExportExam] = useState<string>('SA-1');
@@ -936,6 +776,8 @@ export default function SchoolErpPage() {
   });
   // Tracks whether user is in character-by-character edit mode vs full-cell selection mode
   const [isCellEditing, setIsCellEditing] = useState<boolean>(false);
+  // Arms Excel-style overwrite on first keystroke after clicking or navigating into a cell
+  const replaceOnNextKeyRef = useRef<boolean>(true);
 
   // Internal assessment breakdown editor modal for SA-1 and SA-2
   const [internalModalData, setInternalModalData] = useState<{
@@ -953,7 +795,12 @@ export default function SchoolErpPage() {
     // Group rapid keystrokes within 900ms into a single undo snapshot for 60fps typing
     if (now - lastUndoTimeRef.current < 900) return;
     lastUndoTimeRef.current = now;
-    const cloned = currentStudents.map((s) => ({ ...s, marks: { ...s.marks } }));
+    const cloned = currentStudents.map((s) => ({
+      ...s,
+      marks: { ...s.marks },
+      breakdowns: s.breakdowns ? { ...s.breakdowns } : undefined,
+      subjectRemarks: s.subjectRemarks ? { ...s.subjectRemarks } : undefined,
+    }));
     setUndoStack((prev) => [...prev.slice(-25), cloned]);
     setRedoStack([]);
   }, [setUndoStack, setRedoStack]);
@@ -962,30 +809,6 @@ export default function SchoolErpPage() {
     setQuickToast(message);
     setTimeout(() => setQuickToast(null), 3000);
   }, []);
-
-  const handleUndo = useCallback(() => {
-    if (undoStack.length === 0) {
-      showToast('Nothing to undo');
-      return;
-    }
-    const previous = undoStack[undoStack.length - 1];
-    setUndoStack((prev) => prev.slice(0, -1));
-    setRedoStack((prev) => [...prev, students.map((s) => ({ ...s, marks: { ...s.marks } }))]);
-    setStudents(previous);
-    showToast('Undo change (Ctrl+Z)');
-  }, [undoStack, students, showToast, setUndoStack, setRedoStack, setStudents]);
-
-  const handleRedo = useCallback(() => {
-    if (redoStack.length === 0) {
-      showToast('Nothing to redo');
-      return;
-    }
-    const next = redoStack[redoStack.length - 1];
-    setRedoStack((prev) => prev.slice(0, -1));
-    setUndoStack((prev) => [...prev, students.map((s) => ({ ...s, marks: { ...s.marks } }))]);
-    setStudents(next);
-    showToast('Redo change (Ctrl+Y)');
-  }, [redoStack, students, showToast, setRedoStack, setUndoStack, setStudents]);
 
   // Google Apps Script Sync state
   const [gasUrl, setGasUrl] = useState<string>(() => {
@@ -1008,15 +831,39 @@ export default function SchoolErpPage() {
   const autoSyncTimerRef = useRef<NodeJS.Timeout | null>(null);
   const studentsRef = useRef<StudentReportRow[]>(students);
   const selectedExamRef = useRef<string>(selectedExam);
+  const examConfigsRef = useRef<Record<string, ExamConfig>>(examConfigs);
 
   useEffect(() => {
     studentsRef.current = students;
     selectedExamRef.current = selectedExam;
-  }, [students, selectedExam]);
+    examConfigsRef.current = examConfigs;
+  }, [students, selectedExam, examConfigs]);
 
-  // Push latest data to Google Sheet via Google Apps Script Web App without re-triggering on keystrokes
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+    try {
+      localStorage.setItem('sva_exam_configs_v1', JSON.stringify(examConfigs));
+    } catch {}
+  }, [examConfigs]);
+
+  const syncStoresForExam = useCallback((examId: string, roster: StudentReportRow[]) => {
+    const marksMap: Record<string, Record<string, number | 'AB' | null>> = {};
+    const bdMap: Record<string, Record<string, SubjectBreakdown>> = {};
+    roster.forEach((s) => {
+      marksMap[s.id] = { ...s.marks };
+      if (s.breakdowns) {
+        bdMap[s.id] = { ...s.breakdowns };
+      }
+    });
+    setExamMarksStore((prev) => ({ ...prev, [examId]: marksMap }));
+    setExamBreakdownsStore((prev) => ({ ...prev, [examId]: bdMap }));
+  }, []);
+
+  // Push latest data to Google Sheet via Google Apps Script Web App
   const pushToLockedSheet = useCallback(async (isSilent = true) => {
     try {
+      setSheetsSyncStatus('syncing');
       const res = await GasSyncService.pushData(studentsRef.current, selectedExamRef.current);
       if (res.success) {
         setSheetsSyncStatus('synced');
@@ -1034,6 +881,200 @@ export default function SchoolErpPage() {
       setSheetsSyncStatus('error');
     }
   }, [showToast]);
+
+  // Pull fresh data directly from Google Sheets for a specific exam
+  const pullFromLockedSheet = useCallback(
+    async (examName: string, isSilent = true) => {
+      try {
+        setSheetsSyncStatus('syncing');
+        const res = await GasSyncService.pullData(undefined, examName);
+        if (res.success) {
+          if (Array.isArray(res.students) && res.students.length > 0) {
+            const targetCfg =
+              examConfigsRef.current[examName] ||
+              INITIAL_EXAM_CONFIGS[examName] ||
+              INITIAL_EXAM_CONFIGS['SA-1'];
+
+            setStudents((prevRoster) => {
+              const merged = mergePulledStudentsWithRoster(
+                prevRoster,
+                res.students!,
+                targetCfg
+              );
+              // Update stores for this exam
+              const marksMap: Record<string, Record<string, number | 'AB' | null>> = {};
+              const bdMap: Record<string, Record<string, SubjectBreakdown>> = {};
+              merged.forEach((s) => {
+                marksMap[s.id] = { ...s.marks };
+                if (s.breakdowns) {
+                  bdMap[s.id] = { ...s.breakdowns };
+                }
+              });
+              setExamMarksStore((prev) => ({ ...prev, [examName]: marksMap }));
+              setExamBreakdownsStore((prev) => ({ ...prev, [examName]: bdMap }));
+
+              if (selectedExamRef.current === examName) {
+                studentsRef.current = merged;
+                return merged;
+              }
+              return prevRoster;
+            });
+
+            if (!isSilent) {
+              showToast(`Pulled fresh ${examName} data from Google Sheets (${res.students.length} students)`);
+            }
+          }
+          setSheetsSyncStatus('synced');
+          setLastSyncTime(
+            new Date().toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })
+          );
+        } else {
+          setSheetsSyncStatus('error');
+          if (!isSilent && res.error) {
+            showToast(`Sync warning: ${res.error}`);
+          }
+        }
+      } catch (err: any) {
+        if (!isSilent) {
+          console.warn('Apps Script pull failed:', err);
+        }
+        setSheetsSyncStatus('error');
+      }
+    },
+    [showToast]
+  );
+
+  // Debounced push to Google Sheet via Google Apps Script Web App (only triggered when user edits data)
+  const triggerAutoSync = useCallback((studentsToSync: StudentReportRow[]) => {
+    if (autoSyncTimerRef.current) {
+      clearTimeout(autoSyncTimerRef.current);
+    }
+
+    autoSyncTimerRef.current = setTimeout(async () => {
+      try {
+        setSheetsSyncStatus('syncing');
+        const res = await GasSyncService.pushData(studentsToSync, selectedExamRef.current);
+        if (res.success) {
+          setSheetsSyncStatus('synced');
+          setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
+        } else if (res.error?.includes('not configured')) {
+          setSheetsSyncStatus('idle');
+        } else {
+          setSheetsSyncStatus('error');
+        }
+      } catch {
+        setSheetsSyncStatus('error');
+      }
+    }, 1200);
+  }, []);
+
+  const handleUndo = useCallback(() => {
+    if (undoStack.length === 0) {
+      showToast('Nothing to undo');
+      return;
+    }
+    const previous = undoStack[undoStack.length - 1];
+    setUndoStack((prev) => prev.slice(0, -1));
+    setRedoStack((prev) => [
+      ...prev,
+      students.map((s) => ({
+        ...s,
+        marks: { ...s.marks },
+        breakdowns: s.breakdowns ? { ...s.breakdowns } : undefined,
+        subjectRemarks: s.subjectRemarks ? { ...s.subjectRemarks } : undefined,
+      })),
+    ]);
+    setStudents(previous);
+    syncStoresForExam(selectedExamRef.current, previous);
+    triggerAutoSync(previous);
+    showToast('Undo change (Ctrl+Z)');
+  }, [undoStack, students, showToast, syncStoresForExam, triggerAutoSync]);
+
+  const handleRedo = useCallback(() => {
+    if (redoStack.length === 0) {
+      showToast('Nothing to redo');
+      return;
+    }
+    const next = redoStack[redoStack.length - 1];
+    setRedoStack((prev) => prev.slice(0, -1));
+    setUndoStack((prev) => [
+      ...prev,
+      students.map((s) => ({
+        ...s,
+        marks: { ...s.marks },
+        breakdowns: s.breakdowns ? { ...s.breakdowns } : undefined,
+        subjectRemarks: s.subjectRemarks ? { ...s.subjectRemarks } : undefined,
+      })),
+    ]);
+    setStudents(next);
+    syncStoresForExam(selectedExamRef.current, next);
+    triggerAutoSync(next);
+    showToast('Redo change (Ctrl+Y)');
+  }, [redoStack, students, showToast, syncStoresForExam, triggerAutoSync]);
+
+  const handleExamChange = useCallback(
+    (newExam: string) => {
+      // 1. Save current exam's marks and breakdowns
+      syncStoresForExam(selectedExam, students);
+
+      // 2. Load cached marks and breakdowns for newExam immediately
+      const targetMarks = examMarksStore[newExam];
+      const targetBds = examBreakdownsStore[newExam];
+      const targetCfg =
+        examConfigs[newExam] || INITIAL_EXAM_CONFIGS[newExam] || INITIAL_EXAM_CONFIGS['SA-1'];
+
+      setStudents((prev) =>
+        prev.map((s) => {
+          const m = targetMarks?.[s.id] ? { ...targetMarks[s.id] } : { ...s.marks };
+          const bds: Record<string, SubjectBreakdown> = targetBds?.[s.id]
+            ? { ...targetBds[s.id] }
+            : {};
+          const effCfg = getEffectiveExamConfigForClass(targetCfg, s.section);
+          effCfg.subjects.forEach((sub) => {
+            if (!bds[sub.name]) {
+              const synced = syncBreakdownWithTotal(
+                m[sub.name] ?? null,
+                sub.name,
+                s.section,
+                sub.components
+              );
+              if (synced) {
+                bds[sub.name] = synced;
+              }
+            }
+          });
+          return {
+            ...s,
+            marks: m,
+            breakdowns: bds,
+          };
+        })
+      );
+
+      selectedExamRef.current = newExam;
+      setSelectedExam(newExam);
+      setSelectedRange(null);
+      setIsSelecting(false);
+      showToast(`Switched ledger to ${newExam}`);
+
+      // 3. Pull fresh data for newExam from Google Sheets in the background
+      pullFromLockedSheet(newExam, true);
+    },
+    [
+      selectedExam,
+      students,
+      examMarksStore,
+      examBreakdownsStore,
+      examConfigs,
+      syncStoresForExam,
+      showToast,
+      pullFromLockedSheet,
+    ]
+  );
 
   const handleSaveAndTestGasUrl = useCallback(async (urlToSave: string) => {
     const trimmed = urlToSave.trim();
@@ -1064,34 +1105,20 @@ export default function SchoolErpPage() {
     }
   }, [showToast]);
 
-  // Debounced push to Google Sheet via Google Apps Script Web App (zero synchronous state updates during typing)
-  const triggerAutoSync = useCallback((studentsToSync: StudentReportRow[]) => {
-    if (autoSyncTimerRef.current) {
-      clearTimeout(autoSyncTimerRef.current);
-    }
-
-    autoSyncTimerRef.current = setTimeout(async () => {
-      try {
-        setSheetsSyncStatus('syncing');
-        const res = await GasSyncService.pushData(studentsToSync, selectedExamRef.current);
-        if (res.success) {
-          setSheetsSyncStatus('synced');
-          setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-        } else if (res.error?.includes('not configured')) {
-          setSheetsSyncStatus('idle');
-        } else {
-          setSheetsSyncStatus('error');
-        }
-      } catch {
-        setSheetsSyncStatus('error');
-      }
-    }, 1800);
-  }, []);
-
   const handleSaveInternalBreakdown = useCallback((studentId: string, subjectName: string, updatedBd: SubjectBreakdown) => {
     const targetStudent = students.find((s) => s.id === studentId);
     if (!targetStudent) return;
-    const newTotal = computeSubjectTotalFromBreakdown(subjectName, targetStudent.section, updatedBd);
+    pushUndoSnapshot(students);
+    const studentExamCfg = getEffectiveExamConfigForClass(baseExamConfig, targetStudent.section);
+    const subConfig = studentExamCfg.subjects.find(
+      (s) => s.name.toLowerCase() === subjectName.toLowerCase()
+    );
+    const newTotal = computeSubjectTotalFromBreakdown(
+      subjectName,
+      targetStudent.section,
+      updatedBd,
+      subConfig?.components
+    );
 
     const updatedStudents = students.map((s) => {
       if (s.id !== studentId) return s;
@@ -1110,29 +1137,22 @@ export default function SchoolErpPage() {
     });
 
     setStudents(updatedStudents);
+    syncStoresForExam(selectedExam, updatedStudents);
     triggerAutoSync(updatedStudents);
-    showToast(`Updated ${subjectName} internal marks for ${targetStudent.name} (Total: ${newTotal ?? 0}/100)`);
+    showToast(`Updated ${subjectName} internal marks for ${targetStudent.name} (Total: ${newTotal ?? 0}/${subConfig?.maxMarks ?? 100})`);
     setInternalModalData(null);
-  }, [students, triggerAutoSync, showToast, setStudents, setInternalModalData]);
+  }, [students, baseExamConfig, selectedExam, pushUndoSnapshot, syncStoresForExam, triggerAutoSync, showToast, setInternalModalData]);
 
-  // Push-only Sync Loop: automatically pushes app data to Google Sheet every 30 seconds
+  // Pull fresh data directly from Google Sheets on every visit (mount)
   useEffect(() => {
-    const initialTimer = setTimeout(() => {
-      pushToLockedSheet(true);
-    }, 2000);
-
-    const pollInterval = setInterval(() => {
-      pushToLockedSheet(true);
-    }, 30000);
+    pullFromLockedSheet(selectedExamRef.current, true);
 
     return () => {
-      clearTimeout(initialTimer);
-      clearInterval(pollInterval);
       if (autoSyncTimerRef.current) {
         clearTimeout(autoSyncTimerRef.current);
       }
     };
-  }, [pushToLockedSheet]);
+  }, [pullFromLockedSheet]);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cellInputRefs = useRef<{ [key: string]: HTMLInputElement | null }>({});
@@ -1180,17 +1200,19 @@ export default function SchoolErpPage() {
     () =>
       computeClassResults(
         students,
-        activeSubjects,
-        currentExamConfig.totalFormula,
-        currentExamConfig.customFormula,
-        currentExamConfig.resultCriteria
+        baseExamConfig.subjects,
+        baseExamConfig.totalFormula,
+        baseExamConfig.customFormula,
+        baseExamConfig.resultCriteria,
+        baseExamConfig.classOverrides
       ),
     [
       students,
-      activeSubjects,
-      currentExamConfig.totalFormula,
-      currentExamConfig.customFormula,
-      currentExamConfig.resultCriteria,
+      baseExamConfig.subjects,
+      baseExamConfig.totalFormula,
+      baseExamConfig.customFormula,
+      baseExamConfig.resultCriteria,
+      baseExamConfig.classOverrides,
     ]
   );
 
@@ -1206,7 +1228,7 @@ export default function SchoolErpPage() {
   const handleCopyStudentSummary = (student: StudentReportRow) => {
     const res = computedResultsMap.get(student.id);
     const marksStr = SVA_SUBJECTS.map((s) => `${s.name}: ${student.marks[s.name] ?? 'AB'}`).join(', ');
-    const summary = `${student.name} (Roll ${student.rollNo}, ${student.section}): ${marksStr} | Total: ${res?.totalObtained ?? 0}/700 (${res?.percentage.toFixed(1) ?? 0}%) | Grade: ${res?.grade ?? '-'} | Rank: ${res?.rank ? '#' + res.rank : '-'}`;
+    const summary = `${student.name} (Roll ${student.rollNo}, ${student.section}): ${marksStr} | Total: ${res?.totalObtained ?? 0}/${res?.totalMax ?? 700} (${res?.percentage.toFixed(2) ?? '0.00'}%) | Grade: ${res?.grade ?? '-'} | Rank: ${res?.rank ? '#' + res.rank : '-'}`;
     navigator.clipboard.writeText(summary);
     showToast(`Copied details for ${student.name}`);
     setContextMenu(null);
@@ -1271,7 +1293,10 @@ export default function SchoolErpPage() {
       } else if (sortField === 'rank') {
         valA = resA?.rank ?? 999;
         valB = resB?.rank ?? 999;
-      } else if (SVA_SUBJECTS.some((s) => s.name === sortField)) {
+      } else if (
+        activeSubjects.some((s) => s.name === sortField) ||
+        SVA_SUBJECTS.some((s) => s.name === sortField)
+      ) {
         const markA = a.marks[sortField];
         const markB = b.marks[sortField];
         valA = markA === 'AB' ? -1 : typeof markA === 'number' ? markA : -2;
@@ -1312,17 +1337,37 @@ export default function SchoolErpPage() {
   const rangeStats = useMemo(() => {
     if (!normalizedRange || normalizedRange.cellCount <= 1) return null;
     const { minRow, maxRow, minCol, maxCol, cellCount } = normalizedRange;
-    const subjectKeys = activeSubjects.map((s) => s.name);
     let sum = 0;
     let count = 0;
-    let min = 100;
-    let max = 0;
+    let min = Infinity;
+    let max = -Infinity;
 
     for (let r = minRow; r <= maxRow; r++) {
       const student = processedStudents[r];
       if (!student) continue;
       for (let c = minCol; c <= maxCol; c++) {
-        const val = student.marks[subjectKeys[c]];
+        const colKey = activeGridColumnKeys[c];
+        if (!colKey) continue;
+        let val: number | 'AB' | null | undefined;
+        if (isSubjectWiseTable) {
+          const bd =
+            student.breakdowns?.[selectedSubject] ||
+            generateDefaultBreakdown(
+              student.marks[selectedSubject],
+              selectedSubject,
+              student.section
+            );
+          val = bd[colKey];
+          if (colKey === 'internalMarks' && val === undefined) {
+            const pp = typeof bd.penPaper === 'number' ? bd.penPaper : 0;
+            const ma = typeof bd.multipleAssessment === 'number' ? bd.multipleAssessment : 0;
+            const se = typeof bd.subjectEnrichment === 'number' ? bd.subjectEnrichment : 0;
+            const pf = typeof bd.portfolio === 'number' ? bd.portfolio : 0;
+            val = pp + ma + se + pf;
+          }
+        } else {
+          val = student.marks[colKey];
+        }
         if (typeof val === 'number') {
           sum += val;
           count++;
@@ -1336,36 +1381,85 @@ export default function SchoolErpPage() {
       cellCount,
       numericCount: count,
       sum,
-      avg: count > 0 ? (sum / count).toFixed(1) : '0.0',
-      min: count > 0 ? min : 0,
-      max: count > 0 ? max : 0,
+      avg: count > 0 ? (sum / count).toFixed(2) : '0.00',
+      min: count > 0 && min !== Infinity ? min : 0,
+      max: count > 0 && max !== -Infinity ? max : 0,
     };
-  }, [normalizedRange, processedStudents, activeSubjects]);
+  }, [normalizedRange, processedStudents, isSubjectWiseTable, activeGridColumnKeys, selectedSubject]);
 
-  // Clear all cells in selected range
+  // Clear all cells in selected range and synchronize breakdowns + stores
   const clearSelectedRange = () => {
     if (!normalizedRange) return;
     pushUndoSnapshot(students);
-    const { minRow, maxRow, minCol, maxCol, cellCount } = normalizedRange;
-    const subjectKeys = activeSubjects.map((s) => s.name);
+    const { minRow, maxRow, minCol, maxCol } = normalizedRange;
     const targetIds = processedStudents.slice(minRow, maxRow + 1).map((s) => s.id);
 
-    setStudents((prev) => {
-      const updated = [...prev];
-      targetIds.forEach((targetId) => {
-        const idx = updated.findIndex((s) => s.id === targetId);
-        if (idx === -1) return;
-        const newMarks = { ...updated[idx].marks };
+    let clearedCount = 0;
+
+    const updated = students.map((st) => {
+      if (!targetIds.includes(st.id)) return st;
+
+      if (isSubjectWiseTable) {
+        const effectiveSub =
+          getEffectiveExamConfigForClass(baseExamConfig, st.section).subjects.find(
+            (sub) => sub.name.toLowerCase() === selectedSubject.toLowerCase()
+          ) || activeSubConfig;
+        const currentBd =
+          st.breakdowns?.[selectedSubject] ||
+          generateDefaultBreakdown(
+            st.marks[selectedSubject],
+            selectedSubject,
+            st.section
+          );
+        const nextBd = { ...currentBd };
         for (let c = minCol; c <= maxCol; c++) {
-          const subName = subjectKeys[c];
-          newMarks[subName] = null;
+          const colField = activeGridColumnKeys[c];
+          if (!colField) continue;
+          delete nextBd[colField];
+          clearedCount++;
         }
-        updated[idx] = { ...updated[idx], marks: newMarks };
-      });
-      return updated;
+        const newTotal = computeSubjectTotalFromBreakdown(
+          selectedSubject,
+          st.section,
+          nextBd,
+          effectiveSub?.components
+        );
+        return {
+          ...st,
+          marks: {
+            ...st.marks,
+            [selectedSubject]: newTotal,
+          },
+          breakdowns: {
+            ...(st.breakdowns || {}),
+            [selectedSubject]: nextBd,
+          },
+        };
+      } else {
+        const newMarks = { ...st.marks };
+        const newBreakdowns = { ...(st.breakdowns || {}) };
+        for (let c = minCol; c <= maxCol; c++) {
+          const subName = activeGridColumnKeys[c];
+          if (!subName) continue;
+          newMarks[subName] = null;
+          delete newBreakdowns[subName];
+          clearedCount++;
+        }
+        return {
+          ...st,
+          marks: newMarks,
+          breakdowns: newBreakdowns,
+        };
+      }
     });
 
-    showToast(`Cleared ${cellCount} cell${cellCount > 1 ? 's' : ''}`);
+    setStudents(updated);
+    syncStoresForExam(selectedExam, updated);
+    triggerAutoSync(updated);
+
+    if (clearedCount > 0) {
+      showToast(`Cleared ${clearedCount} cell${clearedCount > 1 ? 's' : ''}`);
+    }
   };
 
 
@@ -1482,7 +1576,7 @@ export default function SchoolErpPage() {
         ...activeSubjects.map((sub) => s.marks[sub.name] ?? 'AB'),
         res?.totalObtained ?? 0,
         res?.totalMax ?? 0,
-        res ? `${res.percentage.toFixed(1)}%` : '0%',
+        res ? `${res.percentage.toFixed(2)}%` : '0.00%',
         res?.grade ?? '-',
         res?.rank ? `#${res.rank}` : '-',
         res?.status ?? 'PASS',
@@ -1621,7 +1715,7 @@ export default function SchoolErpPage() {
         ...activeSubjects.map((sub) => s.marks[sub.name] ?? 'AB'),
         res?.totalObtained ?? 0,
         res?.totalMax ?? 0,
-        res ? `${res.percentage.toFixed(1)}%` : '0%',
+        res ? `${res.percentage.toFixed(2)}%` : '0.00%',
         res?.grade ?? '-',
         res?.rank ? `#${res.rank}` : '-',
         res?.status ?? 'PASS',
@@ -1681,7 +1775,9 @@ export default function SchoolErpPage() {
       targetStudents,
       targetExamConfig.subjects,
       targetExamConfig.totalFormula,
-      targetExamConfig.customFormula
+      targetExamConfig.customFormula,
+      targetExamConfig.resultCriteria,
+      targetExamConfig.classOverrides
     );
 
     const classDisplayTitle =
@@ -1718,7 +1814,7 @@ export default function SchoolErpPage() {
           ...targetExamConfig.subjects.map((sub) => marks[sub.name] ?? 'AB'),
           res?.totalObtained ?? 0,
           res?.totalMax ?? 0,
-          res ? `${res.percentage.toFixed(1)}%` : '0%',
+          res ? `${res.percentage.toFixed(2)}%` : '0.00%',
           res?.grade ?? '-',
           res?.rank ? `#${res.rank}` : '-',
           res?.status ?? 'PASS',
@@ -1866,7 +1962,19 @@ export default function SchoolErpPage() {
       if (focusedCell) {
         const student = processedStudents[focusedCell.rowIdx];
         if (student) {
-          const val = student.marks[focusedCell.colKey] ?? '';
+          let val: any = '';
+          if (isSubjectWiseTable) {
+            const bd =
+              student.breakdowns?.[selectedSubject] ||
+              generateDefaultBreakdown(
+                student.marks[selectedSubject],
+                selectedSubject,
+                student.section
+              );
+            val = bd[focusedCell.colKey] ?? '';
+          } else {
+            val = student.marks[focusedCell.colKey] ?? '';
+          }
           writeToClipboard(String(val));
           showToast(`Copied ${val || 'empty cell'} to clipboard`);
         }
@@ -1875,16 +1983,29 @@ export default function SchoolErpPage() {
     }
 
     const { minRow, maxRow, minCol, maxCol, cellCount } = normalizedRange;
-    const subjectKeys = SVA_SUBJECTS.map((s) => s.name);
     const lines: string[] = [];
 
     for (let r = minRow; r <= maxRow; r++) {
       const student = processedStudents[r];
       if (!student) continue;
       const rowVals: string[] = [];
+      const bd = isSubjectWiseTable
+        ? student.breakdowns?.[selectedSubject] ||
+          generateDefaultBreakdown(
+            student.marks[selectedSubject],
+            selectedSubject,
+            student.section
+          )
+        : null;
+
       for (let c = minCol; c <= maxCol; c++) {
-        const subName = subjectKeys[c];
-        const val = student.marks[subName];
+        const colKey = activeGridColumnKeys[c];
+        let val: any = '';
+        if (isSubjectWiseTable) {
+          val = bd ? bd[colKey] : '';
+        } else {
+          val = colKey ? student.marks[colKey] : '';
+        }
         rowVals.push(val === null || val === undefined ? '' : String(val));
       }
       lines.push(rowVals.join('\t'));
@@ -2022,8 +2143,8 @@ export default function SchoolErpPage() {
     const failCount = totalCount - passCount;
 
     return {
-      avg: (totalPct / totalCount).toFixed(1),
-      highest: highest.toFixed(1),
+      avg: (totalPct / totalCount).toFixed(2),
+      highest: highest.toFixed(2),
       highestStudent,
       passRate: Math.round((passCount / totalCount) * 100),
       passCount,
@@ -2039,7 +2160,7 @@ export default function SchoolErpPage() {
       SVA_ALL_CLASSES.map((clsName) => {
         const clsStudents = students.filter((s) => s.section === clsName);
         if (clsStudents.length === 0) {
-          return { name: clsName, count: 0, avg: '0.0', highest: '0.0', topper: 'N/A', passRate: 0 };
+          return { name: clsName, count: 0, avg: '0.00', highest: '0.00', topper: 'N/A', passRate: 0 };
         }
 
         let totalPct = 0;
@@ -2061,8 +2182,8 @@ export default function SchoolErpPage() {
         return {
           name: clsName,
           count: clsStudents.length,
-          avg: (totalPct / clsStudents.length).toFixed(1),
-          highest: highest.toFixed(1),
+          avg: (totalPct / clsStudents.length).toFixed(2),
+          highest: highest.toFixed(2),
           topper,
           passRate: Math.round((passCount / clsStudents.length) * 100),
         };
@@ -2084,11 +2205,13 @@ export default function SchoolErpPage() {
     }
   };
 
-  // Update cell mark handler with undo snapshot
+  // Update cell mark handler with undo snapshot and synchronized breakdown
   const handleMarkChange = (studentId: string, subjectName: string, value: string, recordUndo = true) => {
     if (recordUndo) {
       pushUndoSnapshot(students);
     }
+    const subConfig = activeSubjects.find((s) => s.name === subjectName);
+    const maxMark = subConfig?.maxMarks ?? 100;
     const trimmed = value.trim();
     let newMark: number | 'AB' | null = null;
     if (trimmed.toUpperCase() === 'AB' || trimmed.toUpperCase() === 'A') {
@@ -2098,20 +2221,29 @@ export default function SchoolErpPage() {
     } else {
       const parsed = parseFloat(trimmed);
       if (!isNaN(parsed)) {
-        const maxMark = activeSubjects.find((s) => s.name === subjectName)?.maxMarks ?? 100;
         newMark = Math.min(maxMark, Math.max(0, parsed));
       }
     }
 
     const updatedStudents = students.map((s) => {
       if (s.id !== studentId) return s;
-      const nextBreakdowns =
-        selectedExam === 'SA-1' || selectedExam === 'SA-2'
-          ? {
-              ...(s.breakdowns || {}),
-              [subjectName]: generateDefaultBreakdown(newMark, subjectName, s.section),
-            }
-          : s.breakdowns;
+      const effectiveSub =
+        getEffectiveExamConfigForClass(baseExamConfig, s.section).subjects.find(
+          (sub) => sub.name === subjectName
+        ) || subConfig;
+      const nextBd = syncBreakdownWithTotal(
+        newMark,
+        subjectName,
+        s.section,
+        effectiveSub?.components,
+        s.breakdowns?.[subjectName]
+      );
+      const nextBreakdowns = { ...(s.breakdowns || {}) };
+      if (nextBd) {
+        nextBreakdowns[subjectName] = nextBd;
+      } else {
+        delete nextBreakdowns[subjectName];
+      }
       return {
         ...s,
         marks: {
@@ -2123,18 +2255,7 @@ export default function SchoolErpPage() {
     });
 
     setStudents(updatedStudents);
-
-    // Keep active examMarksStore synchronized
-    setExamMarksStore((prev) => ({
-      ...prev,
-      [selectedExam]: {
-        ...(prev[selectedExam] || {}),
-        [studentId]: {
-          ...(prev[selectedExam]?.[studentId] || {}),
-          [subjectName]: newMark,
-        },
-      },
-    }));
+    syncStoresForExam(selectedExam, updatedStudents);
 
     // Automatically synchronize marks to connected Google Sheet
     triggerAutoSync(updatedStudents);
@@ -2144,7 +2265,7 @@ export default function SchoolErpPage() {
     (
       studentId: string,
       subjectName: string,
-      field: keyof SubjectBreakdown,
+      field: string,
       value: string,
       recordUndo = true
     ) => {
@@ -2160,32 +2281,42 @@ export default function SchoolErpPage() {
       } else {
         const num = parseFloat(trimmed);
         if (!isNaN(num)) {
-          const targetSt = students.find((s) => s.id === studentId);
-          const isC9 = isClass9Section(targetSt?.section || '');
-          const isHindi = subjectName.toLowerCase() === 'hindi';
-          let maxVal = 100;
-          if (isC9 && isHindi) {
-            if (field === 'listening') maxVal = 20;
-            else if (field === 'speaking') maxVal = 20;
-            else if (field === 'project') maxVal = 15;
-            else if (field === 'saExam') maxVal = 45;
-          } else {
-            if (field === 'internalMarks') {
-              maxVal = 20;
-            } else if (
-              field === 'penPaper' ||
-              field === 'multipleAssessment' ||
-              field === 'subjectEnrichment' ||
-              field === 'portfolio'
-            ) {
-              maxVal = 5;
-            } else if (field === 'writtenExam') {
-              maxVal = 80;
+          const subConfig = activeSubjects.find(
+            (s) => s.name.toLowerCase() === subjectName.toLowerCase()
+          );
+          const customComp = subConfig?.components?.find((c) => c.key === field);
+          let maxVal = customComp?.maxMarks ?? 100;
+          if (!customComp) {
+            const targetSt = students.find((s) => s.id === studentId);
+            const isC9 = isClass9Section(targetSt?.section || '');
+            const isHindi = subjectName.toLowerCase() === 'hindi';
+            if (isC9 && isHindi) {
+              if (field === 'listening') maxVal = 20;
+              else if (field === 'speaking') maxVal = 20;
+              else if (field === 'project') maxVal = 15;
+              else if (field === 'saExam') maxVal = 45;
+            } else {
+              if (field === 'internalMarks') {
+                maxVal = 20;
+              } else if (
+                field === 'penPaper' ||
+                field === 'multipleAssessment' ||
+                field === 'subjectEnrichment' ||
+                field === 'portfolio'
+              ) {
+                maxVal = 5;
+              } else if (field === 'writtenExam') {
+                maxVal = 80;
+              }
             }
           }
           parsedVal = Math.min(maxVal, Math.max(0, num));
         }
       }
+
+      const subConfig = activeSubjects.find(
+        (s) => s.name.toLowerCase() === subjectName.toLowerCase()
+      );
 
       const updatedStudents = students.map((s) => {
         if (s.id !== studentId) return s;
@@ -2234,7 +2365,7 @@ export default function SchoolErpPage() {
           const ma = nextBd.multipleAssessment;
           const se = nextBd.subjectEnrichment;
           const pf = nextBd.portfolio;
-          if (pp === 'AB' || ma === 'AB' || se === 'AB' || pf === 'AB') {
+          if (pp === 'AB' && ma === 'AB' && se === 'AB' && pf === 'AB') {
             nextBd.internalMarks = 'AB';
           } else {
             nextBd.internalMarks =
@@ -2244,7 +2375,16 @@ export default function SchoolErpPage() {
               (typeof pf === 'number' ? pf : 0);
           }
         }
-        const newTotal = computeSubjectTotalFromBreakdown(subjectName, s.section, nextBd);
+        const effectiveSub =
+          getEffectiveExamConfigForClass(baseExamConfig, s.section).subjects.find(
+            (sub) => sub.name.toLowerCase() === subjectName.toLowerCase()
+          ) || subConfig;
+        const newTotal = computeSubjectTotalFromBreakdown(
+          subjectName,
+          s.section,
+          nextBd,
+          effectiveSub?.components
+        );
         return {
           ...s,
           marks: {
@@ -2259,40 +2399,186 @@ export default function SchoolErpPage() {
       });
 
       setStudents(updatedStudents);
-
-      // Synchronize active exam store
-      setExamMarksStore((prev) => {
-        const currentMarks = { ...(prev[selectedExam] || {}) };
-        const st = updatedStudents.find((s) => s.id === studentId);
-        if (st) {
-          currentMarks[studentId] = { ...(st.marks || {}) };
-        }
-        return {
-          ...prev,
-          [selectedExam]: currentMarks,
-        };
-      });
-
+      syncStoresForExam(selectedExam, updatedStudents);
       triggerAutoSync(updatedStudents);
     },
-    [students, selectedExam, triggerAutoSync, pushUndoSnapshot, setStudents, setExamMarksStore]
+    [students, activeSubjects, baseExamConfig, selectedExam, triggerAutoSync, pushUndoSnapshot, setStudents, syncStoresForExam]
   );
 
+  // Ensure focused spreadsheet/remark cell stays clear of sticky top navbar and sticky left columns
+  const ensureCellVisible = useCallback((inputEl: HTMLElement | null) => {
+    if (!inputEl || typeof window === 'undefined') return;
+    const cellEl = (inputEl.closest('td') as HTMLElement | null) || inputEl;
+    const gridContainer = cellEl.closest('.excel-grid-container') as HTMLElement | null;
+
+    if (gridContainer && gridContainer.scrollWidth > gridContainer.clientWidth) {
+      const containerRect = gridContainer.getBoundingClientRect();
+      const cellRect = cellEl.getBoundingClientRect();
+      const frozenWidth = 238; // 48px Roll + 190px Student Name
+      const minVisibleLeft = containerRect.left + frozenWidth + 4;
+      const maxVisibleRight = containerRect.right - 8;
+      if (cellRect.left < minVisibleLeft) {
+        gridContainer.scrollLeft -= minVisibleLeft - cellRect.left;
+      } else if (cellRect.right > maxVisibleRight) {
+        gridContainer.scrollLeft += cellRect.right - maxVisibleRight;
+      }
+    }
+
+    // Automatically keep active cell within window viewport when navigating via keyboard
+    const updatedRect = cellEl.getBoundingClientRect();
+    const headerEl = document.querySelector('header');
+    const stickyTopOffset = (headerEl ? headerEl.getBoundingClientRect().height : 65) + 12;
+    const bottomOffset = 20;
+
+    if (updatedRect.top < stickyTopOffset) {
+      window.scrollBy({ top: updatedRect.top - stickyTopOffset, behavior: 'auto' });
+    } else if (updatedRect.bottom > window.innerHeight - bottomOffset) {
+      window.scrollBy({ top: updatedRect.bottom - (window.innerHeight - bottomOffset), behavior: 'auto' });
+    }
+  }, []);
+
+  const focusInternalCell = (targetRow: number, targetField: string) => {
+    const colIdx = internalFieldKeys.indexOf(targetField);
+    isSelectingRef.current = false;
+    setIsSelecting(false);
+    replaceOnNextKeyRef.current = true;
+    setIsCellEditing(false);
+    setFocusedCell({ rowIdx: targetRow, colKey: targetField });
+    if (colIdx !== -1) {
+      setSelectedRange({
+        start: { rowIdx: targetRow, colIdx },
+        end: { rowIdx: targetRow, colIdx },
+      });
+    }
+    if (paginatedStudents[targetRow]) {
+      setSelectedStudentId(paginatedStudents[targetRow].id);
+    }
+    const targetInput = cellInputRefs.current[`${targetRow}-${targetField}`];
+    if (targetInput) {
+      targetInput.focus({ preventScroll: true });
+      ensureCellVisible(targetInput);
+    }
+  };
+
   const handleInternalKeyDown = (
-    e: React.KeyboardEvent,
+    e: React.KeyboardEvent<HTMLInputElement>,
     rowIdx: number,
     colField: string,
-    fieldList: string[]
+    fieldList: string[],
+    studentId: string
   ) => {
     const colIdx = fieldList.indexOf(colField);
 
+    // Undo / Redo: Ctrl+Z / Ctrl+Y
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'z' || e.key === 'Z')) {
+      e.preventDefault();
+      if (e.shiftKey) {
+        handleRedo();
+      } else {
+        handleUndo();
+      }
+      return;
+    }
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'y' || e.key === 'Y')) {
+      e.preventDefault();
+      handleRedo();
+      return;
+    }
+
+    // Delete or Backspace Key: Clear entire selected range when multiple cells are selected, or clear single cell on initial press
+    if (e.key === 'Delete' || e.key === 'Backspace') {
+      if (normalizedRange && normalizedRange.cellCount > 1) {
+        e.preventDefault();
+        clearSelectedRange();
+        setIsCellEditing(false);
+        replaceOnNextKeyRef.current = true;
+        return;
+      }
+      if (replaceOnNextKeyRef.current) {
+        e.preventDefault();
+        replaceOnNextKeyRef.current = false;
+        setIsCellEditing(true);
+        e.currentTarget.value = '';
+        handleInternalCellChange(studentId, selectedSubject, colField, '');
+        return;
+      }
+    }
+
+    // Ctrl+C / Cmd+C: Copy selected range as TSV
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'c' || e.key === 'C')) {
+      e.preventDefault();
+      copySelectedRange();
+      return;
+    }
+
+    // Ctrl+A / Cmd+A: Select all subject cells
+    if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
+      e.preventDefault();
+      setIsCellEditing(false);
+      replaceOnNextKeyRef.current = true;
+      setSelectedRange({
+        start: { rowIdx: 0, colIdx: 0 },
+        end: { rowIdx: paginatedStudents.length - 1, colIdx: fieldList.length - 1 },
+      });
+      showToast(`Selected all ${paginatedStudents.length * fieldList.length} cells`);
+      return;
+    }
+
+    // Escape: Collapse Range Selection to current cell & exit editing
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      setIsCellEditing(false);
+      replaceOnNextKeyRef.current = true;
+      setSelectedRange({
+        start: { rowIdx, colIdx },
+        end: { rowIdx, colIdx },
+      });
+      return;
+    }
+
+    if (e.key === 'F2') {
+      e.preventDefault();
+      replaceOnNextKeyRef.current = false;
+      setIsCellEditing(true);
+      const inputEl = e.currentTarget;
+      const len = inputEl.value.length;
+      inputEl.setSelectionRange(len, len);
+      return;
+    }
+
+    // Shift + Arrow Keys: Keyboard Range Selection
+    if (e.shiftKey && ['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'].includes(e.key)) {
+      e.preventDefault();
+      const currentStart = selectedRange ? selectedRange.start : { rowIdx, colIdx };
+      const currentEnd = selectedRange ? selectedRange.end : { rowIdx, colIdx };
+      let newEndRow = currentEnd.rowIdx;
+      let newEndCol = currentEnd.colIdx;
+
+      if (e.key === 'ArrowUp') newEndRow = Math.max(0, newEndRow - 1);
+      if (e.key === 'ArrowDown') newEndRow = Math.min(paginatedStudents.length - 1, newEndRow + 1);
+      if (e.key === 'ArrowLeft') newEndCol = Math.max(0, newEndCol - 1);
+      if (e.key === 'ArrowRight') newEndCol = Math.min(fieldList.length - 1, newEndCol + 1);
+
+      setSelectedRange({
+        start: currentStart,
+        end: { rowIdx: newEndRow, colIdx: newEndCol },
+      });
+      return;
+    }
+
     if (e.key === 'Enter') {
       e.preventDefault();
-      const nextRow = e.shiftKey ? rowIdx - 1 : rowIdx + 1;
-      if (nextRow >= 0 && nextRow < paginatedStudents.length) {
-        const targetInput = cellInputRefs.current[`${nextRow}-${colField}`];
-        if (targetInput) {
-          targetInput.focus();
+      if (e.shiftKey) {
+        if (rowIdx > 0) {
+          focusInternalCell(rowIdx - 1, colField);
+        } else if (colIdx > 0 && paginatedStudents.length > 0) {
+          focusInternalCell(paginatedStudents.length - 1, fieldList[colIdx - 1]);
+        }
+      } else {
+        if (rowIdx < paginatedStudents.length - 1) {
+          focusInternalCell(rowIdx + 1, colField);
+        } else if (colIdx < fieldList.length - 1 && paginatedStudents.length > 0) {
+          focusInternalCell(0, fieldList[colIdx + 1]);
         }
       }
       return;
@@ -2302,31 +2588,15 @@ export default function SchoolErpPage() {
       e.preventDefault();
       if (e.shiftKey) {
         if (colIdx > 0) {
-          const prevField = fieldList[colIdx - 1];
-          const targetInput = cellInputRefs.current[`${rowIdx}-${prevField}`];
-          if (targetInput) {
-            targetInput.focus();
-          }
+          focusInternalCell(rowIdx, fieldList[colIdx - 1]);
         } else if (rowIdx > 0) {
-          const lastField = fieldList[fieldList.length - 1];
-          const targetInput = cellInputRefs.current[`${rowIdx - 1}-${lastField}`];
-          if (targetInput) {
-            targetInput.focus();
-          }
+          focusInternalCell(rowIdx - 1, fieldList[fieldList.length - 1]);
         }
       } else {
         if (colIdx < fieldList.length - 1) {
-          const nextField = fieldList[colIdx + 1];
-          const targetInput = cellInputRefs.current[`${rowIdx}-${nextField}`];
-          if (targetInput) {
-            targetInput.focus();
-          }
+          focusInternalCell(rowIdx, fieldList[colIdx + 1]);
         } else if (rowIdx < paginatedStudents.length - 1) {
-          const firstField = fieldList[0];
-          const targetInput = cellInputRefs.current[`${rowIdx + 1}-${firstField}`];
-          if (targetInput) {
-            targetInput.focus();
-          }
+          focusInternalCell(rowIdx + 1, fieldList[0]);
         }
       }
       return;
@@ -2335,10 +2605,7 @@ export default function SchoolErpPage() {
     if (e.key === 'ArrowDown') {
       e.preventDefault();
       if (rowIdx < paginatedStudents.length - 1) {
-        const targetInput = cellInputRefs.current[`${rowIdx + 1}-${colField}`];
-        if (targetInput) {
-          targetInput.focus();
-        }
+        focusInternalCell(rowIdx + 1, colField);
       }
       return;
     }
@@ -2346,43 +2613,64 @@ export default function SchoolErpPage() {
     if (e.key === 'ArrowUp') {
       e.preventDefault();
       if (rowIdx > 0) {
-        const targetInput = cellInputRefs.current[`${rowIdx - 1}-${colField}`];
-        if (targetInput) {
-          targetInput.focus();
-        }
+        focusInternalCell(rowIdx - 1, colField);
       }
       return;
     }
 
     if (e.key === 'ArrowRight') {
+      e.preventDefault();
       if (colIdx < fieldList.length - 1) {
-        e.preventDefault();
-        const nextField = fieldList[colIdx + 1];
-        const targetInput = cellInputRefs.current[`${rowIdx}-${nextField}`];
-        if (targetInput) {
-          targetInput.focus();
-        }
+        focusInternalCell(rowIdx, fieldList[colIdx + 1]);
+      } else if (rowIdx < paginatedStudents.length - 1) {
+        focusInternalCell(rowIdx + 1, fieldList[0]);
       }
       return;
     }
 
     if (e.key === 'ArrowLeft') {
+      e.preventDefault();
       if (colIdx > 0) {
-        e.preventDefault();
-        const prevField = fieldList[colIdx - 1];
-        const targetInput = cellInputRefs.current[`${rowIdx}-${prevField}`];
-        if (targetInput) {
-          targetInput.focus();
-        }
+        focusInternalCell(rowIdx, fieldList[colIdx - 1]);
+      } else if (rowIdx > 0) {
+        focusInternalCell(rowIdx - 1, fieldList[fieldList.length - 1]);
       }
       return;
     }
+
+    // Single-click & type: overwrite existing cell value on first keystroke
+    if (!e.ctrlKey && !e.metaKey && !e.altKey) {
+      if ((e.key === 'Backspace' || e.key === 'Delete') && replaceOnNextKeyRef.current) {
+        e.preventDefault();
+        replaceOnNextKeyRef.current = false;
+        setIsCellEditing(true);
+        e.currentTarget.value = '';
+        handleInternalCellChange(studentId, selectedSubject, colField, '');
+        return;
+      }
+      if (replaceOnNextKeyRef.current && /^[0-9aAbB.]$/.test(e.key)) {
+        e.preventDefault();
+        replaceOnNextKeyRef.current = false;
+        setIsCellEditing(true);
+        const nextChar = e.key.toUpperCase();
+        e.currentTarget.value = nextChar;
+        try {
+          e.currentTarget.setSelectionRange(nextChar.length, nextChar.length);
+        } catch {}
+        handleInternalCellChange(studentId, selectedSubject, colField, nextChar);
+        return;
+      }
+    }
   };
 
-  // Helper to navigate to cell and select its text for instant replacement typing
+  // Helper to navigate to cell and arm instant replacement typing
   const navigateToCell = (targetRow: number, targetColIdx: number) => {
-    const subjectKeys = SVA_SUBJECTS.map((s) => s.name);
+    const subjectKeys = displayedSubjects.map((s) => s.name);
     const targetCol = subjectKeys[targetColIdx];
+    if (!targetCol) return;
+    isSelectingRef.current = false;
+    setIsSelecting(false);
+    replaceOnNextKeyRef.current = true;
     setFocusedCell({ rowIdx: targetRow, colKey: targetCol });
     setSelectedRange({
       start: { rowIdx: targetRow, colIdx: targetColIdx },
@@ -2394,24 +2682,41 @@ export default function SchoolErpPage() {
     }
     const targetInput = cellInputRefs.current[`${targetRow}-${targetCol}`];
     if (targetInput) {
-      targetInput.focus();
+      targetInput.focus({ preventScroll: true });
+      ensureCellVisible(targetInput);
     }
   };
 
   // Keyboard navigation & Excel Operations inside spreadsheet
   const handleCellKeyDown = (
-    e: React.KeyboardEvent,
+    e: React.KeyboardEvent<HTMLInputElement>,
     rowIdx: number,
     colKey: string,
-    studentId: string
+    studentId: string,
+    isLocked = false
   ) => {
-    const subjectKeys = SVA_SUBJECTS.map((s) => s.name);
+    const subjectKeys = displayedSubjects.map((s) => s.name);
     const currentColIdx = subjectKeys.indexOf(colKey);
+
+    // If cell is locked, block character edits and backspace/delete
+    if (isLocked) {
+      if (
+        !e.ctrlKey &&
+        !e.metaKey &&
+        !e.altKey &&
+        (e.key.length === 1 || e.key === 'Backspace' || e.key === 'Delete')
+      ) {
+        e.preventDefault();
+        showToast(`${colKey} is locked. Double-click to edit assessment breakdown.`);
+        return;
+      }
+    }
 
     // 1. Shift + Arrow Keys: Expand / Shrink Range Selection
     if (e.shiftKey && ['ArrowRight', 'ArrowLeft', 'ArrowDown', 'ArrowUp'].includes(e.key)) {
       e.preventDefault();
       setIsCellEditing(false);
+      replaceOnNextKeyRef.current = true;
       setSelectedRange((prev) => {
         const base = prev || {
           start: { rowIdx, colIdx: currentColIdx },
@@ -2424,6 +2729,12 @@ export default function SchoolErpPage() {
         if (e.key === 'ArrowLeft') newEndCol = Math.max(0, newEndCol - 1);
         if (e.key === 'ArrowDown') newEndRow = Math.min(paginatedStudents.length - 1, newEndRow + 1);
         if (e.key === 'ArrowUp') newEndRow = Math.max(0, newEndRow - 1);
+
+        const endColKey = subjectKeys[newEndCol];
+        const endInput = endColKey ? cellInputRefs.current[`${newEndRow}-${endColKey}`] : null;
+        if (endInput) {
+          ensureCellVisible(endInput);
+        }
 
         return {
           start: base.start,
@@ -2449,15 +2760,28 @@ export default function SchoolErpPage() {
       return;
     }
 
-    // 3. Delete or Backspace Key: Clear entire selected range when multiple cells are selected
+    // 3. Delete or Backspace Key: Clear entire selected range when multiple cells are selected, or clear single cell on initial press
     if (e.key === 'Delete' || e.key === 'Backspace') {
       if (normalizedRange && normalizedRange.cellCount > 1) {
         e.preventDefault();
         clearSelectedRange();
         setIsCellEditing(false);
+        replaceOnNextKeyRef.current = true;
         return;
       }
-      // Single cell: let native backspace/delete clear text naturally in input
+      if (isLocked) {
+        e.preventDefault();
+        showToast(`${colKey} is locked. Double-click to edit assessment breakdown.`);
+        return;
+      }
+      if (replaceOnNextKeyRef.current) {
+        e.preventDefault();
+        replaceOnNextKeyRef.current = false;
+        setIsCellEditing(true);
+        e.currentTarget.value = '';
+        handleMarkChange(studentId, colKey, '');
+        return;
+      }
     }
 
     // 4. Ctrl+C / Cmd+C: Copy selected range as TSV
@@ -2471,6 +2795,7 @@ export default function SchoolErpPage() {
     if ((e.ctrlKey || e.metaKey) && (e.key === 'a' || e.key === 'A')) {
       e.preventDefault();
       setIsCellEditing(false);
+      replaceOnNextKeyRef.current = true;
       setSelectedRange({
         start: { rowIdx: 0, colIdx: 0 },
         end: { rowIdx: paginatedStudents.length - 1, colIdx: subjectKeys.length - 1 },
@@ -2483,6 +2808,7 @@ export default function SchoolErpPage() {
     if (e.key === 'Escape') {
       e.preventDefault();
       setIsCellEditing(false);
+      replaceOnNextKeyRef.current = true;
       setSelectedRange({
         start: { rowIdx, colIdx: currentColIdx },
         end: { rowIdx, colIdx: currentColIdx },
@@ -2493,6 +2819,11 @@ export default function SchoolErpPage() {
     // 7. F2: In-cell text cursor edit mode
     if (e.key === 'F2') {
       e.preventDefault();
+      if (isLocked) {
+        showToast(`${colKey} is locked. Double-click to edit assessment breakdown.`);
+        return;
+      }
+      replaceOnNextKeyRef.current = false;
       setIsCellEditing(true);
       const input = cellInputRefs.current[`${rowIdx}-${colKey}`];
       if (input) {
@@ -2502,13 +2833,21 @@ export default function SchoolErpPage() {
       return;
     }
 
-    // 8. Navigation (Enter, Tab, Arrows) - Moves immediately and selects text in destination cell
+    // 8. Navigation (Enter, Tab, Arrows) - Moves immediately and arms replacement typing
     if (e.key === 'Enter') {
       e.preventDefault();
       if (e.shiftKey) {
-        if (rowIdx > 0) navigateToCell(rowIdx - 1, currentColIdx);
+        if (rowIdx > 0) {
+          navigateToCell(rowIdx - 1, currentColIdx);
+        } else if (currentColIdx > 0 && paginatedStudents.length > 0) {
+          navigateToCell(paginatedStudents.length - 1, currentColIdx - 1);
+        }
       } else {
-        if (rowIdx < paginatedStudents.length - 1) navigateToCell(rowIdx + 1, currentColIdx);
+        if (rowIdx < paginatedStudents.length - 1) {
+          navigateToCell(rowIdx + 1, currentColIdx);
+        } else if (currentColIdx < subjectKeys.length - 1 && paginatedStudents.length > 0) {
+          navigateToCell(0, currentColIdx + 1);
+        }
       }
       return;
     }
@@ -2531,7 +2870,6 @@ export default function SchoolErpPage() {
       return;
     }
 
-    // Arrow navigation (Excel standard: pressing arrow keys moves cell immediately with destination text auto-selected)
     if (e.key === 'ArrowRight') {
       e.preventDefault();
       if (currentColIdx < subjectKeys.length - 1) {
@@ -2564,6 +2902,22 @@ export default function SchoolErpPage() {
       }
       return;
     }
+
+    // 9. Single-click & type: overwrite existing cell value on first keystroke
+    if (!isLocked && !e.ctrlKey && !e.metaKey && !e.altKey) {
+      if (replaceOnNextKeyRef.current && /^[0-9aAbB.]$/.test(e.key)) {
+        e.preventDefault();
+        replaceOnNextKeyRef.current = false;
+        setIsCellEditing(true);
+        const nextChar = e.key.toUpperCase();
+        e.currentTarget.value = nextChar;
+        try {
+          e.currentTarget.setSelectionRange(nextChar.length, nextChar.length);
+        } catch {}
+        handleMarkChange(studentId, colKey, nextChar);
+        return;
+      }
+    }
   };
 
   // Multi-cell paste from Excel / Google Sheets
@@ -2575,57 +2929,138 @@ export default function SchoolErpPage() {
     pushUndoSnapshot(students);
 
     const rows = clipboardData.split(/\r?\n/).filter((r) => r.length > 0);
-    const subjectKeys = SVA_SUBJECTS.map((s) => s.name);
     const targetStartRow = normalizedRange ? normalizedRange.minRow : startRowIdx;
     const targetStartColIdx = normalizedRange
       ? normalizedRange.minCol
-      : subjectKeys.indexOf(startColKey);
+      : activeGridColumnKeys.indexOf(startColKey);
     if (targetStartColIdx === -1) return;
 
     const targetStudentIds = processedStudents.map((s) => s.id);
+    const updated = [...students];
 
-    setStudents((prev) => {
-      const updated = [...prev];
-      rows.forEach((rowStr, rOffset) => {
-        const targetRowIdx = targetStartRow + rOffset;
-        if (targetRowIdx >= targetStudentIds.length) return;
+    rows.forEach((rowStr, rOffset) => {
+      const targetRowIdx = targetStartRow + rOffset;
+      if (targetRowIdx >= targetStudentIds.length) return;
 
-        const targetId = targetStudentIds[targetRowIdx];
-        const studentIndex = updated.findIndex((s) => s.id === targetId);
-        if (studentIndex === -1) return;
+      const targetId = targetStudentIds[targetRowIdx];
+      const studentIndex = updated.findIndex((s) => s.id === targetId);
+      if (studentIndex === -1) return;
 
-        const cells = rowStr.split('\t');
+      const st = updated[studentIndex];
+      const cells = rowStr.split('\t');
+
+      if (isSubjectWiseTable) {
+        const effectiveSub =
+          getEffectiveExamConfigForClass(baseExamConfig, st.section).subjects.find(
+            (sub) => sub.name.toLowerCase() === selectedSubject.toLowerCase()
+          ) || activeSubConfig;
+        const currentBd =
+          st.breakdowns?.[selectedSubject] ||
+          generateDefaultBreakdown(
+            st.marks[selectedSubject],
+            selectedSubject,
+            st.section
+          );
+        const nextBd = { ...currentBd };
+
         cells.forEach((cellVal, cOffset) => {
           const targetColIdx = targetStartColIdx + cOffset;
-          if (targetColIdx >= subjectKeys.length) return;
+          if (targetColIdx >= activeGridColumnKeys.length) return;
+          const colField = activeGridColumnKeys[targetColIdx];
+          const fieldDef = internalFields.find((f) => f.key === colField);
+          const maxMark = fieldDef?.max ?? 20;
 
-          const subName = subjectKeys[targetColIdx];
+          const trimmed = cellVal.trim();
+          let newVal: number | 'AB' | null = null;
+          if (trimmed.toUpperCase() === 'AB' || trimmed.toUpperCase() === 'A') {
+            newVal = 'AB';
+          } else if (trimmed === '') {
+            newVal = null;
+          } else {
+            const parsed = parseFloat(trimmed);
+            if (!isNaN(parsed)) {
+              newVal = Math.min(maxMark, Math.max(0, parsed));
+            }
+          }
+          if (newVal !== null) {
+            nextBd[colField] = newVal;
+          } else {
+            delete nextBd[colField];
+          }
+        });
+
+        const newTotal = computeSubjectTotalFromBreakdown(
+          selectedSubject,
+          st.section,
+          nextBd,
+          effectiveSub?.components
+        );
+
+        updated[studentIndex] = {
+          ...st,
+          marks: {
+            ...st.marks,
+            [selectedSubject]: newTotal,
+          },
+          breakdowns: {
+            ...(st.breakdowns || {}),
+            [selectedSubject]: nextBd,
+          },
+        };
+      } else {
+        const nextMarks = { ...st.marks };
+        const nextBreakdowns = { ...(st.breakdowns || {}) };
+
+        cells.forEach((cellVal, cOffset) => {
+          const targetColIdx = targetStartColIdx + cOffset;
+          if (targetColIdx >= activeGridColumnKeys.length) return;
+
+          const subName = activeGridColumnKeys[targetColIdx];
+          const subConfig = activeSubjects.find((s) => s.name === subName);
+          const maxMark = subConfig?.maxMarks ?? 100;
           const trimmed = cellVal.trim();
           let newMark: number | 'AB' | null = null;
-          if (trimmed.toUpperCase() === 'AB') {
+          if (trimmed.toUpperCase() === 'AB' || trimmed.toUpperCase() === 'A') {
             newMark = 'AB';
           } else if (trimmed === '') {
             newMark = null;
           } else {
             const parsed = parseFloat(trimmed);
             if (!isNaN(parsed)) {
-              newMark = Math.min(100, Math.max(0, parsed));
+              newMark = Math.min(maxMark, Math.max(0, parsed));
             }
           }
 
-          updated[studentIndex] = {
-            ...updated[studentIndex],
-            marks: {
-              ...updated[studentIndex].marks,
-              [subName]: newMark,
-            },
-          };
+          nextMarks[subName] = newMark;
+          const effectiveSub =
+            getEffectiveExamConfigForClass(baseExamConfig, st.section).subjects.find(
+              (sub) => sub.name === subName
+            ) || subConfig;
+          const nextBd = syncBreakdownWithTotal(
+            newMark,
+            subName,
+            st.section,
+            effectiveSub?.components,
+            nextBreakdowns[subName]
+          );
+          if (nextBd) {
+            nextBreakdowns[subName] = nextBd;
+          } else {
+            delete nextBreakdowns[subName];
+          }
         });
-      });
 
-      triggerAutoSync(updated);
-      return updated;
+        updated[studentIndex] = {
+          ...st,
+          marks: nextMarks,
+          breakdowns: nextBreakdowns,
+        };
+      }
     });
+
+    setStudents(updated);
+    syncStoresForExam(selectedExam, updated);
+    triggerAutoSync(updated);
 
     showToast(`Pasted ${rows.length} row${rows.length > 1 ? 's' : ''} of marks successfully`);
   };
@@ -2638,33 +3073,41 @@ export default function SchoolErpPage() {
       return;
     }
 
+    pushUndoSnapshot(students);
     const targetSection = newStudentSection || (selectedClass !== 'all' ? selectedClass : 'Sparkle');
     const newId = `sva-${targetSection.toLowerCase()}-${Date.now().toString(36)}`;
+
+    const defaultMarks: Record<string, number | 'AB' | null> = {};
+    const defaultBreakdowns: Record<string, SubjectBreakdown> = {};
+    const effectiveCfg = getEffectiveExamConfigForClass(baseExamConfig, targetSection);
+    effectiveCfg.subjects.forEach((sub) => {
+      const defMark = Math.round((sub.maxMarks || 100) * 0.8);
+      defaultMarks[sub.name] = defMark;
+      const bd = syncBreakdownWithTotal(defMark, sub.name, targetSection, sub.components);
+      if (bd) {
+        defaultBreakdowns[sub.name] = bd;
+      }
+    });
 
     const newStudent: StudentReportRow = {
       id: newId,
       rollNo: newStudentRoll.trim().padStart(2, '0'),
       name: newStudentName.trim(),
-      admissionNo: '',
-      class: 'Class 10',
+      admissionNo: `SVA-2026-${targetSection.substring(0, 3).toUpperCase()}-${newStudentRoll.trim().padStart(2, '0')}`,
+      class: getClassNumberForSection(targetSection),
       section: targetSection,
       dob: newStudentDob || '2010-01-01',
       fatherName: newStudentFather.trim() || 'Parent',
       motherName: newStudentMother.trim() || 'Parent',
-      marks: {
-        English: 80,
-        Hindi: 80,
-        Marathi: 80,
-        Mathematics: 80,
-        Science: 80,
-        'Social Science': 80,
-        'Computer Science': 80,
-      },
+      marks: defaultMarks,
+      breakdowns: defaultBreakdowns,
+      subjectRemarks: {},
       customRemarks: 'Diligent student with regular academic participation.',
     };
 
     const updated = [...students, newStudent];
     setStudents(updated);
+    syncStoresForExam(selectedExam, updated);
     triggerAutoSync(updated);
     setIsAddStudentModalOpen(false);
     setNewStudentName('');
@@ -2674,49 +3117,53 @@ export default function SchoolErpPage() {
     showToast(`Added ${newStudent.name} (Roll ${newStudent.rollNo}) to ${targetSection}`);
   };
 
-  // Delete student
+  // Delete student (supports instant Ctrl+Z undo without iframe-blocked confirm dialog)
   const handleDeleteStudent = (studentId: string, studentName: string) => {
-    if (confirm(`Remove ${studentName} from the marks sheet?`)) {
-      const updated = students.filter((s) => s.id !== studentId);
-      setStudents(updated);
-      triggerAutoSync(updated);
-      showToast(`Removed ${studentName}`);
-    }
+    pushUndoSnapshot(students);
+    const updated = students.filter((s) => s.id !== studentId);
+    setStudents(updated);
+    syncStoresForExam(selectedExam, updated);
+    triggerAutoSync(updated);
+    showToast(`Removed ${studentName} (Press Ctrl+Z to undo)`);
   };
 
   // Update remarks for a student
   const handleUpdateRemarks = (studentId: string, remarks: string) => {
-    setStudents((prev) =>
-      prev.map((s) => (s.id === studentId ? { ...s, customRemarks: remarks } : s))
+    pushUndoSnapshot(students);
+    const updated = students.map((s) =>
+      s.id === studentId ? updateStudentClassRemark(s, remarks) : s
     );
+    setStudents(updated);
+    triggerAutoSync(updated);
   };
 
   // Auto-Generate Smart Remarks for All Students based on actual performance
   const handleAutoGenerateRemarksForAll = () => {
-    setStudents((prev) =>
-      prev.map((s) => {
-        const res = computedResults.find((r) => r.student.id === s.id);
-        if (!res) return s;
+    pushUndoSnapshot(students);
+    const updated = students.map((s) => {
+      const res = computedResults.find((r) => r.student.id === s.id);
+      if (!res) return s;
 
-        let generatedRemark = '';
-        if (res.percentage >= 90) {
-          generatedRemark = `Outstanding academic leadership with exceptional scores in Mathematics and Science. Keep excelling!`;
-        } else if (res.percentage >= 80) {
-          generatedRemark = `Consistent high achiever with commendable conceptual understanding and regular attendance.`;
-        } else if (res.percentage >= 70) {
-          generatedRemark = `Good scholastic progress across all disciplines. Consistent practice will elevate to top grades.`;
-        } else if (res.percentage >= 50) {
-          generatedRemark = `Capable student. Regular revision in written exams and active classroom focus will yield better scores.`;
-        } else if (res.status === 'FAIL' || res.status === 'ABSENT') {
-          generatedRemark = `Requires dedicated remedial revision and parent-teacher collaboration for upcoming evaluations.`;
-        } else {
-          generatedRemark = `Regular academic effort demonstrated. Continued perseverance recommended.`;
-        }
+      let generatedRemark = '';
+      if (res.percentage >= 90) {
+        generatedRemark = `Outstanding academic leadership with exceptional scores in Mathematics and Science. Keep excelling!`;
+      } else if (res.percentage >= 80) {
+        generatedRemark = `Consistent high achiever with commendable conceptual understanding and regular attendance.`;
+      } else if (res.percentage >= 70) {
+        generatedRemark = `Good scholastic progress across all disciplines. Consistent practice will elevate to top grades.`;
+      } else if (res.percentage >= 50) {
+        generatedRemark = `Capable student. Regular revision in written exams and active classroom focus will yield better scores.`;
+      } else if (res.status === 'FAIL' || res.status === 'ABSENT') {
+        generatedRemark = `Requires dedicated remedial revision and parent-teacher collaboration for upcoming evaluations.`;
+      } else {
+        generatedRemark = `Regular academic effort demonstrated. Continued perseverance recommended.`;
+      }
 
-        return { ...s, customRemarks: generatedRemark };
-      })
-    );
-    showToast('Auto-generated tailored academic remarks for all 280 students');
+      return { ...s, customRemarks: generatedRemark };
+    });
+    setStudents(updated);
+    triggerAutoSync(updated);
+    showToast('Auto-generated tailored academic remarks for all students');
   };
 
   // Export to Excel file
@@ -2729,18 +3176,18 @@ export default function SchoolErpPage() {
     const exportData = targetResults.map((r) => ({
       'Roll No': r.student.rollNo,
       'Student Name': r.student.name,
-      Class: `${r.student.class} - ${r.student.section}`,
+      Class: `${getClassNumberForSection(r.student.section)} - ${r.student.section}`,
       Section: r.student.section,
       English: r.student.marks['English'] ?? '',
       Hindi: r.student.marks['Hindi'] ?? '',
       Marathi: r.student.marks['Marathi'] ?? '',
-      Mathematics: r.student.marks['Mathematics'] ?? '',
+      Maths: r.student.marks['Maths'] ?? r.student.marks['Mathematics'] ?? '',
       Science: r.student.marks['Science'] ?? '',
       'Social Science': r.student.marks['Social Science'] ?? '',
       'Computer Science': r.student.marks['Computer Science'] ?? '',
       'Total Marks': r.totalObtained,
       'Max Marks': r.totalMax,
-      'Percentage (%)': r.percentage.toFixed(1),
+      'Percentage (%)': r.percentage.toFixed(2),
       Grade: r.grade,
       Rank: r.rank ? `#${r.rank}` : '',
       Status: r.status,
@@ -2748,7 +3195,7 @@ export default function SchoolErpPage() {
 
     const ws = XLSX.utils.json_to_sheet(exportData);
     const wb = XLSX.utils.book_new();
-    const sheetName = selectedClass === 'all' ? 'All_8_Classes' : `Class10_${selectedClass}`;
+    const sheetName = selectedClass === 'all' ? 'All_8_Classes' : `Class_${selectedClass}`;
     XLSX.utils.book_append_sheet(wb, ws, sheetName);
     XLSX.writeFile(wb, `SVA_Marks_${sheetName}_${new Date().toISOString().split('T')[0]}.xlsx`);
     showToast(`Exported ${targetResults.length} students to Excel`);
@@ -2760,7 +3207,7 @@ export default function SchoolErpPage() {
       {
         'Roll No': '01',
         'Student Name': 'Sample Student',
-        Class: 'Class 10',
+        Class: 'Class 6',
         Section: 'Sparkle',
         DOB: '2010-01-15',
         'Father Name': 'Mr. Sample',
@@ -2768,7 +3215,7 @@ export default function SchoolErpPage() {
         English: 85,
         Hindi: 88,
         Marathi: 90,
-        Mathematics: 92,
+        Maths: 92,
         Science: 89,
         'Social Science': 86,
         'Computer Science': 95,
@@ -2813,7 +3260,7 @@ export default function SchoolErpPage() {
     showToast(`Downloaded ${subjectName} Upload Template (.xlsx)`);
   };
 
-  // Excel / CSV file upload handler (Supports Consolidated & Subject-Wise modes)
+  // Excel / CSV file upload handler (Supports Consolidated & Subject-Wise modes + Aptos template header detection)
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -2827,129 +3274,225 @@ export default function SchoolErpPage() {
         const workbook = XLSX.read(data, { type: 'binary' });
         const firstSheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[firstSheetName];
-        const jsonData = XLSX.utils.sheet_to_json(worksheet, { defval: '' }) as any[];
+
+        // Detect header row (handles both plain sheets and Aptos-formatted templates with 5 title rows)
+        const aoa = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }) as any[][];
+        let headerRowIdx = 0;
+        for (let i = 0; i < Math.min(12, aoa.length); i++) {
+          const rowCells = (aoa[i] || []).map((c) => String(c).trim().toLowerCase());
+          if (
+            rowCells.includes('roll no') ||
+            rowCells.includes('roll_number') ||
+            rowCells.includes('student name') ||
+            rowCells.includes('full_name')
+          ) {
+            headerRowIdx = i;
+            break;
+          }
+        }
+
+        const jsonData = XLSX.utils.sheet_to_json(worksheet, {
+          defval: '',
+          range: headerRowIdx,
+        }) as any[];
 
         if (!jsonData || jsonData.length === 0) {
           setUploadError('The uploaded file contains no readable student rows.');
           return;
         }
 
+        pushUndoSnapshot(students);
+
         if (uploadMode === 'subject') {
           // ==========================================
           // SUBJECT-WISE MARKS UPLOAD MODE
           // ==========================================
           let updatedCount = 0;
-          setStudents((prevRoster) => {
-            const updated = [...prevRoster];
+          const updated = [...students];
+          const subConfig = activeSubjects.find((s) => s.name === uploadTargetSubject);
 
-            jsonData.forEach((row, idx) => {
-              const studentId = String(row['student_id'] || row['Student ID'] || row['Admission No'] || row['AdmNo'] || '').trim();
-              const rollNo = String(row['roll_number'] || row['Roll No'] || row['Roll'] || row['RollNo'] || '').trim().padStart(2, '0');
-              const name = String(row['full_name'] || row['Student Name'] || row['Name'] || row['StudentName'] || '').trim().toLowerCase();
+          jsonData.forEach((row) => {
+            const studentId = String(
+              row['student_id'] || row['Student ID'] || row['Admission No'] || row['AdmNo'] || ''
+            ).trim();
+            const rawRoll = String(
+              row['roll_number'] || row['Roll No'] || row['Roll'] || row['RollNo'] || ''
+            ).trim();
+            const rollNo = rawRoll ? rawRoll.padStart(2, '0') : '';
+            const rowSection = String(row['section'] || row['Section'] || '').trim();
+            const name = String(
+              row['full_name'] || row['Student Name'] || row['Name'] || row['StudentName'] || ''
+            )
+              .trim()
+              .toLowerCase();
 
-              const rawVal =
-                row['Marks Obtained'] ??
-                row['Marks'] ??
-                row['Mark'] ??
-                row[uploadTargetSubject] ??
-                row[uploadTargetSubject.toLowerCase()] ??
-                row['Obtained'] ??
-                row['Score'];
+            if (!studentId && !rollNo && !name) return;
 
-              let parsedMark: number | 'AB' | null = null;
-              if (String(rawVal).toUpperCase() === 'AB' || String(rawVal).toUpperCase() === 'ABSENT') {
-                parsedMark = 'AB';
-              } else if (rawVal !== '' && rawVal !== null && rawVal !== undefined && !isNaN(Number(rawVal))) {
-                const maxVal = activeSubjects.find((s) => s.name === uploadTargetSubject)?.maxMarks ?? 100;
-                parsedMark = Math.min(maxVal, Math.max(0, Number(rawVal)));
-              }
+            const rawVal =
+              row['Marks Obtained'] ??
+              row['Marks'] ??
+              row['Mark'] ??
+              row[uploadTargetSubject] ??
+              row[uploadTargetSubject.toLowerCase()] ??
+              row['Obtained'] ??
+              row['Score'];
 
-              // Match student in existing roster by Admission No, Roll No, or Name
-              const matchIdx = updated.findIndex(
-                (st) =>
-                  (studentId && st.admissionNo.toLowerCase() === studentId.toLowerCase()) ||
-                  (rollNo && st.rollNo.padStart(2, '0') === rollNo && (selectedClass === 'all' || st.section === selectedClass)) ||
-                  (name && st.name.toLowerCase() === name)
+            let parsedMark: number | 'AB' | null = null;
+            if (
+              String(rawVal).trim().toUpperCase() === 'AB' ||
+              String(rawVal).trim().toUpperCase() === 'ABSENT'
+            ) {
+              parsedMark = 'AB';
+            } else if (
+              rawVal !== '' &&
+              rawVal !== null &&
+              rawVal !== undefined &&
+              !isNaN(Number(rawVal))
+            ) {
+              const maxVal = subConfig?.maxMarks ?? 100;
+              parsedMark = Math.min(maxVal, Math.max(0, Number(rawVal)));
+            }
+
+            // Match student in existing roster by Admission No, Roll No (+ Section), or Name
+            const matchIdx = updated.findIndex(
+              (st) =>
+                (studentId && st.admissionNo.toLowerCase() === studentId.toLowerCase()) ||
+                (name && st.name.toLowerCase() === name) ||
+                (rollNo &&
+                  st.rollNo.padStart(2, '0') === rollNo &&
+                  (rowSection
+                    ? st.section.toLowerCase() === rowSection.toLowerCase()
+                    : selectedClass === 'all' || st.section === selectedClass))
+            );
+
+            if (matchIdx !== -1) {
+              updatedCount++;
+              const st = updated[matchIdx];
+              const effectiveSub =
+                getEffectiveExamConfigForClass(baseExamConfig, st.section).subjects.find(
+                  (sub) => sub.name === uploadTargetSubject
+                ) || subConfig;
+              const nextBd = syncBreakdownWithTotal(
+                parsedMark,
+                uploadTargetSubject,
+                st.section,
+                effectiveSub?.components,
+                st.breakdowns?.[uploadTargetSubject]
               );
-
-              if (matchIdx !== -1) {
-                updatedCount++;
-                updated[matchIdx] = {
-                  ...updated[matchIdx],
-                  marks: {
-                    ...updated[matchIdx].marks,
-                    [uploadTargetSubject]: parsedMark,
-                  },
-                };
+              const nextBreakdowns = { ...(st.breakdowns || {}) };
+              if (nextBd) {
+                nextBreakdowns[uploadTargetSubject] = nextBd;
+              } else {
+                delete nextBreakdowns[uploadTargetSubject];
               }
-            });
-
-            // Synchronize active exam store
-            setExamMarksStore((prev) => {
-              const currentStore = { ...(prev[selectedExam] || {}) };
-              updated.forEach((st) => {
-                currentStore[st.id] = { ...st.marks };
-              });
-              return {
-                ...prev,
-                [selectedExam]: currentStore,
+              updated[matchIdx] = {
+                ...st,
+                marks: {
+                  ...st.marks,
+                  [uploadTargetSubject]: parsedMark,
+                },
+                breakdowns: nextBreakdowns,
               };
-            });
-
-            triggerAutoSync(updated);
-            return updated;
+            }
           });
 
+          setStudents(updated);
+          syncStoresForExam(selectedExam, updated);
+          triggerAutoSync(updated);
+
           setIsUploadModalOpen(false);
-          showToast(`Successfully updated ${uploadTargetSubject} marks for ${updatedCount} students`);
+          showToast(
+            `Successfully updated ${uploadTargetSubject} marks for ${updatedCount} students`
+          );
           return;
         }
 
         // ==========================================
         // CONSOLIDATED MULTI-SUBJECT MARKS UPLOAD MODE
         // ==========================================
-        const parsedStudents: StudentReportRow[] = jsonData.map((row, idx) => {
-          const studentId = String(row['student_id'] || row['Student ID'] || row['Admission No'] || row['AdmNo'] || `STU-2026-${String(idx + 1).padStart(4, '0')}`);
-          const rollNo = String(row['roll_number'] || row['Roll No'] || row['Roll'] || row['RollNo'] || idx + 1).padStart(2, '0');
-          const name = String(row['full_name'] || row['Student Name'] || row['Name'] || row['StudentName'] || `Student ${rollNo}`);
-          const section = String(row['section'] || row['Section'] || (selectedClass !== 'all' ? selectedClass : 'Sparkle'));
+        const incomingStudents: StudentReportRow[] = [];
+        jsonData.forEach((row, idx) => {
+          const rawRoll = String(
+            row['roll_number'] || row['Roll No'] || row['Roll'] || row['RollNo'] || ''
+          ).trim();
+          const rawName = String(
+            row['full_name'] || row['Student Name'] || row['Name'] || row['StudentName'] || ''
+          ).trim();
+          if (!rawRoll && !rawName) return;
 
+          const rollNo = (rawRoll || String(idx + 1)).padStart(2, '0');
+          const name = rawName || `Student ${rollNo}`;
+          const section = String(
+            row['section'] ||
+              row['Section'] ||
+              (selectedClass !== 'all' ? selectedClass : 'Sparkle')
+          ).trim();
+          const studentId = String(
+            row['student_id'] ||
+              row['Student ID'] ||
+              row['Admission No'] ||
+              row['AdmNo'] ||
+              `sva-${section.toLowerCase()}-${rollNo}`
+          ).trim();
+
+          const effectiveCfg = getEffectiveExamConfigForClass(baseExamConfig, section);
           const marks: Record<string, number | 'AB' | null> = {};
-          SVA_SUBJECTS.forEach((sub) => {
+          const breakdowns: Record<string, SubjectBreakdown> = {};
+
+          effectiveCfg.subjects.forEach((sub) => {
             const rawVal =
               row[sub.name] ??
               row[sub.name.toLowerCase()] ??
+              (sub.name === 'Maths' ? row['Mathematics'] ?? row['mathematics'] : undefined) ??
               row[sub.name.substring(0, 3)] ??
               row[sub.name.substring(0, 3).toLowerCase()];
 
-            if (String(rawVal).toUpperCase() === 'AB') {
+            const trimmedVal = String(rawVal ?? '').trim();
+            if (trimmedVal.toUpperCase() === 'AB' || trimmedVal.toUpperCase() === 'ABSENT') {
               marks[sub.name] = 'AB';
-            } else if (rawVal !== '' && !isNaN(Number(rawVal))) {
-              marks[sub.name] = Math.min(100, Math.max(0, Number(rawVal)));
+            } else if (trimmedVal !== '' && trimmedVal !== '-' && !isNaN(Number(trimmedVal))) {
+              marks[sub.name] = Math.min(sub.maxMarks || 100, Math.max(0, Number(trimmedVal)));
             } else {
-              marks[sub.name] = 75;
+              marks[sub.name] = null;
+            }
+
+            const bd = syncBreakdownWithTotal(marks[sub.name], sub.name, section, sub.components);
+            if (bd) {
+              breakdowns[sub.name] = bd;
             }
           });
 
-          return {
+          incomingStudents.push({
             id: studentId,
             rollNo,
             name,
             admissionNo: studentId,
             class: getClassNumberForSection(section),
-            section: section,
+            section,
             dob: String(row['DOB'] || row['dob'] || '2010-01-01'),
             fatherName: String(row['Father Name'] || row["Father's Name"] || 'Parent'),
             motherName: String(row['Mother Name'] || row["Mother's Name"] || 'Parent'),
             marks,
-            customRemarks: 'Imported from official student record.',
-          };
+            breakdowns,
+            customRemarks: String(
+              row['Remarks'] ||
+                row['Class Teacher Remark'] ||
+                'Imported from official student record.'
+            ),
+          });
         });
 
-        setStudents(parsedStudents);
-        triggerAutoSync(parsedStudents);
+        const mergedRoster = mergePulledStudentsWithRoster(
+          students,
+          incomingStudents,
+          baseExamConfig
+        );
+
+        setStudents(mergedRoster);
+        syncStoresForExam(selectedExam, mergedRoster);
+        triggerAutoSync(mergedRoster);
         setIsUploadModalOpen(false);
-        showToast(`Successfully imported ${parsedStudents.length} students across sections`);
+        showToast(`Successfully imported ${incomingStudents.length} students across sections`);
       } catch (err: any) {
         setUploadError(`Failed to parse file: ${err.message || 'Invalid format'}`);
       }
@@ -2964,10 +3507,13 @@ export default function SchoolErpPage() {
     if (!activeStudentResult) return;
     setIsExporting(true);
     try {
-      downloadSinglePDF(SVA_EXAM_INFO, activeStudentResult);
+      downloadSinglePDF(
+        { ...SVA_EXAM_INFO, examName: currentExamConfig.name },
+        activeStudentResult
+      );
       showToast(`Downloaded PDF for ${activeStudentResult.student.name}`);
-    } catch (err) {
-      alert('Failed to generate PDF. Please try again.');
+    } catch {
+      showToast('Failed to generate PDF. Please try again.');
     } finally {
       setIsExporting(false);
     }
@@ -2983,13 +3529,17 @@ export default function SchoolErpPage() {
           : computedResults.filter((r) => r.student.section === selectedClass);
 
       const zipName = isAll8Classes
-        ? 'SVA_ReportCards_All_8_Classes_280_Students'
-        : `SVA_ReportCards_Class10_${selectedClass}_${targetResults.length}_Students`;
+        ? `SVA_ReportCards_All_8_Classes_${selectedExam}_${targetResults.length}_Students`
+        : `SVA_ReportCards_${selectedClass}_${selectedExam}_${targetResults.length}_Students`;
 
-      await downloadAllPDFsAsZip(SVA_EXAM_INFO, targetResults, zipName);
+      await downloadAllPDFsAsZip(
+        { ...SVA_EXAM_INFO, examName: currentExamConfig.name },
+        targetResults,
+        zipName
+      );
       showToast(`Generated ZIP with ${targetResults.length} report cards`);
-    } catch (err) {
-      alert('Failed to create ZIP package. Please try again.');
+    } catch {
+      showToast('Failed to create ZIP package. Please try again.');
     } finally {
       setIsExporting(false);
     }
@@ -3025,82 +3575,80 @@ export default function SchoolErpPage() {
         </div>
       )}
 
-      {/* TOP BAR CONTRACT: Exactly 3 zones (Brand wordmark with Logo — Clean nav links — Primary action) */}
-      <header className="bg-white border-b border-slate-200/80 sticky top-0 z-30 px-5 sm:px-8 lg:px-10 py-2.5 sm:py-3.5 backdrop-blur-md bg-white/95">
+      {/* TOP BAR: Clean, Minimal Brand & Segmented Navigation */}
+      <header className="bg-white/95 backdrop-blur-xs border-b border-slate-200/80 sticky top-0 z-50 px-5 sm:px-8 py-2.5">
         <div className="max-w-[1400px] mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-6">
-          {/* Zone 1: Single element Brand & Official Crest Logo */}
-          <div className="flex items-center justify-between gap-2.5 shrink-0">
-            <div className="flex items-center gap-1.5">
-              <Image
-                src={SCHOOL_LOGO_SRC}
-                alt="Saraswati Vidya Academy Crest"
-                width={48}
-                height={48}
-                className="w-10 h-10 sm:w-12 sm:h-12 object-contain shrink-0"
-                priority
-              />
-              <span className="font-display text-base sm:text-lg font-bold text-slate-900 tracking-tight whitespace-nowrap">
-                Saraswati Vidya Academy
-              </span>
-            </div>
+          {/* Brand Wordmark with Logo */}
+          <div className="flex items-center gap-2 shrink-0">
+            <Image
+              src={SCHOOL_LOGO_SRC}
+              alt="Saraswati Vidya Academy Crest"
+              width={32}
+              height={32}
+              className="w-7 h-7 sm:w-8 sm:h-8 object-contain shrink-0"
+              priority
+            />
+            <span className="text-sm sm:text-base font-semibold text-slate-900 tracking-tight whitespace-nowrap">
+              Saraswati Vidya Academy
+            </span>
           </div>
 
-          {/* Zone 2: Navigation Links (Clean Segmented Tabs) */}
+          {/* Navigation Links (Minimal Segmented Tabs) */}
           <div className="overflow-x-auto no-scrollbar -mx-1 px-1 py-0.5">
-            <nav className="flex items-center gap-1 bg-slate-100/90 p-1 rounded-xl border border-slate-200/60 text-xs font-medium w-max">
+            <nav className="flex items-center gap-0.5 bg-slate-100/80 p-0.5 rounded-lg border border-slate-200/60 text-xs font-medium w-max">
               <button
                 onClick={() => setActiveTab('spreadsheet')}
-                className={`px-3 py-1.5 rounded-lg transition-all whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
                   activeTab === 'spreadsheet'
-                    ? 'bg-white text-slate-900 font-semibold shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                    ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                <FileSpreadsheet className="w-3.5 h-3.5" />
+                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-500" />
                 <span>Marks Entry</span>
               </button>
               <button
                 onClick={() => setActiveTab('remarks')}
-                className={`px-3 py-1.5 rounded-lg transition-all whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
                   activeTab === 'remarks'
-                    ? 'bg-white text-slate-900 font-semibold shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                    ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                <MessageSquareText className="w-3.5 h-3.5" />
+                <MessageSquareText className="w-3.5 h-3.5 text-slate-500" />
                 <span>Remarks Entry</span>
               </button>
               <button
                 onClick={() => setActiveTab('reportcards')}
-                className={`px-3 py-1.5 rounded-lg transition-all whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
                   activeTab === 'reportcards'
-                    ? 'bg-white text-slate-900 font-semibold shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                    ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                <FileText className="w-3.5 h-3.5" />
+                <FileText className="w-3.5 h-3.5 text-slate-500" />
                 <span>Report Cards</span>
               </button>
               <button
                 onClick={() => setActiveTab('sheets')}
-                className={`px-3 py-1.5 rounded-lg transition-all whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
                   activeTab === 'sheets'
-                    ? 'bg-white text-slate-900 font-semibold shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                    ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                <Database className="w-3.5 h-3.5" />
+                <Database className="w-3.5 h-3.5 text-slate-500" />
                 <span>Export Marks</span>
               </button>
               <button
                 onClick={() => setActiveTab('admin')}
-                className={`px-3 py-1.5 rounded-lg transition-all whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
                   activeTab === 'admin'
-                    ? 'bg-white text-slate-900 font-semibold shadow-xs'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/40'
+                    ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                <Settings className="w-3.5 h-3.5" />
+                <Settings className="w-3.5 h-3.5 text-slate-500" />
                 <span>Settings</span>
               </button>
             </nav>
@@ -3109,19 +3657,19 @@ export default function SchoolErpPage() {
       </header>
 
       {/* MAIN VIEWPORT */}
-      <main className="max-w-[1440px] mx-auto w-full px-5 sm:px-8 lg:px-10 py-4 sm:py-6 flex-1 flex flex-col">
+      <main className="max-w-[1440px] mx-auto w-full px-5 sm:px-8 py-4 sm:py-5 flex-1 flex flex-col">
         {/* ========================================================
             VIEW 1: MARKS SPREADSHEET (Apple Numbers / Linear Style)
            ======================================================== */}
         {activeTab === 'spreadsheet' && (
-          <div className="flex-1 flex flex-col gap-5">
+          <div className="flex-1 flex flex-col gap-4">
             {/* Page Header Strip */}
-            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900">
+                <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
                   Student Marks
                 </h1>
-                <p className="text-xs text-slate-500 mt-1 font-normal">
+                <p className="text-xs text-slate-500 mt-0.5 font-normal">
                   Pick a class, exam, and subject to enter or update marks. Press Enter to move down to the next student, or type &quot;AB&quot; if a student was absent.
                 </p>
               </div>
@@ -3130,14 +3678,14 @@ export default function SchoolErpPage() {
               <div className="flex items-center flex-wrap gap-2">
                 <button
                   onClick={() => setIsUploadModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-200/90 rounded-xl hover:bg-slate-50 hover:text-slate-900 shadow-2xs transition-all cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200/80 rounded-lg hover:bg-slate-50 hover:text-slate-900 shadow-2xs transition-colors cursor-pointer"
                 >
-                  <Upload className="w-3.5 h-3.5 text-emerald-600" />
+                  <Upload className="w-3.5 h-3.5 text-slate-500" />
                   <span>Import Marks</span>
                 </button>
                 <button
                   onClick={() => setIsAddStudentModalOpen(true)}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-2xs transition-all cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-2xs transition-colors cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
                   <span>Add Student</span>
@@ -3146,94 +3694,78 @@ export default function SchoolErpPage() {
             </div>
 
             {/* Class, Exam & Subject Unified Control Bar */}
-            <div className="bg-white border border-slate-200/90 rounded-xl p-3.5 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-3">
+            <div className="bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center gap-2.5">
                 {/* 1. Class Dropdown */}
-                <div className="flex items-center gap-2 bg-slate-50 border border-slate-200/90 rounded-lg px-3 py-2">
-                  <label htmlFor="class-select" className="text-xs font-semibold text-slate-500 whitespace-nowrap flex items-center gap-1.5">
-                    <Layers className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Class:</span>
-                  </label>
-                  <select
-                    id="class-select"
-                    value={selectedClass}
-                    onChange={(e) => {
-                      setSelectedClass(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="bg-transparent text-xs font-semibold text-slate-900 focus:outline-none cursor-pointer pr-1"
-                  >
-                    <option value="all">All Classes ({students.length})</option>
-                    {SVA_ALL_CLASSES.map((cls) => (
-                      <option key={cls} value={cls}>
-                        {getClassGradeLabel(cls)} ({classCounts[cls] || 0})
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <CustomSelect
+                  id="class-select"
+                  icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
+                  prefixLabel="Class:"
+                  value={selectedClass}
+                  onChange={(val) => {
+                    setSelectedClass(val);
+                    setCurrentPage(1);
+                  }}
+                  options={[
+                    { value: 'all', label: `All Classes (${students.length})` },
+                    ...SVA_ALL_CLASSES.map((cls) => ({
+                      value: cls,
+                      label: `${getClassGradeLabel(cls)} (${classCounts[cls] || 0})`,
+                    })),
+                  ]}
+                />
 
                 {/* 2. Exam Dropdown */}
-                <div className="flex items-center gap-2 bg-slate-50 border border-slate-200/90 rounded-lg px-3 py-2">
-                  <label htmlFor="exam-select" className="text-xs font-semibold text-slate-500 whitespace-nowrap flex items-center gap-1.5">
-                    <BookOpen className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Exam:</span>
-                  </label>
-                  <select
-                    id="exam-select"
-                    value={selectedExam}
-                    onChange={(e) => handleExamChange(e.target.value)}
-                    className="bg-transparent text-xs font-semibold text-slate-900 focus:outline-none cursor-pointer pr-1"
-                  >
-                    {Object.values(examConfigs).map((ex) => (
-                      <option key={ex.id} value={ex.id}>
-                        {ex.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <CustomSelect
+                  id="exam-select"
+                  icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
+                  prefixLabel="Exam:"
+                  value={selectedExam}
+                  onChange={(val) => handleExamChange(val)}
+                  options={Object.values(examConfigs).map((ex) => ({
+                    value: ex.id,
+                    label: ex.name,
+                  }))}
+                />
 
                 {/* 3. Subject Dropdown */}
-                <div className="flex items-center gap-2 bg-slate-50 border border-slate-200/90 rounded-lg px-3 py-2">
-                  <label htmlFor="subject-filter-select" className="text-xs font-semibold text-slate-500 whitespace-nowrap flex items-center gap-1.5">
-                    <Award className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Subject:</span>
-                  </label>
-                  <select
-                    id="subject-filter-select"
-                    value={selectedSubject}
-                    onChange={(e) => {
-                      const val = e.target.value;
-                      setSelectedSubject(val);
-                      if (val !== 'all') {
-                        setInternalActiveSubject(val);
-                      }
-                    }}
-                    className="bg-transparent text-xs font-semibold text-slate-900 focus:outline-none cursor-pointer pr-1"
-                  >
-                    <option value="all">All Subjects (7)</option>
-                    {activeSubjects.map((sub) => (
-                      <option key={sub.name} value={sub.name}>
-                        {sub.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <CustomSelect
+                  id="subject-filter-select"
+                  icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
+                  prefixLabel="Subject:"
+                  value={selectedSubject}
+                  onChange={(val) => {
+                    setSelectedSubject(val);
+                    setSelectedRange(null);
+                    setIsSelecting(false);
+                    if (val !== 'all') {
+                      setInternalActiveSubject(val);
+                    }
+                  }}
+                  options={[
+                    { value: 'all', label: 'All Subjects (7)' },
+                    ...activeSubjects.map((sub) => ({
+                      value: sub.name,
+                      label: sub.name,
+                    })),
+                  ]}
+                />
               </div>
 
-              {/* 4. Search Input - Shifted to Right Side of Parent Container */}
+              {/* 4. Search Input */}
               <div className="relative w-full sm:w-64 lg:ml-auto">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search name or roll no..."
-                  className="w-full pl-8 pr-7 py-2 text-xs bg-slate-50 border border-slate-200/90 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:ring-1 focus:ring-slate-900 transition-all"
+                  className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-50/60 border border-slate-200/80 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all"
                 />
                 {searchQuery && (
                   <button
                     onClick={() => setSearchQuery('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
                   >
                     <X className="w-3 h-3" />
                   </button>
@@ -3242,19 +3774,17 @@ export default function SchoolErpPage() {
             </div>
 
             {/* Main Spreadsheet Card */}
-            <div className="bg-white border border-slate-200/90 rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.04)] flex flex-col overflow-hidden">
+            <div className="bg-white border border-slate-200/80 rounded-xl shadow-2xs flex flex-col overflow-hidden relative isolate z-10">
 
               {/* The Spreadsheet Grid */}
               <div
                 ref={marksScrollContainerRef}
                 className="overflow-x-auto excel-grid-container relative w-full"
               >
-                {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && selectedSubject !== 'all' ? (
+                {selectedSubject !== 'all' && internalFields.length > 1 ? (
                   /* =====================================================================
                      SUBJECT INTERNAL + PAPER MARKS ENTRY TABLE (When a Subject is selected)
-                     - Standard Subjects: Pen Paper (5) + Multi Assess (5) + Enrichment (5) + Portfolio (5) + SA (80) = Total (100) + Grade
-                     - Computer Science: Practicals (20) + SA (80) = Total (100) + Grade
-                     - Class 9 Hindi: Listening (20) + Speaking (20) + Project (15) + SA (45) = Total (100) + Grade
+                     - Dynamically reflects any Internal + Main Exam components configured by Admin
                      ===================================================================== */
                   <table className="w-full text-center text-xs border-separate border-spacing-0">
                     <thead
@@ -3262,11 +3792,11 @@ export default function SchoolErpPage() {
                       title="Click and drag header to scroll horizontally"
                       className={isHeaderDragging ? 'cursor-grabbing select-none' : 'cursor-grab select-none'}
                     >
-                      <tr className="sticky top-0 z-40 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
+                      <tr className="sticky top-0 z-20 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
                         {/* Frozen Roll Header */}
                         <th
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-50 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
@@ -3274,7 +3804,7 @@ export default function SchoolErpPage() {
                         {/* Frozen Student Name Header */}
                         <th
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-50 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-[48px] z-30 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
@@ -3283,7 +3813,7 @@ export default function SchoolErpPage() {
                         {internalFields.map((field) => (
                           <th
                             key={field.key}
-                            className={`py-2 px-2 text-center ${field.colWidth} border-b border-l border-slate-200 text-slate-700`}
+                            className={`py-2 px-2 text-center ${field.colWidth} bg-slate-50 border-b border-l border-slate-200 text-slate-700`}
                           >
                             <div className="font-bold text-slate-800">{field.label}</div>
                             <div className="text-[10px] font-normal text-slate-400 mt-0.5">
@@ -3292,19 +3822,20 @@ export default function SchoolErpPage() {
                           </th>
                         ))}
 
-                        {/* TOTAL 100 */}
+                        {/* TOTAL (Locked) */}
                         <th
                           onClick={() => toggleSort(selectedSubject)}
-                          className="py-2 px-2 text-center w-[90px] min-w-[90px] border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
+                          className="py-2 px-2 text-center w-[90px] min-w-[90px] bg-slate-50 border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
+                          title={`Total (${activeSubConfig?.maxMarks ?? 100} Marks) • Locked and auto-calculated from breakdown components`}
                         >
                           <div className="text-center font-bold text-slate-800">Total</div>
                           <div className="text-[10px] font-normal text-slate-400 text-center mt-0.5">
-                            100
+                            {activeSubConfig?.maxMarks ?? 100}
                           </div>
                         </th>
 
                         {/* GRADE */}
-                        <th className="py-2 px-2 text-center w-[75px] min-w-[75px] border-b border-l border-slate-200">
+                        <th className="py-2 px-2 text-center w-[75px] min-w-[75px] bg-slate-50 border-b border-l border-slate-200">
                           <div className="text-center font-bold text-slate-800">Grade</div>
                         </th>
                       </tr>
@@ -3331,18 +3862,30 @@ export default function SchoolErpPage() {
                               selectedSubject,
                               student.section
                             );
-                          const totalMark = student.marks[selectedSubject];
+                          const liveTotalFromBd = computeSubjectTotalFromBreakdown(
+                            selectedSubject,
+                            student.section,
+                            bd,
+                            activeSubConfig?.components
+                          );
+                          const totalMark =
+                            liveTotalFromBd !== null
+                              ? liveTotalFromBd
+                              : student.marks[selectedSubject];
                           const numTotal = typeof totalMark === 'number' ? totalMark : 0;
+                          const subMaxMarks = activeSubConfig?.maxMarks ?? 100;
+                          const subPassMarks = activeSubConfig?.passMarks ?? 33;
+                          const subPct = subMaxMarks > 0 ? (numTotal / subMaxMarks) * 100 : 0;
                           const subGrade =
                             totalMark === 'AB'
                               ? 'E'
                               : totalMark !== null && totalMark !== undefined
-                              ? computeGrade(numTotal)
+                              ? computeGrade(subPct)
                               : '-';
                           const isFailed =
                             totalMark !== null &&
                             totalMark !== undefined &&
-                            (totalMark === 'AB' || numTotal < 33);
+                            (totalMark === 'AB' || numTotal < subPassMarks);
 
                           return (
                             <tr
@@ -3357,10 +3900,10 @@ export default function SchoolErpPage() {
                             >
                               {/* Frozen Roll Number */}
                               <td
-                                className={`sticky left-0 z-20 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 transition-colors ${
+                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 transition-colors select-none cursor-default ${
                                   isRowActive
-                                    ? 'bg-blue-100/90 font-bold text-blue-950'
-                                    : 'bg-white group-hover/row:bg-slate-100/90'
+                                    ? 'bg-blue-100 font-bold text-blue-950'
+                                    : 'bg-white group-hover/row:bg-slate-100'
                                 }`}
                               >
                                 {student.rollNo}
@@ -3368,10 +3911,10 @@ export default function SchoolErpPage() {
 
                               {/* Frozen Student Name */}
                               <td
-                                className={`sticky left-[48px] z-20 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 transition-colors ${
+                                className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 transition-colors ${
                                   isRowActive
-                                    ? 'bg-blue-100/90 font-semibold text-blue-950'
-                                    : 'bg-white group-hover/row:bg-slate-100/90'
+                                    ? 'bg-blue-100 font-semibold text-blue-950'
+                                    : 'bg-white group-hover/row:bg-slate-100'
                                 }`}
                               >
                                 <div className="flex items-center justify-between gap-1.5 w-full group/name">
@@ -3391,7 +3934,7 @@ export default function SchoolErpPage() {
                               </td>
 
                               {/* Editable Internal & Paper Marks Cells */}
-                              {internalFields.map((field) => {
+                              {internalFields.map((field, fieldIdx) => {
                                 let rawVal = bd[field.key];
                                 if (field.key === 'internalMarks' && rawVal === undefined) {
                                   const pp = typeof bd.penPaper === 'number' ? bd.penPaper : 0;
@@ -3420,6 +3963,35 @@ export default function SchoolErpPage() {
                                   focusedCell?.rowIdx === rowIdx &&
                                   focusedCell?.colKey === field.key;
 
+                                const isInRange =
+                                  normalizedRange !== null &&
+                                  rowIdx >= normalizedRange.minRow &&
+                                  rowIdx <= normalizedRange.maxRow &&
+                                  fieldIdx >= normalizedRange.minCol &&
+                                  fieldIdx <= normalizedRange.maxCol;
+
+                                const isRangeTop = isInRange && rowIdx === normalizedRange.minRow;
+                                const isRangeBottom = isInRange && rowIdx === normalizedRange.maxRow;
+                                const isRangeLeft = isInRange && fieldIdx === normalizedRange.minCol;
+                                const isRangeRight = isInRange && fieldIdx === normalizedRange.maxCol;
+
+                                const rangeShadows: string[] = [];
+                                if (isInRange && normalizedRange && normalizedRange.cellCount > 1) {
+                                  if (isRangeTop) rangeShadows.push('inset 0 2px 0 0 #1d4ed8');
+                                  if (isRangeBottom) rangeShadows.push('inset 0 -2px 0 0 #1d4ed8');
+                                  if (isRangeLeft) rangeShadows.push('inset 2px 0 0 0 #1d4ed8');
+                                  if (isRangeRight) rangeShadows.push('inset -2px 0 0 0 #1d4ed8');
+                                }
+                                const compoundBoxShadow = rangeShadows.length > 0 ? rangeShadows.join(', ') : undefined;
+
+                                const isInsideActiveRange =
+                                  normalizedRange !== null &&
+                                  normalizedRange.cellCount > 1 &&
+                                  rowIdx >= normalizedRange.minRow &&
+                                  rowIdx <= normalizedRange.maxRow &&
+                                  fieldIdx >= normalizedRange.minCol &&
+                                  fieldIdx <= normalizedRange.maxCol;
+
                                 return (
                                   <td
                                     key={field.key}
@@ -3429,27 +4001,121 @@ export default function SchoolErpPage() {
                                         targetInput.focus();
                                       }
                                     }}
-                                    className={`${field.colWidth} h-10 p-0 border-b border-l border-slate-200 relative transition-colors ${
-                                      isCellFocused
-                                        ? 'bg-white ring-2 ring-inset ring-blue-600 z-10'
+                                    onDoubleClick={() => {
+                                      replaceOnNextKeyRef.current = false;
+                                      setIsCellEditing(true);
+                                    }}
+                                    onMouseDown={(e) => {
+                                      if (e.button !== 0) return;
+                                      replaceOnNextKeyRef.current = true;
+                                      setIsCellEditing(false);
+                                      if (e.shiftKey) {
+                                        isShiftSelectingRef.current = true;
+                                        setSelectedRange((prev) => {
+                                          const start = prev ? prev.start : { rowIdx, colIdx: fieldIdx };
+                                          return { start, end: { rowIdx, colIdx: fieldIdx } };
+                                        });
+                                      } else {
+                                        if (!isInsideActiveRange) {
+                                          isSelectingRef.current = true;
+                                          setIsSelecting(true);
+                                          setSelectedRange({
+                                            start: { rowIdx, colIdx: fieldIdx },
+                                            end: { rowIdx, colIdx: fieldIdx },
+                                          });
+                                        }
+                                        setFocusedCell({ rowIdx, colKey: field.key });
+                                        setSelectedStudentId(student.id);
+                                      }
+                                      const targetInput = cellInputRefs.current[cellKey];
+                                      if (targetInput) {
+                                        targetInput.focus();
+                                      }
+                                    }}
+                                    onMouseEnter={() => {
+                                      if (isSelectingRef.current || isSelecting) {
+                                        setSelectedRange((prev) =>
+                                          prev
+                                            ? { start: prev.start, end: { rowIdx, colIdx: fieldIdx } }
+                                            : { start: { rowIdx, colIdx: fieldIdx }, end: { rowIdx, colIdx: fieldIdx } }
+                                        );
+                                      }
+                                    }}
+                                    style={{ boxShadow: compoundBoxShadow }}
+                                    className={`${field.colWidth} h-10 p-0 border-b border-l border-slate-200 relative transition-colors box-border ${
+                                      isInRange && normalizedRange && normalizedRange.cellCount > 1
+                                        ? 'bg-blue-500/15'
+                                        : isCellFocused
+                                        ? 'bg-white shadow-xs'
                                         : isRowActive
-                                        ? 'bg-blue-50/50'
-                                        : 'bg-white group-hover/row:bg-slate-50'
-                                    }`}
+                                        ? 'bg-blue-50/80'
+                                        : 'bg-transparent group-hover/row:bg-slate-100/70'
+                                    } ${
+                                      isCellFocused && (!normalizedRange || normalizedRange.cellCount <= 1)
+                                        ? 'ring-2 ring-inset ring-blue-600 z-10'
+                                        : ''
+                                    } cursor-cell`}
                                   >
                                     <input
                                       ref={(el) => {
                                         cellInputRefs.current[cellKey] = el;
                                       }}
+                                      data-excel-cell="true"
                                       type="text"
                                       value={displayVal}
                                       placeholder={`/${field.max}`}
-                                      onFocus={(e) => {
+                                      onFocus={() => {
+                                        replaceOnNextKeyRef.current = true;
+                                        setIsCellEditing(false);
                                         setFocusedCell({ rowIdx, colKey: field.key });
                                         setSelectedStudentId(student.id);
+                                        if (!isSelectingRef.current && !isSelecting && !isShiftSelectingRef.current && !isInsideActiveRange) {
+                                          setSelectedRange({
+                                            start: { rowIdx, colIdx: fieldIdx },
+                                            end: { rowIdx, colIdx: fieldIdx },
+                                          });
+                                        }
+                                        isShiftSelectingRef.current = false;
                                       }}
-                                      onClick={(e) => {
+                                      onMouseDown={(e) => {
+                                        if (e.button !== 0) return;
+                                        replaceOnNextKeyRef.current = true;
+                                        setIsCellEditing(false);
+                                        if (e.shiftKey) {
+                                          isShiftSelectingRef.current = true;
+                                          setSelectedRange((prev) => {
+                                            const start = prev ? prev.start : { rowIdx, colIdx: fieldIdx };
+                                            return { start, end: { rowIdx, colIdx: fieldIdx } };
+                                          });
+                                        } else if (!isInsideActiveRange) {
+                                          isSelectingRef.current = true;
+                                          setIsSelecting(true);
+                                          setSelectedRange({
+                                            start: { rowIdx, colIdx: fieldIdx },
+                                            end: { rowIdx, colIdx: fieldIdx },
+                                          });
+                                          setFocusedCell({ rowIdx, colKey: field.key });
+                                          setSelectedStudentId(student.id);
+                                        }
                                       }}
+                                      onMouseEnter={() => {
+                                        if (isSelectingRef.current || isSelecting) {
+                                          setSelectedRange((prev) =>
+                                            prev
+                                              ? { start: prev.start, end: { rowIdx, colIdx: fieldIdx } }
+                                              : { start: { rowIdx, colIdx: fieldIdx }, end: { rowIdx, colIdx: fieldIdx } }
+                                          );
+                                        }
+                                      }}
+                                      onDoubleClick={() => {
+                                        replaceOnNextKeyRef.current = false;
+                                        setIsCellEditing(true);
+                                      }}
+                                      onMouseUp={() => {
+                                        isSelectingRef.current = false;
+                                        setIsSelecting(false);
+                                      }}
+                                      onDragStart={(e) => e.preventDefault()}
                                       onChange={(e) =>
                                         handleInternalCellChange(
                                           student.id,
@@ -3463,18 +4129,27 @@ export default function SchoolErpPage() {
                                           e,
                                           rowIdx,
                                           field.key,
-                                          internalFieldKeys
+                                          internalFieldKeys,
+                                          student.id
                                         )
                                       }
-                                      className="w-full h-10 px-2 text-center font-mono tabular-nums text-xs font-bold text-slate-900 placeholder-slate-300 bg-transparent focus:outline-none cursor-cell"
+                                      onPaste={(e) => {
+                                        handlePaste(e, rowIdx, field.key);
+                                      }}
+                                      className={`w-full h-10 px-1 text-center font-mono tabular-nums text-xs font-semibold bg-transparent focus:outline-none transition-none select-text cursor-cell selection:bg-transparent selection:text-slate-900 ${
+                                        isCellFocused
+                                          ? 'text-slate-950 font-semibold'
+                                          : 'text-slate-800'
+                                      }`}
                                     />
                                   </td>
                                 );
                               })}
 
-                              {/* Auto-Calculated Total (Out of 100) */}
+                              {/* Auto-Calculated Total (Out of 100) - Locked */}
                               <td
-                                className={`w-[95px] min-w-[95px] h-10 p-0 text-center font-mono tabular-nums text-xs font-extrabold border-b border-l border-slate-200 ${
+                                title="100 Marks Total (Locked • Calculated from components)"
+                                className={`w-[95px] min-w-[95px] h-10 p-0 text-center font-mono tabular-nums text-xs font-extrabold border-b border-l border-slate-200 select-none cursor-default ${
                                   isFailed
                                     ? 'bg-rose-50 text-rose-700'
                                     : isRowActive
@@ -3487,7 +4162,7 @@ export default function SchoolErpPage() {
 
                               {/* Auto-Calculated CBSE Grade */}
                               <td
-                                className={`w-[80px] min-w-[80px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 ${
+                                className={`w-[80px] min-w-[80px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 select-none cursor-default ${
                                   isFailed
                                     ? 'bg-rose-50 text-rose-700'
                                     : isRowActive
@@ -3511,11 +4186,11 @@ export default function SchoolErpPage() {
                       title="Click and drag header to scroll horizontally"
                       className={isHeaderDragging ? 'cursor-grabbing select-none' : 'cursor-grab select-none'}
                     >
-                      <tr className="sticky top-0 z-40 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
+                      <tr className="sticky top-0 z-20 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
                         {/* Frozen Roll Header */}
                         <th
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-50 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
@@ -3523,7 +4198,7 @@ export default function SchoolErpPage() {
                         {/* Frozen Student Name Header */}
                         <th
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-50 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-[48px] z-30 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
@@ -3531,20 +4206,21 @@ export default function SchoolErpPage() {
                         {/* 7 Subjects with Centered Headers & Direct Switch Icon */}
                         {displayedSubjects.map((sub) => {
                           const isColActive = focusedCell?.colKey === sub.name;
+                          const isLocked = false;
 
                           return (
                             <th
                               key={sub.name}
                               onClick={() => toggleSort(sub.name)}
-                              className={`py-2 px-1 text-center w-[74px] min-w-[74px] max-w-[74px] border-b border-l border-slate-200 transition-colors relative group ${
+                              className={`py-2 px-1 text-center w-[74px] min-w-[74px] max-w-[74px] bg-slate-50 border-b border-l border-slate-200 transition-colors relative group cursor-pointer ${
                                 isColActive
-                                  ? 'bg-blue-50/80 text-blue-900 font-bold border-blue-200'
+                                  ? 'bg-blue-50 text-blue-900 font-bold border-blue-200'
                                   : 'hover:bg-slate-100 text-slate-700'
                               }`}
-                              title={`${sub.name} (Max: ${sub.maxMarks}) | Click and drag header to scroll`}
+                              title={`${sub.name} (Max: ${sub.maxMarks}) | Click to sort`}
                             >
                               <div className="flex items-center justify-center">
-                                <span className="font-bold text-slate-800">{getSubjectHeaderLabel(sub.name)}</span>
+                                <span className="font-bold text-slate-800">{getSubjectHeaderLabel(sub.name).toUpperCase()}</span>
                               </div>
                               <div className="text-[10px] font-normal text-slate-400 text-center mt-0.5">
                                 {sub.maxMarks}
@@ -3556,33 +4232,38 @@ export default function SchoolErpPage() {
                         {/* Total Sortable */}
                         <th
                           onClick={() => toggleSort('total')}
-                          className="py-2 px-1 text-center w-[70px] min-w-[70px] border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
+                          className="py-2 px-1 text-center w-[70px] min-w-[70px] bg-slate-50 border-b border-l border-slate-200 hover:bg-slate-100 transition-colors cursor-pointer"
                         >
-                          <div className="text-center font-bold text-slate-800">Total</div>
+                          <div className="text-center font-bold text-slate-800">TOTAL</div>
                           <div className="text-[10px] font-normal text-slate-400 text-center mt-0.5">
-                            {displayedSubjects.reduce((sum, s) => sum + (s.maxMarks || 0), 0)}
+                            {(processedStudents[0]
+                              ? computedResultsMap.get(processedStudents[0].id)?.totalMax
+                              : computedResults[0]?.totalMax) ??
+                              displayedSubjects.reduce((sum, s) => sum + (s.maxMarks || 0), 0)}
                           </div>
                         </th>
 
                         {/* Percentage Sortable */}
                         <th
                           onClick={() => toggleSort('percentage')}
-                          className="py-2 px-1 text-center w-[68px] min-w-[68px] border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
+                          className="py-2 px-1 text-center w-[72px] min-w-[72px] bg-slate-50 border-b border-l border-slate-200 hover:bg-slate-100 transition-colors cursor-pointer"
                         >
-                          <div className="text-center font-bold text-slate-800">Pct (%)</div>
+                          <div className="text-center font-bold text-slate-800">PCT (%)</div>
+                          <div className="text-[10px] font-normal text-slate-400 text-center mt-0.5">%</div>
                         </th>
 
                         {/* Grade */}
-                        <th className="py-2 px-1 text-center w-[58px] min-w-[58px] border-b border-l border-slate-200">
-                          <div className="text-center font-bold text-slate-800">Grade</div>
+                        <th className="py-2 px-1 text-center w-[58px] min-w-[58px] bg-slate-50 border-b border-l border-slate-200">
+                          <div className="text-center font-bold text-slate-800">GRADE</div>
                         </th>
 
                         {/* Rank Sortable */}
                         <th
                           onClick={() => toggleSort('rank')}
-                          className="py-2 px-1 text-center w-[54px] min-w-[54px] border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
+                          className="py-2 px-1 text-center w-[54px] min-w-[54px] bg-slate-50 border-b border-l border-slate-200 hover:bg-slate-100 transition-colors cursor-pointer"
                         >
-                          <div className="text-center font-bold text-slate-800">Rank</div>
+                          <div className="text-center font-bold text-slate-800">RANK</div>
+                          <div className="text-[10px] font-normal text-slate-400 text-center mt-0.5">CLASS</div>
                         </th>
                       </tr>
                     </thead>
@@ -3618,19 +4299,19 @@ export default function SchoolErpPage() {
                               }`}
                             >
                               {/* Frozen Roll Number */}
-                              <td className={`sticky left-0 z-20 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 transition-colors ${
+                              <td className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 transition-colors select-none cursor-default ${
                                 isRowActive
-                                  ? 'bg-blue-100/90 font-bold text-blue-950'
-                                  : 'bg-white group-hover/row:bg-slate-100/90'
+                                  ? 'bg-blue-100 font-bold text-blue-950'
+                                  : 'bg-white group-hover/row:bg-slate-100'
                               }`}>
                                 {student.rollNo}
                               </td>
 
                               {/* Frozen Student Name */}
-                              <td className={`sticky left-[48px] z-20 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 transition-colors ${
+                              <td className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 transition-colors ${
                                 isRowActive
-                                  ? 'bg-blue-100/90 font-semibold text-blue-950'
-                                  : 'bg-white group-hover/row:bg-slate-100/90'
+                                  ? 'bg-blue-100 font-semibold text-blue-950'
+                                  : 'bg-white group-hover/row:bg-slate-100'
                               }`}>
                                 <div className="flex items-center justify-between gap-1.5 w-full group/name">
                                   <button
@@ -3661,6 +4342,7 @@ export default function SchoolErpPage() {
 
                               {/* Subject Marks Editable Cells */}
                               {displayedSubjects.map((sub, subIdx) => {
+                                const isLocked = false;
                                 const markVal = student.marks[sub.name];
                                 const isFocused =
                                   focusedCell?.rowIdx === rowIdx &&
@@ -3715,8 +4397,18 @@ export default function SchoolErpPage() {
                                         targetInput.focus();
                                       }
                                     }}
+                                    onDoubleClick={(e) => {
+                                      if (e.altKey && sub.components && sub.components.length > 1) {
+                                        setInternalModalData({ student, subjectName: sub.name });
+                                      } else {
+                                        replaceOnNextKeyRef.current = false;
+                                        setIsCellEditing(true);
+                                      }
+                                    }}
                                     onMouseDown={(e) => {
                                       if (e.button !== 0) return;
+                                      replaceOnNextKeyRef.current = true;
+                                      setIsCellEditing(false);
                                       if (e.shiftKey) {
                                         isShiftSelectingRef.current = true;
                                         setSelectedRange((prev) => {
@@ -3764,7 +4456,7 @@ export default function SchoolErpPage() {
                                       isFocused && (!normalizedRange || normalizedRange.cellCount <= 1)
                                         ? 'ring-2 ring-inset ring-blue-600 z-10'
                                         : ''
-                                    }`}
+                                    } cursor-cell`}
                                   >
                                     <input
                                       ref={(el) => {
@@ -3772,8 +4464,11 @@ export default function SchoolErpPage() {
                                       }}
                                       data-excel-cell="true"
                                       type="text"
+                                      readOnly={isLocked}
                                       value={displayVal}
-                                      onFocus={(e) => {
+                                      onFocus={() => {
+                                        replaceOnNextKeyRef.current = true;
+                                        setIsCellEditing(false);
                                         setFocusedCell({ rowIdx, colKey: sub.name });
                                         setSelectedStudentId(student.id);
                                         if (!isSelectingRef.current && !isSelecting && !isShiftSelectingRef.current && !isInsideActiveRange) {
@@ -3786,6 +4481,8 @@ export default function SchoolErpPage() {
                                       }}
                                       onMouseDown={(e) => {
                                         if (e.button !== 0) return;
+                                        replaceOnNextKeyRef.current = true;
+                                        setIsCellEditing(false);
                                         if (e.shiftKey) {
                                           isShiftSelectingRef.current = true;
                                           setSelectedRange((prev) => {
@@ -3812,21 +4509,33 @@ export default function SchoolErpPage() {
                                           );
                                         }
                                       }}
-                                      onClick={(e) => {
+                                      onDoubleClick={(e) => {
+                                        if (e.altKey && sub.components && sub.components.length > 1) {
+                                          setInternalModalData({ student, subjectName: sub.name });
+                                        } else {
+                                          replaceOnNextKeyRef.current = false;
+                                          setIsCellEditing(true);
+                                        }
                                       }}
                                       onMouseUp={() => {
                                         isSelectingRef.current = false;
                                         setIsSelecting(false);
                                       }}
                                       onDragStart={(e) => e.preventDefault()}
-                                      onChange={(e) =>
-                                        handleMarkChange(student.id, sub.name, e.target.value)
-                                      }
+                                      onChange={(e) => {
+                                        handleMarkChange(student.id, sub.name, e.target.value);
+                                      }}
                                       onKeyDown={(e) =>
-                                        handleCellKeyDown(e, rowIdx, sub.name, student.id)
+                                        handleCellKeyDown(e, rowIdx, sub.name, student.id, isLocked)
                                       }
-                                      onPaste={(e) => handlePaste(e, rowIdx, sub.name)}
-                                      className={`w-full h-10 px-1 text-center font-mono tabular-nums text-xs font-semibold bg-transparent focus:outline-none transition-none cursor-cell select-text selection:bg-transparent selection:text-slate-900 ${
+                                      onPaste={(e) => {
+                                        handlePaste(e, rowIdx, sub.name);
+                                      }}
+                                      className={`w-full h-10 px-1 text-center font-mono tabular-nums text-xs font-semibold bg-transparent focus:outline-none transition-none ${
+                                        isLocked
+                                          ? 'caret-transparent select-none cursor-default selection:bg-transparent'
+                                          : 'select-text cursor-cell selection:bg-transparent selection:text-slate-900'
+                                      } ${
                                         isFocused
                                           ? 'text-slate-950 font-semibold'
                                           : 'text-slate-800'
@@ -3837,32 +4546,32 @@ export default function SchoolErpPage() {
                               })}
 
                               {/* Total Marks */}
-                              <td className={`w-[70px] min-w-[70px] h-10 p-0 text-center font-mono tabular-nums font-semibold border-b border-l border-slate-200 transition-colors ${
+                              <td className={`w-[70px] min-w-[70px] h-10 p-0 text-center font-mono tabular-nums font-semibold border-b border-l border-slate-200 transition-colors select-none cursor-default ${
                                 isRowActive ? 'bg-blue-50/90 text-blue-950 font-bold' : 'text-slate-900 group-hover/row:bg-slate-100/70'
                               }`}>
                                 {result?.totalObtained ?? 0}
                               </td>
 
                               {/* Percentage */}
-                              <td className={`w-[68px] min-w-[68px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 transition-colors ${
+                              <td className={`w-[72px] min-w-[72px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 transition-colors select-none cursor-default ${
                                 isRowActive ? 'bg-blue-50/90 text-blue-950 font-bold' : 'text-slate-800 group-hover/row:bg-slate-100/70'
                               }`}>
-                                {result ? `${result.percentage.toFixed(1)}%` : '0%'}
+                                {result ? `${result.percentage.toFixed(1)}%` : '0.0%'}
                               </td>
 
                               {/* Grade */}
-                              <td className={`w-[58px] min-w-[58px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 transition-colors ${
+                              <td className={`w-[58px] min-w-[58px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 transition-colors select-none cursor-default ${
                                 isRowActive ? 'bg-blue-50/90 text-blue-950 font-bold' : 'text-slate-800 group-hover/row:bg-slate-100/70'
                               }`}>
                                 {result?.grade ?? 'E'}
                               </td>
 
                               {/* Rank */}
-                              <td className={`w-[54px] min-w-[54px] h-10 p-0 text-center font-mono text-xs border-b border-l border-slate-200 transition-colors ${
+                              <td className={`w-[54px] min-w-[54px] h-10 p-0 text-center font-mono text-xs border-b border-l border-slate-200 transition-colors select-none cursor-default ${
                                 isRowActive ? 'bg-blue-50/90' : 'group-hover/row:bg-slate-100/70'
                               }`}>
                                 {result?.rank ? (
-                                  <span className={result.rank <= 3 ? 'text-slate-900 font-bold' : 'text-slate-600 font-medium'}>
+                                  <span className="text-slate-900 font-bold">
                                     #{result.rank}
                                   </span>
                                 ) : '-'}
@@ -3902,7 +4611,88 @@ export default function SchoolErpPage() {
                     Failed: <strong className="font-semibold font-mono text-rose-600">{summaryStats.failCount}</strong>
                   </span>
                 </div>
+
+                {/* Range Selection Stats Indicator */}
+                {rangeStats && rangeStats.cellCount > 1 && (
+                  <div className="flex items-center gap-2 bg-blue-50/90 border border-blue-200/80 text-blue-800 px-2.5 py-1 rounded-md text-[11px] font-medium shrink-0 animate-in fade-in duration-100">
+                    <span className="font-semibold text-blue-900">Selected: {rangeStats.cellCount} cells</span>
+                    <span className="text-blue-300">|</span>
+                    <span>Count: <strong className="font-mono text-blue-900">{rangeStats.numericCount}</strong></span>
+                    <span className="text-blue-300">|</span>
+                    <span>Sum: <strong className="font-mono text-blue-900">{rangeStats.sum}</strong></span>
+                    <span className="text-blue-300">|</span>
+                    <span>Avg: <strong className="font-mono text-blue-900">{rangeStats.avg}</strong></span>
+                    <span className="text-blue-300">|</span>
+                    <span>Min: <strong className="font-mono text-blue-900">{rangeStats.min}</strong></span>
+                    <span className="text-blue-300">|</span>
+                    <span>Max: <strong className="font-mono text-blue-900">{rangeStats.max}</strong></span>
+                  </div>
+                )}
               </div>
+            </div>
+
+            {/* Total Calculation & Formula Card (Config & applied formula for every class) */}
+            <div className="mt-5">
+              <TotalCalculationFormulaCard
+                baseExamConfig={baseExamConfig}
+                activeExamId={selectedExam}
+                selectedClass={selectedClass}
+                students={students}
+                onUpdateExamConfig={(examId, updated, classScope) => {
+                  setExamConfigs((prev) => ({
+                    ...prev,
+                    [examId]: updated,
+                  }));
+                  if (examId === selectedExam) {
+                    const updatedStudents = students.map((st) => {
+                      if (
+                        classScope &&
+                        classScope !== 'ALL' &&
+                        st.section !== classScope &&
+                        st.class !== classScope &&
+                        getClassGradeFromSection(st.section) !== classScope
+                      ) {
+                        return st;
+                      }
+                      const effectiveCfg = getEffectiveExamConfigForClass(updated, st.section);
+                      const nextMarks = { ...st.marks };
+                      const nextBreakdowns = { ...(st.breakdowns || {}) };
+                      effectiveCfg.subjects.forEach((sub) => {
+                        if (sub.components && sub.components.length > 1) {
+                          const bd =
+                            nextBreakdowns[sub.name] ||
+                            generateDefaultBreakdown(
+                              nextMarks[sub.name],
+                              sub.name,
+                              st.section
+                            );
+                          nextBreakdowns[sub.name] = bd;
+                          nextMarks[sub.name] = computeSubjectTotalFromBreakdown(
+                            sub.name,
+                            st.section,
+                            bd,
+                            sub.components
+                          );
+                        }
+                      });
+                      return {
+                        ...st,
+                        marks: nextMarks,
+                        breakdowns: nextBreakdowns,
+                      };
+                    });
+                    setStudents(updatedStudents);
+                    syncStoresForExam(selectedExam, updatedStudents);
+                    triggerAutoSync(updatedStudents);
+                  }
+                  showToast(
+                    `Updated ${updated.name}${
+                      classScope && classScope !== 'ALL' ? ` (${classScope})` : ' (All Classes)'
+                    }`
+                  );
+                }}
+                showToast={showToast}
+              />
             </div>
           </div>
         )}
@@ -3934,7 +4724,7 @@ export default function SchoolErpPage() {
               </div>
               {res && (
                 <div className="text-[10px] text-slate-400 font-mono mt-0.5">
-                  Total {res.totalObtained}/700 ({res.percentage.toFixed(1)}%) · {res.status}
+                  Total {res.totalObtained}/{res.totalMax} ({res.percentage.toFixed(2)}%) · {res.status}
                 </div>
               )}
             </div>
@@ -4005,6 +4795,28 @@ export default function SchoolErpPage() {
                 <span className="text-[10px] text-slate-400 font-mono">E</span>
               </button>
 
+              {activeSubjects.some((s) => s.components && s.components.length > 1) && (
+                <button
+                  onClick={() => {
+                    const targetSubName =
+                      focusedCell && activeSubjects.some((s) => s.name === focusedCell.colKey)
+                        ? focusedCell.colKey
+                        : activeSubjects[0]?.name || 'English';
+                    setInternalModalData({
+                      student: contextMenu.student,
+                      subjectName: targetSubName,
+                    });
+                    setContextMenu(null);
+                  }}
+                  className="w-full flex items-center justify-between px-2.5 py-1.5 text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer text-left group"
+                >
+                  <div className="flex items-center gap-2">
+                    <Award className="w-3.5 h-3.5 text-blue-600 shrink-0" />
+                    <span>Edit Assessment Breakdown</span>
+                  </div>
+                </button>
+              )}
+
               <button
                 onClick={() => handleCopyStudentSummary(contextMenu.student)}
                 className="w-full flex items-center justify-between px-2.5 py-1.5 text-slate-700 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer text-left group"
@@ -4072,14 +4884,14 @@ export default function SchoolErpPage() {
             VIEW 1B: TEACHER REMARKS ENTRY LEDGER (Subject & Class Teacher)
            ======================================================== */}
         {activeTab === 'remarks' && (
-          <div className="flex-1 flex flex-col gap-5">
+          <div className="flex-1 flex flex-col gap-4">
             {/* Page Header Strip */}
-            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900">
+                <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
                   Teacher Remarks
                 </h1>
-                <p className="text-xs text-slate-500 mt-1 font-normal">
+                <p className="text-xs text-slate-500 mt-0.5 font-normal">
                   Write subject feedback or overall class teacher remarks for each student. Anything you type here is automatically added to their report card.
                 </p>
               </div>
@@ -4088,119 +4900,82 @@ export default function SchoolErpPage() {
               <div className="flex items-center flex-wrap gap-2">
                 <button
                   type="button"
-                  onClick={() => {
-                    pushUndoSnapshot(students);
-                    const updated = applyAutoRemarksToStudents(
-                      students,
-                      activeSubjects,
-                      selectedClass,
-                      selectedRemarkScope,
-                      true
-                    );
-                    setStudents(updated);
-                    triggerAutoSync(updated);
-                    showToast('Filled remarks based on student marks');
-                  }}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-200/90 rounded-xl hover:bg-slate-50 hover:text-slate-900 shadow-2xs transition-all cursor-pointer"
-                >
-                  <RefreshCw className="w-3.5 h-3.5 text-blue-600" />
-                  <span>Fill Remarks by Marks</span>
-                </button>
-                <button
-                  type="button"
                   onClick={() => setActiveTab('reportcards')}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-2xs transition-all cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-2xs transition-colors cursor-pointer"
                 >
-                  <FileText className="w-3.5 h-3.5" />
+                  <FileText className="w-3.5 h-3.5 text-white" />
                   <span>View Report Cards</span>
                 </button>
               </div>
             </div>
 
             {/* Unified Control Bar (Identical styling to Marks Entry) */}
-            <div className="bg-white border border-slate-200/90 rounded-xl p-3.5 shadow-xs flex flex-col lg:flex-row lg:items-center justify-between gap-3">
-              <div className="flex flex-wrap items-center gap-3">
+            <div className="bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+              <div className="flex flex-wrap items-center gap-2.5">
                 {/* 1. Class Dropdown */}
-                <div className="flex items-center gap-2 bg-slate-50 border border-slate-200/90 rounded-lg px-3 py-2">
-                  <label htmlFor="remarks-class-select" className="text-xs font-semibold text-slate-500 whitespace-nowrap flex items-center gap-1.5">
-                    <Layers className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Class:</span>
-                  </label>
-                  <select
-                    id="remarks-class-select"
-                    value={selectedClass}
-                    onChange={(e) => {
-                      setSelectedClass(e.target.value);
-                      setCurrentPage(1);
-                    }}
-                    className="bg-transparent text-xs font-semibold text-slate-900 focus:outline-none cursor-pointer pr-1"
-                  >
-                    <option value="all">All Classes ({students.length})</option>
-                    {SVA_ALL_CLASSES.map((cls) => (
-                      <option key={cls} value={cls}>
-                        {getClassGradeLabel(cls)} ({classCounts[cls] || 0})
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <CustomSelect
+                  id="remarks-class-select"
+                  icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
+                  prefixLabel="Class:"
+                  value={selectedClass}
+                  onChange={(val) => {
+                    setSelectedClass(val);
+                    setCurrentPage(1);
+                  }}
+                  options={[
+                    { value: 'all', label: `All Classes (${students.length})` },
+                    ...SVA_ALL_CLASSES.map((cls) => ({
+                      value: cls,
+                      label: `${getClassGradeLabel(cls)} (${classCounts[cls] || 0})`,
+                    })),
+                  ]}
+                />
 
                 {/* 2. Exam Dropdown */}
-                <div className="flex items-center gap-2 bg-slate-50 border border-slate-200/90 rounded-lg px-3 py-2">
-                  <label htmlFor="remarks-exam-select" className="text-xs font-semibold text-slate-500 whitespace-nowrap flex items-center gap-1.5">
-                    <BookOpen className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Exam:</span>
-                  </label>
-                  <select
-                    id="remarks-exam-select"
-                    value={selectedExam}
-                    onChange={(e) => handleExamChange(e.target.value)}
-                    className="bg-transparent text-xs font-semibold text-slate-900 focus:outline-none cursor-pointer pr-1"
-                  >
-                    {Object.values(examConfigs).map((ex) => (
-                      <option key={ex.id} value={ex.id}>
-                        {ex.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <CustomSelect
+                  id="remarks-exam-select"
+                  icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
+                  prefixLabel="Exam:"
+                  value={selectedExam}
+                  onChange={(val) => handleExamChange(val)}
+                  options={Object.values(examConfigs).map((ex) => ({
+                    value: ex.id,
+                    label: ex.name,
+                  }))}
+                />
 
                 {/* 3. Subject / Remark Scope Dropdown */}
-                <div className="flex items-center gap-2 bg-slate-50 border border-slate-200/90 rounded-lg px-3 py-2">
-                  <label htmlFor="remarks-scope-select" className="text-xs font-semibold text-slate-500 whitespace-nowrap flex items-center gap-1.5">
-                    <Award className="w-3.5 h-3.5 text-slate-400" />
-                    <span>Subject:</span>
-                  </label>
-                  <select
-                    id="remarks-scope-select"
-                    value={selectedRemarkScope}
-                    onChange={(e) => setSelectedRemarkScope(e.target.value)}
-                    className="bg-transparent text-xs font-semibold text-slate-900 focus:outline-none cursor-pointer pr-1"
-                  >
-                    <option value="all">All Remarks</option>
-                    <option value="class_teacher">Class Teacher Remarks</option>
-                    {activeSubjects.map((sub) => (
-                      <option key={sub.name} value={sub.name}>
-                        {sub.name}
-                      </option>
-                    ))}
-                  </select>
-                </div>
+                <CustomSelect
+                  id="remarks-scope-select"
+                  icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
+                  prefixLabel="Subject:"
+                  value={selectedRemarkScope}
+                  onChange={(val) => setSelectedRemarkScope(val)}
+                  options={[
+                    { value: 'all', label: 'All Remarks' },
+                    { value: 'class_teacher', label: 'Class Teacher Remarks' },
+                    ...activeSubjects.map((sub) => ({
+                      value: sub.name,
+                      label: sub.name,
+                    })),
+                  ]}
+                />
               </div>
 
               {/* 4. Search Input */}
               <div className="relative w-full sm:w-64 lg:ml-auto">
-                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute left-2.5 top-1/2 -translate-y-1/2" />
                 <input
                   type="text"
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search name or roll no..."
-                  className="w-full pl-8 pr-7 py-2 text-xs bg-slate-50 border border-slate-200/90 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:ring-1 focus:ring-slate-900 transition-all"
+                  className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-slate-900 transition-colors"
                 />
                 {searchQuery && (
                   <button
                     onClick={() => setSearchQuery('')}
-                    className="absolute right-2.5 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
+                    className="absolute right-2 top-1/2 -translate-y-1/2 text-slate-400 hover:text-slate-600 p-0.5"
                   >
                     <X className="w-3 h-3" />
                   </button>
@@ -4209,30 +4984,42 @@ export default function SchoolErpPage() {
             </div>
 
             {/* Remarks Spreadsheet Card with Left & Right Horizontal Scroll Buttons & Drag-to-Scroll Headers */}
-            <div className="bg-white border border-slate-200/90 rounded-xl shadow-[0_1px_3px_rgba(0,0,0,0.04)] flex flex-col overflow-hidden relative">
-              {/* Left & Right Horizontal Scroll Buttons fixed/sticky on screen with transparency when not in use */}
-              <div className="sticky top-1/2 -translate-y-1/2 z-40 w-full flex items-center justify-between pointer-events-none px-2 h-0 overflow-visible my-auto">
-                <button
-                  type="button"
-                  data-testid="remarks-scroll-left"
-                  aria-label="Scroll remarks table left"
-                  title="Scroll left"
-                  onClick={() => scrollHorizontalBy(remarksScrollContainerRef.current, 'left')}
-                  className="pointer-events-auto w-9 h-9 rounded-full bg-white/95 backdrop-blur-sm border border-slate-300 shadow-md text-slate-700 opacity-30 hover:opacity-100 hover:bg-slate-900 hover:text-white hover:border-slate-900 active:scale-95 transition-all flex items-center justify-center cursor-pointer"
-                >
-                  <ChevronLeft className="w-4 h-4" />
-                </button>
-                <button
-                  type="button"
-                  data-testid="remarks-scroll-right"
-                  aria-label="Scroll remarks table right"
-                  title="Scroll right"
-                  onClick={() => scrollHorizontalBy(remarksScrollContainerRef.current, 'right')}
-                  className="pointer-events-auto w-9 h-9 rounded-full bg-white/95 backdrop-blur-sm border border-slate-300 shadow-md text-slate-700 opacity-30 hover:opacity-100 hover:bg-slate-900 hover:text-white hover:border-slate-900 active:scale-95 transition-all flex items-center justify-center cursor-pointer"
-                >
-                  <ChevronRight className="w-4 h-4" />
-                </button>
-              </div>
+            <div className="bg-white border border-slate-200/80 rounded-xl shadow-xs flex flex-col overflow-hidden relative isolate z-10">
+              {/* Left & Right Horizontal Scroll Paddles: only shown in All Remarks view, transparent when not in use */}
+              {selectedRemarkScope === 'all' && (
+                <div className="fixed top-1/2 -translate-y-1/2 inset-x-0 z-30 pointer-events-none">
+                  <div className="max-w-[1440px] mx-auto w-full px-1.5 sm:px-2 flex items-center justify-between">
+                    <button
+                      type="button"
+                      data-testid="remarks-scroll-left"
+                      aria-label="Scroll remarks table left"
+                      title="Scroll remarks columns left"
+                      onClick={() => scrollHorizontalBy(remarksScrollContainerRef.current, 'left')}
+                      className={`pointer-events-auto w-8 h-8 rounded-full border transition-all duration-200 flex items-center justify-center cursor-pointer active:scale-95 ${
+                        isHorizontalScrollActive
+                          ? 'bg-white border-slate-200/90 text-slate-900 opacity-100 shadow-[0_4px_12px_rgba(15,23,42,0.12)]'
+                          : 'bg-transparent border-slate-300/40 text-slate-500 opacity-30 shadow-none hover:opacity-100 hover:bg-white hover:border-slate-200/90 hover:text-slate-900 hover:shadow-[0_4px_12px_rgba(15,23,42,0.12)] focus-visible:opacity-100 focus-visible:bg-white'
+                      }`}
+                    >
+                      <ChevronLeft className="w-4 h-4" />
+                    </button>
+                    <button
+                      type="button"
+                      data-testid="remarks-scroll-right"
+                      aria-label="Scroll remarks table right"
+                      title="Scroll remarks columns right"
+                      onClick={() => scrollHorizontalBy(remarksScrollContainerRef.current, 'right')}
+                      className={`pointer-events-auto w-8 h-8 rounded-full border transition-all duration-200 flex items-center justify-center cursor-pointer active:scale-95 ${
+                        isHorizontalScrollActive
+                          ? 'bg-white border-slate-200/90 text-slate-900 opacity-100 shadow-[0_4px_12px_rgba(15,23,42,0.12)]'
+                          : 'bg-transparent border-slate-300/40 text-slate-500 opacity-30 shadow-none hover:opacity-100 hover:bg-white hover:border-slate-200/90 hover:text-slate-900 hover:shadow-[0_4px_12px_rgba(15,23,42,0.12)] focus-visible:opacity-100 focus-visible:bg-white'
+                      }`}
+                    >
+                      <ChevronRight className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+              )}
 
               <div
                 ref={remarksScrollContainerRef}
@@ -4246,36 +5033,41 @@ export default function SchoolErpPage() {
                       title="Click and drag header to scroll horizontally"
                       className={isHeaderDragging ? 'cursor-grabbing select-none' : 'cursor-grab select-none'}
                     >
-                      <tr className="sticky top-0 z-40 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
+                      <tr className="sticky top-0 z-20 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
                         <th
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-50 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
                         <th
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-50 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-[48px] z-30 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
                         <th
                           onClick={() => toggleSort('total')}
-                          className="py-2 px-2 text-center w-[75px] min-w-[75px] border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
+                          className="py-2 px-2 text-center w-[75px] min-w-[75px] bg-slate-50 border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
                         >
                           <div className="text-center font-bold text-slate-800">Total</div>
-                          <div className="text-[10px] font-normal text-slate-400 mt-0.5">700</div>
+                          <div className="text-[10px] font-normal text-slate-400 mt-0.5">
+                            {(processedStudents[0]
+                              ? computedResultsMap.get(processedStudents[0].id)?.totalMax
+                              : computedResults[0]?.totalMax) ??
+                              activeSubjects.reduce((sum, s) => sum + (s.maxMarks || 0), 0)}
+                          </div>
                         </th>
                         <th
                           onClick={() => toggleSort('percentage')}
-                          className="py-2 px-2 text-center w-[75px] min-w-[75px] border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
+                          className="py-2 px-2 text-center w-[75px] min-w-[75px] bg-slate-50 border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
                         >
                           <div className="text-center font-bold text-slate-800">Pct (%)</div>
                         </th>
-                        <th className="py-2 px-2 text-center w-[65px] min-w-[65px] border-b border-l border-slate-200">
+                        <th className="py-2 px-2 text-center w-[65px] min-w-[65px] bg-slate-50 border-b border-l border-slate-200">
                           <div className="text-center font-bold text-slate-800">Grade</div>
                         </th>
-                        <th className="py-2.5 px-3 text-center w-full min-w-[420px] border-b border-l border-slate-200">
+                        <th className="py-2.5 px-3 text-center w-full min-w-[420px] bg-slate-50 border-b border-l border-slate-200">
                           <div className="text-center font-bold text-slate-800">Class Teacher Remark</div>
                         </th>
                       </tr>
@@ -4283,7 +5075,7 @@ export default function SchoolErpPage() {
                     <tbody>
                       {paginatedStudents.length === 0 ? (
                         <tr>
-                          <td colSpan={5} className="py-12 text-center text-slate-400 text-sm border-b border-slate-100">
+                          <td colSpan={6} className="py-12 text-center text-slate-400 text-sm border-b border-slate-100">
                             No students matching your search criteria.
                           </td>
                         </tr>
@@ -4304,19 +5096,19 @@ export default function SchoolErpPage() {
                               }`}
                             >
                               <td
-                                className={`sticky left-0 z-20 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 ${
+                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 select-none cursor-default ${
                                   isSelectedForReport
-                                    ? 'bg-blue-100/90 font-bold text-blue-950'
-                                    : 'bg-white group-hover/row:bg-slate-100/90'
+                                    ? 'bg-blue-100 font-bold text-blue-950'
+                                    : 'bg-white group-hover/row:bg-slate-100'
                                 }`}
                               >
                                 {student.rollNo}
                               </td>
                               <td
-                                className={`sticky left-[48px] z-20 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 ${
+                                className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 ${
                                   isSelectedForReport
-                                    ? 'bg-blue-100/90 font-semibold text-blue-950'
-                                    : 'bg-white group-hover/row:bg-slate-100/90'
+                                    ? 'bg-blue-100 font-semibold text-blue-950'
+                                    : 'bg-white group-hover/row:bg-slate-100'
                                 }`}
                               >
                                 <button
@@ -4331,13 +5123,13 @@ export default function SchoolErpPage() {
                                   <span className="truncate">{student.name}</span>
                                 </button>
                               </td>
-                              <td className="w-[75px] min-w-[75px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 bg-slate-50/60">
+                              <td className="w-[75px] min-w-[75px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 bg-slate-50/60 select-none cursor-default">
                                 {result?.totalObtained ?? 0}
                               </td>
-                              <td className="w-[75px] min-w-[75px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 bg-slate-50/60">
-                                {result ? `${result.percentage.toFixed(1)}%` : '0%'}
+                              <td className="w-[75px] min-w-[75px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 bg-slate-50/60 select-none cursor-default">
+                                {result ? `${result.percentage.toFixed(2)}%` : '0.00%'}
                               </td>
-                              <td className="w-[65px] min-w-[65px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-slate-50/60">
+                              <td className="w-[65px] min-w-[65px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-slate-50/60 select-none cursor-default">
                                 {result?.grade ?? 'E'}
                               </td>
                               <td className="h-10 p-0 border-b border-l border-slate-200 bg-white focus-within:ring-2 focus-within:ring-inset focus-within:ring-blue-600 focus-within:z-10">
@@ -4350,6 +5142,10 @@ export default function SchoolErpPage() {
                                     aria-label={`Class Teacher Remark for ${student.name}`}
                                     value={student.customRemarks || ''}
                                     placeholder="Enter class teacher remark..."
+                                    onFocus={(e) => {
+                                      setSelectedStudentId(student.id);
+                                      ensureCellVisible(e.currentTarget);
+                                    }}
                                     onChange={(e) => {
                                       const val = e.target.value;
                                       pushUndoSnapshot(students);
@@ -4363,11 +5159,17 @@ export default function SchoolErpPage() {
                                       if (e.key === 'Enter' || e.key === 'ArrowDown') {
                                         e.preventDefault();
                                         const nextEl = remarkInputRefs.current[`rem-ct-${rowIdx + 1}`];
-                                        if (nextEl) nextEl.focus();
+                                        if (nextEl) {
+                                          nextEl.focus({ preventScroll: true });
+                                          ensureCellVisible(nextEl);
+                                        }
                                       } else if (e.key === 'ArrowUp') {
                                         e.preventDefault();
                                         const prevEl = remarkInputRefs.current[`rem-ct-${rowIdx - 1}`];
-                                        if (prevEl) prevEl.focus();
+                                        if (prevEl) {
+                                          prevEl.focus({ preventScroll: true });
+                                          ensureCellVisible(prevEl);
+                                        }
                                       }
                                     }}
                                     className="flex-1 min-w-0 h-10 px-3 text-left text-xs text-slate-900 placeholder-slate-300 bg-transparent focus:outline-none"
@@ -4388,30 +5190,30 @@ export default function SchoolErpPage() {
                       title="Click and drag header to scroll horizontally"
                       className={isHeaderDragging ? 'cursor-grabbing select-none' : 'cursor-grab select-none'}
                     >
-                      <tr className="sticky top-0 z-40 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
+                      <tr className="sticky top-0 z-20 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
                         <th
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-50 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
                         <th
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-50 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-[48px] z-30 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
                         <th
                           onClick={() => toggleSort(selectedRemarkScope)}
-                          className="py-2 px-2 text-center w-[80px] min-w-[80px] border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
+                          className="py-2 px-2 text-center w-[80px] min-w-[80px] bg-slate-50 border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
                         >
                           <div className="text-center font-bold text-slate-800">{getSubjectHeaderLabel(selectedRemarkScope)}</div>
                           <div className="text-[10px] font-normal text-slate-400 mt-0.5">100</div>
                         </th>
-                        <th className="py-2 px-2 text-center w-[65px] min-w-[65px] border-b border-l border-slate-200">
+                        <th className="py-2 px-2 text-center w-[65px] min-w-[65px] bg-slate-50 border-b border-l border-slate-200">
                           <div className="text-center font-bold text-slate-800">Grade</div>
                         </th>
-                        <th className="py-2.5 px-3 text-center w-full border-b border-l border-slate-200">
+                        <th className="py-2.5 px-3 text-center w-full bg-slate-50 border-b border-l border-slate-200">
                           <div className="text-center font-bold text-slate-800">{getSubjectHeaderLabel(selectedRemarkScope)} Remark</div>
                         </th>
                       </tr>
@@ -4447,19 +5249,19 @@ export default function SchoolErpPage() {
                               }`}
                             >
                               <td
-                                className={`sticky left-0 z-20 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 ${
+                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 select-none cursor-default ${
                                   isSelectedForReport
-                                    ? 'bg-blue-100/90 font-bold text-blue-950'
-                                    : 'bg-white group-hover/row:bg-slate-100/90'
+                                    ? 'bg-blue-100 font-bold text-blue-950'
+                                    : 'bg-white group-hover/row:bg-slate-100'
                                 }`}
                               >
                                 {student.rollNo}
                               </td>
                               <td
-                                className={`sticky left-[48px] z-20 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 ${
+                                className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 ${
                                   isSelectedForReport
-                                    ? 'bg-blue-100/90 font-semibold text-blue-950'
-                                    : 'bg-white group-hover/row:bg-slate-100/90'
+                                    ? 'bg-blue-100 font-semibold text-blue-950'
+                                    : 'bg-white group-hover/row:bg-slate-100'
                                 }`}
                               >
                                 <button
@@ -4474,10 +5276,10 @@ export default function SchoolErpPage() {
                                   <span className="truncate">{student.name}</span>
                                 </button>
                               </td>
-                              <td className="w-[80px] min-w-[80px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-slate-50/60">
+                              <td className="w-[80px] min-w-[80px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-slate-50/60 select-none cursor-default">
                                 {markVal === null || markVal === undefined ? '-' : markVal}
                               </td>
-                              <td className="w-[65px] min-w-[65px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-slate-50/60">
+                              <td className="w-[65px] min-w-[65px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-slate-50/60 select-none cursor-default">
                                 {subGrade}
                               </td>
                               <td className="h-10 p-0 border-b border-l border-slate-200 bg-white focus-within:ring-2 focus-within:ring-inset focus-within:ring-blue-600 focus-within:z-10">
@@ -4490,6 +5292,10 @@ export default function SchoolErpPage() {
                                     aria-label={`${selectedRemarkScope} Teacher Remark for ${student.name}`}
                                     value={student.subjectRemarks?.[selectedRemarkScope] ?? ''}
                                     placeholder={`Enter ${selectedRemarkScope} remark...`}
+                                    onFocus={(e) => {
+                                      setSelectedStudentId(student.id);
+                                      ensureCellVisible(e.currentTarget);
+                                    }}
                                     onChange={(e) => {
                                       const val = e.target.value;
                                       pushUndoSnapshot(students);
@@ -4508,14 +5314,20 @@ export default function SchoolErpPage() {
                                           remarkInputRefs.current[
                                             `rem-sub-${rowIdx + 1}-${selectedRemarkScope}`
                                           ];
-                                        if (nextEl) nextEl.focus();
+                                        if (nextEl) {
+                                          nextEl.focus({ preventScroll: true });
+                                          ensureCellVisible(nextEl);
+                                        }
                                       } else if (e.key === 'ArrowUp') {
                                         e.preventDefault();
                                         const prevEl =
                                           remarkInputRefs.current[
                                             `rem-sub-${rowIdx - 1}-${selectedRemarkScope}`
                                           ];
-                                        if (prevEl) prevEl.focus();
+                                        if (prevEl) {
+                                          prevEl.focus({ preventScroll: true });
+                                          ensureCellVisible(prevEl);
+                                        }
                                       }
                                     }}
                                     className="flex-1 min-w-0 h-10 px-3 text-left text-xs text-slate-900 placeholder-slate-300 bg-transparent focus:outline-none"
@@ -4536,26 +5348,26 @@ export default function SchoolErpPage() {
                       title="Click and drag header to scroll horizontally"
                       className={isHeaderDragging ? 'cursor-grabbing select-none' : 'cursor-grab select-none'}
                     >
-                      <tr className="sticky top-0 z-40 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
+                      <tr className="sticky top-0 z-20 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
                         <th
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-50 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
                         <th
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-50 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-[48px] z-30 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
-                        <th className="py-2.5 px-3 text-center min-w-[340px] border-b border-l border-slate-200">
+                        <th className="py-2.5 px-3 text-center min-w-[340px] bg-slate-50 border-b border-l border-slate-200">
                           <div className="text-center font-bold text-slate-800">Class Teacher Remark</div>
                         </th>
                         {activeSubjects.map((sub) => (
                           <th
                             key={sub.name}
-                            className="py-2.5 px-3 text-center min-w-[310px] border-b border-l border-slate-200"
+                            className="py-2.5 px-3 text-center min-w-[310px] bg-slate-50 border-b border-l border-slate-200"
                           >
                             <div className="text-center font-bold text-slate-800">{getSubjectHeaderLabel(sub.name)} Remark</div>
                           </th>
@@ -4585,19 +5397,19 @@ export default function SchoolErpPage() {
                               }`}
                             >
                               <td
-                                className={`sticky left-0 z-20 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 ${
+                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 select-none cursor-default ${
                                   isSelectedForReport
-                                    ? 'bg-blue-100/90 font-bold text-blue-950'
-                                    : 'bg-white group-hover/row:bg-slate-100/90'
+                                    ? 'bg-blue-100 font-bold text-blue-950'
+                                    : 'bg-white group-hover/row:bg-slate-100'
                                 }`}
                               >
                                 {student.rollNo}
                               </td>
                               <td
-                                className={`sticky left-[48px] z-20 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 ${
+                                className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 ${
                                   isSelectedForReport
-                                    ? 'bg-blue-100/90 font-semibold text-blue-950'
-                                    : 'bg-white group-hover/row:bg-slate-100/90'
+                                    ? 'bg-blue-100 font-semibold text-blue-950'
+                                    : 'bg-white group-hover/row:bg-slate-100'
                                 }`}
                               >
                                 <button
@@ -4622,6 +5434,10 @@ export default function SchoolErpPage() {
                                   aria-label={`Class Teacher Remark for ${student.name}`}
                                   value={student.customRemarks || ''}
                                   placeholder="Class teacher remark..."
+                                  onFocus={(e) => {
+                                    setSelectedStudentId(student.id);
+                                    ensureCellVisible(e.currentTarget);
+                                  }}
                                   onChange={(e) => {
                                     const val = e.target.value;
                                     pushUndoSnapshot(students);
@@ -4635,18 +5451,36 @@ export default function SchoolErpPage() {
                                     if (e.key === 'Enter' || e.key === 'ArrowDown') {
                                       e.preventDefault();
                                       const nextEl = remarkInputRefs.current[`rem-all-ct-${rowIdx + 1}`];
-                                      if (nextEl) nextEl.focus();
+                                      if (nextEl) {
+                                        nextEl.focus({ preventScroll: true });
+                                        ensureCellVisible(nextEl);
+                                      }
                                     } else if (e.key === 'ArrowUp') {
                                       e.preventDefault();
                                       const prevEl = remarkInputRefs.current[`rem-all-ct-${rowIdx - 1}`];
-                                      if (prevEl) prevEl.focus();
+                                      if (prevEl) {
+                                        prevEl.focus({ preventScroll: true });
+                                        ensureCellVisible(prevEl);
+                                      }
+                                    } else if (
+                                      e.key === 'ArrowRight' &&
+                                      e.currentTarget.selectionStart === e.currentTarget.value.length &&
+                                      activeSubjects[0]
+                                    ) {
+                                      e.preventDefault();
+                                      const rightEl =
+                                        remarkInputRefs.current[`rem-all-${rowIdx}-${activeSubjects[0].name}`];
+                                      if (rightEl) {
+                                        rightEl.focus({ preventScroll: true });
+                                        ensureCellVisible(rightEl);
+                                      }
                                     }
                                   }}
                                   className="w-full h-10 px-2.5 text-left text-xs text-slate-900 placeholder-slate-300 bg-transparent focus:outline-none"
                                 />
                               </td>
                               {/* 7 Subject Teacher Remark Cells */}
-                              {activeSubjects.map((sub) => {
+                              {activeSubjects.map((sub, subIdx) => {
                                 const subKey = `rem-all-${rowIdx}-${sub.name}`;
                                 const markVal = student.marks[sub.name];
                                 return (
@@ -4655,7 +5489,7 @@ export default function SchoolErpPage() {
                                     className="min-w-[310px] h-10 p-0 border-b border-l border-slate-200 bg-white focus-within:ring-2 focus-within:ring-inset focus-within:ring-blue-600 focus-within:z-10"
                                   >
                                     <div className="flex items-center h-10 w-full">
-                                      <span className="ml-2 px-1.5 py-0.5 rounded bg-slate-100 font-mono text-[10px] font-semibold text-slate-600 shrink-0">
+                                      <span className="ml-2 px-1.5 py-0.5 rounded bg-slate-100 font-mono text-[10px] font-semibold text-slate-600 shrink-0 select-none">
                                         {markVal ?? '-'}
                                       </span>
                                       <input
@@ -4666,6 +5500,10 @@ export default function SchoolErpPage() {
                                         aria-label={`${sub.name} Teacher Remark for ${student.name}`}
                                         value={student.subjectRemarks?.[sub.name] ?? ''}
                                         placeholder={`${getSubjectHeaderLabel(sub.name)} remark...`}
+                                        onFocus={(e) => {
+                                          setSelectedStudentId(student.id);
+                                          ensureCellVisible(e.currentTarget);
+                                        }}
                                         onChange={(e) => {
                                           const val = e.target.value;
                                           pushUndoSnapshot(students);
@@ -4682,12 +5520,47 @@ export default function SchoolErpPage() {
                                             e.preventDefault();
                                             const nextEl =
                                               remarkInputRefs.current[`rem-all-${rowIdx + 1}-${sub.name}`];
-                                            if (nextEl) nextEl.focus();
+                                            if (nextEl) {
+                                              nextEl.focus({ preventScroll: true });
+                                              ensureCellVisible(nextEl);
+                                            }
                                           } else if (e.key === 'ArrowUp') {
                                             e.preventDefault();
                                             const prevEl =
                                               remarkInputRefs.current[`rem-all-${rowIdx - 1}-${sub.name}`];
-                                            if (prevEl) prevEl.focus();
+                                            if (prevEl) {
+                                              prevEl.focus({ preventScroll: true });
+                                              ensureCellVisible(prevEl);
+                                            }
+                                          } else if (
+                                            e.key === 'ArrowLeft' &&
+                                            e.currentTarget.selectionStart === 0
+                                          ) {
+                                            e.preventDefault();
+                                            const leftEl =
+                                              subIdx === 0
+                                                ? remarkInputRefs.current[`rem-all-ct-${rowIdx}`]
+                                                : remarkInputRefs.current[
+                                                    `rem-all-${rowIdx}-${activeSubjects[subIdx - 1].name}`
+                                                  ];
+                                            if (leftEl) {
+                                              leftEl.focus({ preventScroll: true });
+                                              ensureCellVisible(leftEl);
+                                            }
+                                          } else if (
+                                            e.key === 'ArrowRight' &&
+                                            e.currentTarget.selectionStart === e.currentTarget.value.length &&
+                                            subIdx < activeSubjects.length - 1
+                                          ) {
+                                            e.preventDefault();
+                                            const rightEl =
+                                              remarkInputRefs.current[
+                                                `rem-all-${rowIdx}-${activeSubjects[subIdx + 1].name}`
+                                              ];
+                                            if (rightEl) {
+                                              rightEl.focus({ preventScroll: true });
+                                              ensureCellVisible(rightEl);
+                                            }
                                           }
                                         }}
                                         className="flex-1 h-10 px-2 text-left text-xs text-slate-900 placeholder-slate-300 bg-transparent focus:outline-none"
@@ -4712,42 +5585,42 @@ export default function SchoolErpPage() {
             VIEW 2: REPORT CARD GENERATION (Official Luxury Certificate)
            ======================================================== */}
         {activeTab === 'reportcards' && (
-          <div className="flex-1 flex flex-col gap-5">
+          <div className="flex-1 flex flex-col gap-4">
             {/* Page Header Strip */}
-            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900">
+                <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
                   Student Report Cards
                 </h1>
-                <p className="text-xs text-slate-500 mt-1 font-normal">
+                <p className="text-xs text-slate-500 mt-0.5 font-normal">
                   Preview each student&apos;s report card before printing, or download PDFs for a single student, a whole class, or the entire school.
                 </p>
               </div>
 
               {/* Actions & Zoom Controls */}
-              <div className="flex items-center flex-wrap gap-2.5">
+              <div className="flex items-center flex-wrap gap-2">
                 {/* Zoom Buttons */}
-                <div className="hidden md:flex items-center bg-white border border-slate-200 rounded-lg p-0.5 shadow-sm text-xs">
+                <div className="hidden md:flex items-center bg-slate-100/90 p-0.5 rounded-lg border border-slate-200/60 text-xs">
                   <button
                     onClick={() => setReportZoom('80%')}
-                    className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
-                      reportZoom === '80%' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
+                    className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                      reportZoom === '80%' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
                     80%
                   </button>
                   <button
                     onClick={() => setReportZoom('90%')}
-                    className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
-                      reportZoom === '90%' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
+                    className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                      reportZoom === '90%' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
                     90%
                   </button>
                   <button
                     onClick={() => setReportZoom('100%')}
-                    className={`px-2 py-1 rounded text-[11px] font-medium transition-colors ${
-                      reportZoom === '100%' ? 'bg-slate-900 text-white' : 'text-slate-600 hover:text-slate-900'
+                    className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
+                      reportZoom === '100%' ? 'bg-white text-slate-900 shadow-2xs' : 'text-slate-600 hover:text-slate-900'
                     }`}
                   >
                     100%
@@ -4756,7 +5629,7 @@ export default function SchoolErpPage() {
 
                 <button
                   onClick={() => window.print()}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 shadow-xs transition-all cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5 text-slate-500" />
                   <span>Print</span>
@@ -4764,7 +5637,7 @@ export default function SchoolErpPage() {
                 <button
                   onClick={handleDownloadPDF}
                   disabled={isExporting}
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-800 bg-white border border-slate-200 rounded-xl hover:bg-slate-50 shadow-xs transition-all disabled:opacity-50 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   <Download className="w-3.5 h-3.5 text-slate-500" />
                   <span>Single Student PDF</span>
@@ -4778,7 +5651,7 @@ export default function SchoolErpPage() {
                         .filter((r) => (selectedClass === 'all' ? true : r.student.section === selectedClass))
                         .sort((a, b) => (parseInt(a.student.rollNo, 10) || 0) - (parseInt(b.student.rollNo, 10) || 0));
                       downloadAllReportCardsSinglePDF(
-                        SVA_EXAM_INFO,
+                        { ...SVA_EXAM_INFO, examName: currentExamConfig.name },
                         filteredResults,
                         `Class_PDF_${selectedClass === 'all' ? 'AllClasses' : selectedClass}_${selectedExam}`
                       );
@@ -4788,7 +5661,7 @@ export default function SchoolErpPage() {
                   }}
                   disabled={isExporting}
                   title="Download all student report cards in ONE multi-page PDF document for current class division"
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-2xs transition-all disabled:opacity-50 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5" />
                   <span>Class PDF</span>
@@ -4809,7 +5682,7 @@ export default function SchoolErpPage() {
                   }}
                   disabled={isExporting}
                   title="Download report cards for ALL 280 students across all 8 classes in 1 combined multi-page PDF"
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-200/90 rounded-xl hover:bg-slate-50 hover:text-slate-900 shadow-2xs transition-all disabled:opacity-50 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5 text-slate-500" />
                   <span>{isExporting ? 'Compiling School PDF...' : 'School PDF'}</span>
@@ -4818,7 +5691,7 @@ export default function SchoolErpPage() {
                   onClick={() => handleDownloadClassZip(false)}
                   disabled={isExporting}
                   title="Download report cards as individual PDFs in a ZIP archive"
-                  className="inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold text-slate-700 bg-white border border-slate-200/90 rounded-xl hover:bg-slate-50 hover:text-slate-900 shadow-2xs transition-all disabled:opacity-50 cursor-pointer"
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   <Archive className="w-3.5 h-3.5 text-slate-500" />
                   <span>Download ZIP</span>
@@ -4827,28 +5700,30 @@ export default function SchoolErpPage() {
             </div>
 
             {/* Two-Column Studio Layout */}
-            <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
+            <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
               {/* Left Column: Class Filter, Student Selector & Remarks (4 columns) */}
               <div className="lg:col-span-4 flex flex-col gap-4">
                 {/* Class & Student Selector Card */}
-                <div className="bg-white border border-slate-200/90 rounded-xl shadow-2xs p-4 flex flex-col gap-3">
+                <div className="bg-white border border-slate-200/80 rounded-xl shadow-2xs p-3.5 flex flex-col gap-3">
                   {/* Class Filter Dropdown */}
                   <div>
-                    <label className="text-[11px] font-semibold text-slate-500 uppercase tracking-wide block mb-1">
+                    <label className="text-[11px] font-medium text-slate-500 uppercase tracking-wide block mb-1">
                       Filter by Class ({SVA_ALL_CLASSES.length} Classes):
                     </label>
-                    <select
+                    <CustomSelect
+                      fullWidth
+                      icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
+                      prefixLabel="Class:"
                       value={selectedClass}
-                      onChange={(e) => setSelectedClass(e.target.value)}
-                      className="w-full bg-slate-50 border border-slate-200 rounded-lg px-2.5 py-1.5 text-xs font-semibold text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900 cursor-pointer"
-                    >
-                      <option value="all">All Classes ({students.length} Students)</option>
-                      {SVA_ALL_CLASSES.map((cls) => (
-                        <option key={cls} value={cls}>
-                          {getClassGradeLabel(cls)} ({classCounts[cls] || 0} Students)
-                        </option>
-                      ))}
-                    </select>
+                      onChange={(val) => setSelectedClass(val)}
+                      options={[
+                        { value: 'all', label: `All Classes (${students.length} Students)` },
+                        ...SVA_ALL_CLASSES.map((cls) => ({
+                          value: cls,
+                          label: `${getClassGradeLabel(cls)} (${classCounts[cls] || 0} Students)`,
+                        })),
+                      ]}
+                    />
                   </div>
 
                   {/* Student Search */}
@@ -4897,15 +5772,15 @@ export default function SchoolErpPage() {
                             onClick={() => setSelectedStudentId(stu.id)}
                             className={`w-full text-left p-2 rounded-lg text-xs transition-colors flex items-center justify-between cursor-pointer ${
                               isSelected
-                                ? 'bg-slate-900 text-white font-medium shadow-xs'
-                                : 'hover:bg-slate-100 text-slate-800'
+                                ? 'bg-blue-50 text-slate-900 font-semibold border border-blue-200/80 shadow-2xs'
+                                : 'hover:bg-slate-100 text-slate-800 border border-transparent'
                             }`}
                           >
                             <div className="flex items-center gap-2 truncate">
                               <span
                                 className={`w-5 h-5 rounded flex items-center justify-center font-mono text-[10px] shrink-0 ${
                                   isSelected
-                                    ? 'bg-slate-800 text-slate-200'
+                                    ? 'bg-blue-600 text-white'
                                     : 'bg-slate-100 text-slate-600'
                                 }`}
                               >
@@ -4919,14 +5794,14 @@ export default function SchoolErpPage() {
                               </span>
                               <span
                                 className={`font-mono tabular-nums text-[11px] ${
-                                  isSelected ? 'text-slate-300' : 'text-slate-500'
+                                  isSelected ? 'text-blue-700 font-semibold' : 'text-slate-500'
                                 }`}
                               >
-                                {res ? `${res.percentage.toFixed(1)}%` : '-'}
+                                {res ? `${res.percentage.toFixed(2)}%` : '-'}
                               </span>
                               <span
                                 className={`font-semibold font-mono text-[11px] ${
-                                  isSelected ? 'text-emerald-300' : 'text-emerald-700'
+                                  isSelected ? 'text-emerald-700' : 'text-emerald-700'
                                 }`}
                               >
                                 {res?.grade ?? ''}
@@ -5192,7 +6067,7 @@ export default function SchoolErpPage() {
                       <div>
                         <div className="text-[11px] text-slate-500 font-medium">Percentage</div>
                         <div className="text-base font-bold font-mono text-slate-900">
-                          {activeStudentResult.percentage.toFixed(1)}%
+                          {activeStudentResult.percentage.toFixed(2)}%
                         </div>
                       </div>
                       <div>
@@ -5318,24 +6193,24 @@ export default function SchoolErpPage() {
         )}
 
         {activeTab === 'sheets' && (
-          <div className="flex-1 flex flex-col gap-5">
+          <div className="flex-1 flex flex-col gap-4">
             {/* Page Header Strip */}
-            <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div>
-                <h1 className="font-display text-2xl sm:text-3xl font-extrabold tracking-tight text-slate-900">
+                <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
                   Download Excel Marksheets
                 </h1>
-                <p className="text-xs text-slate-500 mt-1 font-normal">
+                <p className="text-xs text-slate-500 mt-0.5 font-normal">
                   Download clean, ready-to-print Excel sheets (.xlsx) for any exam, class, or individual subject.
                 </p>
               </div>
             </div>
 
             {/* Excel Export Main Card */}
-            <div className="bg-white border border-slate-200/90 rounded-xl p-5 shadow-xs space-y-5">
+            <div className="bg-white border border-slate-200/80 rounded-xl p-4 shadow-2xs space-y-4">
               <div>
-                <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2">
-                  <FileSpreadsheet className="w-4 h-4 text-emerald-600" />
+                <h3 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                  <FileSpreadsheet className="w-4 h-4 text-slate-500" />
                   Choose What to Include
                 </h3>
                 <p className="text-xs text-slate-500 mt-0.5">
@@ -5346,88 +6221,86 @@ export default function SchoolErpPage() {
               {/* 3-Step Selection Matrix */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                 {/* Step 1: Exam Type */}
-                <div className="bg-white p-3.5 rounded-lg border border-slate-200 space-y-2 shadow-2xs">
-                  <label className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                    <span className="w-4 h-4 rounded-full bg-slate-900 text-white text-[10px] flex items-center justify-center font-mono">1</span>
+                <div className="bg-white p-3 rounded-lg border border-slate-200/80 space-y-2 shadow-2xs">
+                  <label className="text-xs font-medium text-slate-900 flex items-center gap-1.5">
+                    <span className="w-4 h-4 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] flex items-center justify-center font-mono font-semibold">1</span>
                     Choose Exam
                   </label>
-                  <select
+                  <CustomSelect
+                    fullWidth
+                    icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
                     value={exportExam}
-                    onChange={(e) => setExportExam(e.target.value)}
-                    className="w-full text-xs font-semibold border border-slate-200 rounded px-2.5 py-2 bg-slate-50 text-slate-900 focus:outline-hidden focus:ring-1 focus:ring-emerald-500 cursor-pointer"
-                  >
-                    {Object.values(examConfigs).map((ex) => (
-                      <option key={ex.id} value={ex.id}>
-                        {ex.name} ({ex.id})
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(val) => setExportExam(val)}
+                    options={Object.values(examConfigs).map((ex) => ({
+                      value: ex.id,
+                      label: `${ex.name} (${ex.id})`,
+                    }))}
+                  />
                   <p className="text-[10px] text-slate-500">
-                    Selected: <strong className="text-slate-700">{exportExam}</strong>
+                    Selected: <strong className="text-slate-700 font-medium">{exportExam}</strong>
                   </p>
                 </div>
 
                 {/* Step 2: Class Selection */}
-                <div className="bg-white p-3.5 rounded-lg border border-slate-200 space-y-2 shadow-2xs">
-                  <label className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                    <span className="w-4 h-4 rounded-full bg-slate-900 text-white text-[10px] flex items-center justify-center font-mono">2</span>
+                <div className="bg-white p-3 rounded-lg border border-slate-200/80 space-y-2 shadow-2xs">
+                  <label className="text-xs font-medium text-slate-900 flex items-center gap-1.5">
+                    <span className="w-4 h-4 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] flex items-center justify-center font-mono font-semibold">2</span>
                     Choose Class
                   </label>
-                  <select
+                  <CustomSelect
+                    fullWidth
+                    icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
                     value={exportClass}
-                    onChange={(e) => setExportClass(e.target.value)}
-                    className="w-full text-xs font-semibold border border-slate-200 rounded px-2.5 py-2 bg-slate-50 text-slate-900 focus:outline-hidden focus:ring-1 focus:ring-emerald-500 cursor-pointer"
-                  >
-                    <option value="all">All Classes (Grade 6 to 9)</option>
-                    {SVA_ALL_CLASSES.map((c) => (
-                      <option key={c} value={c}>
-                        {getClassGradeLabel(c)}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(val) => setExportClass(val)}
+                    options={[
+                      { value: 'all', label: 'All Classes (Grade 6 to 9)' },
+                      ...SVA_ALL_CLASSES.map((c) => ({
+                        value: c,
+                        label: getClassGradeLabel(c),
+                      })),
+                    ]}
+                  />
                   <p className="text-[10px] text-slate-500">
-                    Selected: <strong className="text-slate-700">{exportClass === 'all' ? 'All 8 Classes' : getClassGradeLabel(exportClass)}</strong>
+                    Selected: <strong className="text-slate-700 font-medium">{exportClass === 'all' ? 'All 8 Classes' : getClassGradeLabel(exportClass)}</strong>
                   </p>
                 </div>
 
                 {/* Step 3: Subject or Consolidated */}
-                <div className="bg-white p-3.5 rounded-lg border border-slate-200 space-y-2 shadow-2xs">
-                  <label className="text-xs font-bold text-slate-900 flex items-center gap-1.5">
-                    <span className="w-4 h-4 rounded-full bg-slate-900 text-white text-[10px] flex items-center justify-center font-mono">3</span>
+                <div className="bg-white p-3 rounded-lg border border-slate-200/80 space-y-2 shadow-2xs">
+                  <label className="text-xs font-medium text-slate-900 flex items-center gap-1.5">
+                    <span className="w-4 h-4 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] flex items-center justify-center font-mono font-semibold">3</span>
                     Choose Subjects
                   </label>
-                  <select
+                  <CustomSelect
+                    fullWidth
+                    icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
                     value={exportSubjectScope}
-                    onChange={(e) => setExportSubjectScope(e.target.value)}
-                    className="w-full text-xs font-semibold border border-slate-200 rounded px-2.5 py-2 bg-slate-50 text-slate-900 focus:outline-hidden focus:ring-1 focus:ring-emerald-500 cursor-pointer"
-                  >
-                    <option value="all_consolidated">All Subjects (Full Class Marksheet)</option>
-                    {SVA_SUBJECTS.map((s) => (
-                      <option key={s.name} value={s.name}>
-                        Only {s.name}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(val) => setExportSubjectScope(val)}
+                    options={[
+                      { value: 'all_consolidated', label: 'All Subjects (Full Class Marksheet)' },
+                      ...SVA_SUBJECTS.map((s) => ({
+                        value: s.name,
+                        label: `Only ${s.name}`,
+                      })),
+                    ]}
+                  />
                   <p className="text-[10px] text-slate-500">
-                    Includes: <strong className="text-slate-700">{exportSubjectScope === 'all_consolidated' ? 'Full Marksheet + Subject Tabs' : `${exportSubjectScope} Only`}</strong>
+                    Includes: <strong className="text-slate-700 font-medium">{exportSubjectScope === 'all_consolidated' ? 'Full Marksheet + Subject Tabs' : `${exportSubjectScope} Only`}</strong>
                   </p>
                 </div>
               </div>
 
               {/* Download Trigger */}
-              <div className="pt-2 flex justify-end">
+              <div className="pt-1 flex justify-end">
                 <button
                   onClick={handleCustomMatrixExport}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-6 py-2.5 text-xs font-bold text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-xs transition-colors cursor-pointer"
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors cursor-pointer"
                 >
                   <Download className="w-4 h-4" />
                   <span>Download Excel File (.xlsx)</span>
                 </button>
               </div>
-
             </div>
-
-
 
           </div>
         )}
@@ -5439,19 +6312,137 @@ export default function SchoolErpPage() {
           <AdminConfigPanel
             examConfigs={examConfigs}
             activeExamId={selectedExam}
-            onUpdateExamConfig={(examId, updated) => {
+            selectedClass={selectedClass}
+            onUpdateExamConfig={(examId, updated, classScope) => {
               setExamConfigs((prev) => ({
                 ...prev,
                 [examId]: updated,
               }));
-              showToast(`Updated test configuration for ${updated.name}`);
+              if (examId === selectedExam) {
+                const updatedStudents = students.map((st) => {
+                  if (
+                    classScope &&
+                    classScope !== 'ALL' &&
+                    st.section !== classScope &&
+                    st.class !== classScope &&
+                    getClassGradeFromSection(st.section) !== classScope
+                  ) {
+                    return st;
+                  }
+                  const effectiveCfg = getEffectiveExamConfigForClass(updated, st.section);
+                  const nextMarks = { ...st.marks };
+                  const nextBreakdowns = { ...(st.breakdowns || {}) };
+                  effectiveCfg.subjects.forEach((sub) => {
+                    if (sub.components && sub.components.length > 1) {
+                      const bd =
+                        nextBreakdowns[sub.name] ||
+                        generateDefaultBreakdown(
+                          nextMarks[sub.name],
+                          sub.name,
+                          st.section
+                        );
+                      nextBreakdowns[sub.name] = bd;
+                      nextMarks[sub.name] = computeSubjectTotalFromBreakdown(
+                        sub.name,
+                        st.section,
+                        bd,
+                        sub.components
+                      );
+                    }
+                  });
+                  return {
+                    ...st,
+                    marks: nextMarks,
+                    breakdowns: nextBreakdowns,
+                  };
+                });
+                setStudents(updatedStudents);
+                syncStoresForExam(selectedExam, updatedStudents);
+                triggerAutoSync(updatedStudents);
+              }
+              showToast(
+                `Updated ${updated.name}${
+                  classScope && classScope !== 'ALL' ? ` (${classScope})` : ' (All Classes)'
+                }`
+              );
+            }}
+            onApplyLinkedInternalExam={(targetExamId, targetSubjectScope, component, classScope) => {
+              const linkedExamId = component.linkedExamId;
+              if (!linkedExamId) return;
+              const maxMarks = component.maxMarks;
+              const compKey = component.key;
+              const sourceStore = examMarksStore[linkedExamId] || {};
+              const sourceExamCfg = examConfigs[linkedExamId];
+              const baseTargetCfg = examConfigs[targetExamId];
+              const targetSubNames =
+                targetSubjectScope === 'ALL' || targetSubjectScope === '__ALL__'
+                  ? (baseTargetCfg?.subjects || []).map((s) => s.name)
+                  : [targetSubjectScope];
+
+              const updatedStudents = students.map((st) => {
+                if (
+                  classScope &&
+                  classScope !== 'ALL' &&
+                  st.section !== classScope &&
+                  st.class !== classScope &&
+                  getClassGradeFromSection(st.section) !== classScope
+                ) {
+                  return st;
+                }
+                const stSourceMarks = sourceStore[st.id] || {};
+                const nextBreakdowns = { ...(st.breakdowns || {}) };
+                const nextMarks = { ...st.marks };
+                const effectiveTargetCfg = baseTargetCfg
+                  ? getEffectiveExamConfigForClass(baseTargetCfg, st.section)
+                  : undefined;
+
+                targetSubNames.forEach((subName) => {
+                  const srcMax =
+                    sourceExamCfg?.subjects.find((s) => s.name === subName)?.maxMarks || 20;
+                  const rawSrcMark = stSourceMarks[subName];
+                  const scaledVal: number | 'AB' | null =
+                    rawSrcMark === 'AB'
+                      ? 'AB'
+                      : typeof rawSrcMark === 'number'
+                      ? Math.min(maxMarks, Math.max(0, Math.round((rawSrcMark / srcMax) * maxMarks)))
+                      : Math.round(maxMarks * 0.8);
+
+                  const currentBd =
+                    nextBreakdowns[subName] ||
+                    generateDefaultBreakdown(nextMarks[subName], subName, st.section);
+                  const updatedBd: SubjectBreakdown = {
+                    ...currentBd,
+                    [compKey]: scaledVal,
+                  };
+                  nextBreakdowns[subName] = updatedBd;
+                  const subCfg = effectiveTargetCfg?.subjects.find(
+                    (s) => s.name === subName
+                  );
+                  nextMarks[subName] = computeSubjectTotalFromBreakdown(
+                    subName,
+                    st.section,
+                    updatedBd,
+                    subCfg?.components
+                  );
+                });
+
+                return {
+                  ...st,
+                  marks: nextMarks,
+                  breakdowns: nextBreakdowns,
+                };
+              });
+
+              setStudents(updatedStudents);
+              syncStoresForExam(targetExamId, updatedStudents);
+              triggerAutoSync(updatedStudents);
             }}
             onCreateNewExam={(newExam) => {
               setExamConfigs((prev) => ({
                 ...prev,
                 [newExam.id]: newExam,
               }));
-              setSelectedExam(newExam.id);
+              handleExamChange(newExam.id);
               showToast(`Created new test ${newExam.name}`);
             }}
             onDeleteExam={(examId) => {
@@ -5461,17 +6452,17 @@ export default function SchoolErpPage() {
                 return next;
               });
               if (selectedExam === examId) {
-                setSelectedExam('SA-1');
+                handleExamChange('SA-1');
               }
               showToast(`Deleted test ${examId}`);
             }}
             onSetActiveExam={(examId) => {
-              setSelectedExam(examId);
+              handleExamChange(examId);
               showToast(`Activated test ${examId}`);
             }}
             onResetDefaults={() => {
               setExamConfigs(INITIAL_EXAM_CONFIGS);
-              setSelectedExam('SA-1');
+              handleExamChange('SA-1');
               showToast('Reset exam configurations to default CBSE structure');
             }}
             showToast={showToast}
@@ -5486,13 +6477,16 @@ export default function SchoolErpPage() {
 
       {/* EDIT STUDENT PARTICULAR DRAWER / MODAL */}
       {editingStudent && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-in fade-in duration-150">
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-2xl w-full max-w-md p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
-              <h3 className="text-base font-bold text-slate-900">Edit Student Details</h3>
+        <div 
+          onClick={(e) => { if (e.target === e.currentTarget) setEditingStudent(null); }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+        >
+          <div className="bg-white border border-slate-200/90 rounded-xl shadow-xl w-full max-w-md p-5 flex flex-col gap-3.5 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-2.5 border-b border-slate-200/80">
+              <h3 className="text-sm font-semibold text-slate-900">Edit Student Details</h3>
               <button
                 onClick={() => setEditingStudent(null)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded"
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-md hover:bg-slate-100 transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -5500,102 +6494,108 @@ export default function SchoolErpPage() {
 
             <div className="flex flex-col gap-3 text-xs">
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">Student Name</label>
+                <label className="font-medium text-slate-700 block mb-1">Student Name</label>
                 <input
                   type="text"
                   value={editingStudent.name}
                   onChange={(e) =>
                     setEditingStudent({ ...editingStudent, name: e.target.value })
                   }
-                  className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+                  className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-slate-900 text-xs"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Roll No</label>
+                  <label className="font-medium text-slate-700 block mb-1">Roll No</label>
                   <input
                     type="text"
                     value={editingStudent.rollNo}
                     onChange={(e) =>
                       setEditingStudent({ ...editingStudent, rollNo: e.target.value })
                     }
-                    className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-slate-900 text-xs"
                   />
                 </div>
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Class / Section</label>
-                  <select
+                  <label className="font-medium text-slate-700 block mb-1">Class / Section</label>
+                  <CustomSelect
+                    fullWidth
                     value={editingStudent.section}
-                    onChange={(e) =>
-                      setEditingStudent({ ...editingStudent, section: e.target.value })
+                    onChange={(val) =>
+                      setEditingStudent({ ...editingStudent, section: val })
                     }
-                    className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
-                  >
-                    {SVA_ALL_CLASSES.map((cls) => (
-                      <option key={cls} value={cls}>
-                        {getClassGradeLabel(cls)}
-                      </option>
-                    ))}
-                  </select>
+                    options={SVA_ALL_CLASSES.map((cls) => ({
+                      value: cls,
+                      label: getClassGradeLabel(cls),
+                    }))}
+                  />
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Father&apos;s Name</label>
+                  <label className="font-medium text-slate-700 block mb-1">Father&apos;s Name</label>
                   <input
                     type="text"
                     value={editingStudent.fatherName || ''}
                     onChange={(e) =>
                       setEditingStudent({ ...editingStudent, fatherName: e.target.value })
                     }
-                    className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-slate-900 text-xs"
                   />
                 </div>
                 <div>
-                  <label className="font-semibold text-slate-700 block mb-1">Mother&apos;s Name</label>
+                  <label className="font-medium text-slate-700 block mb-1">Mother&apos;s Name</label>
                   <input
                     type="text"
                     value={editingStudent.motherName || ''}
                     onChange={(e) =>
                       setEditingStudent({ ...editingStudent, motherName: e.target.value })
                     }
-                    className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-slate-900 text-xs"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="font-semibold text-slate-700 block mb-1">Teacher Remarks</label>
+                <label className="font-medium text-slate-700 block mb-1">Teacher Remarks</label>
                 <textarea
                   rows={2}
                   value={editingStudent.customRemarks || ''}
                   onChange={(e) =>
                     setEditingStudent({ ...editingStudent, customRemarks: e.target.value })
                   }
-                  className="w-full px-3 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900 resize-none"
+                  className="w-full px-2.5 py-1.5 border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-slate-900 resize-none text-xs"
                 />
               </div>
 
-              <div className="flex justify-end gap-2 pt-3 border-t border-slate-200 mt-2">
+              <div className="flex justify-end gap-2 pt-2.5 border-t border-slate-200/80 mt-1">
                 <button
                   type="button"
                   onClick={() => setEditingStudent(null)}
-                  className="px-3.5 py-1.5 font-medium text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+                  className="px-3 py-1.5 font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="button"
                   onClick={() => {
-                    const updated = students.map((s) => (s.id === editingStudent.id ? editingStudent : s));
+                    pushUndoSnapshot(students);
+                    const updatedStudent: StudentReportRow = {
+                      ...editingStudent,
+                      class: getClassNumberForSection(editingStudent.section),
+                    };
+                    const updated = students.map((s) =>
+                      s.id === updatedStudent.id ? updatedStudent : s
+                    );
                     setStudents(updated);
+                    syncStoresForExam(selectedExam, updated);
                     triggerAutoSync(updated);
                     setEditingStudent(null);
-                    showToast(`Updated details for ${editingStudent.name}`);
+                    showToast(`Updated details for ${updatedStudent.name}`);
                   }}
-                  className="px-4 py-1.5 font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg shadow-sm transition-colors"
+                  className="px-3.5 py-1.5 font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors cursor-pointer"
                 >
                   Save Changes
                 </button>
@@ -5607,31 +6607,34 @@ export default function SchoolErpPage() {
 
       {/* EXCEL / CSV UPLOAD MODAL */}
       {isUploadModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-in fade-in duration-150">
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-2xl w-full max-w-lg p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
+        <div 
+          onClick={(e) => { if (e.target === e.currentTarget) setIsUploadModalOpen(false); }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+        >
+          <div className="bg-white border border-slate-200/90 rounded-xl shadow-xl w-full max-w-md p-5 flex flex-col gap-3.5 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-2.5 border-b border-slate-200/80">
               <div>
-                <h3 className="text-base font-bold text-slate-900">Import Marks from Excel or CSV</h3>
+                <h3 className="text-sm font-semibold text-slate-900">Import Marks from Excel or CSV</h3>
                 <p className="text-xs text-slate-500 mt-0.5">
-                  Upload a spreadsheet to fill in marks for a single subject or all subjects at once.
+                  Upload a spreadsheet to import marks.
                 </p>
               </div>
               <button
                 onClick={() => setIsUploadModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded cursor-pointer"
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-md hover:bg-slate-100 transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            {/* Mode Switcher: Subject-Wise vs Consolidated */}
-            <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl text-xs font-semibold">
+            {/* Mode Switcher: Minimal Segmented Control */}
+            <div className="flex items-center gap-0.5 bg-slate-100 p-0.5 rounded-lg border border-slate-200/60 text-xs font-medium">
               <button
                 type="button"
                 onClick={() => setUploadMode('subject')}
-                className={`flex-1 py-2 rounded-lg transition-all text-center cursor-pointer ${
+                className={`flex-1 py-1.5 rounded-md transition-colors text-center cursor-pointer ${
                   uploadMode === 'subject'
-                    ? 'bg-white text-slate-900 shadow-xs font-bold'
+                    ? 'bg-white text-slate-900 shadow-2xs font-medium'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
@@ -5640,9 +6643,9 @@ export default function SchoolErpPage() {
               <button
                 type="button"
                 onClick={() => setUploadMode('consolidated')}
-                className={`flex-1 py-2 rounded-lg transition-all text-center cursor-pointer ${
+                className={`flex-1 py-1.5 rounded-md transition-colors text-center cursor-pointer ${
                   uploadMode === 'consolidated'
-                    ? 'bg-white text-slate-900 shadow-xs font-bold'
+                    ? 'bg-white text-slate-900 shadow-2xs font-medium'
                     : 'text-slate-600 hover:text-slate-900'
                 }`}
               >
@@ -5651,54 +6654,53 @@ export default function SchoolErpPage() {
             </div>
 
             {uploadMode === 'subject' ? (
-              <div className="bg-blue-50/60 border border-blue-200 rounded-xl p-3.5 space-y-2.5 text-xs">
-                <div className="font-bold text-blue-900 flex items-center justify-between">
+              <div className="bg-slate-50 border border-slate-200/80 rounded-lg p-3 space-y-2 text-xs">
+                <div className="font-medium text-slate-900 flex items-center justify-between">
                   <span>Choose Subject:</span>
-                  <span className="text-[10px] font-mono text-blue-700 bg-blue-100 px-2 py-0.5 rounded">
+                  <span className="text-[10px] font-mono text-slate-500 bg-white border border-slate-200 px-1.5 py-0.5 rounded">
                     Exam: {selectedExam}
                   </span>
                 </div>
-                <select
+                <CustomSelect
+                  fullWidth
+                  icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
                   value={uploadTargetSubject}
-                  onChange={(e) => setUploadTargetSubject(e.target.value)}
-                  className="w-full text-xs font-bold border border-blue-300 rounded-lg p-2 bg-white text-slate-900 focus:ring-2 focus:ring-blue-500 focus:outline-hidden cursor-pointer"
-                >
-                  {SVA_SUBJECTS.map((s) => (
-                    <option key={s.name} value={s.name}>
-                      {s.name} ({s.maxMarks} Marks)
-                    </option>
-                  ))}
-                </select>
-                <p className="text-[11px] text-blue-800">
-                  Updates marks only for <strong>{uploadTargetSubject}</strong> using Roll No or Student Name. Marks for other subjects stay untouched.
+                  onChange={(val) => setUploadTargetSubject(val)}
+                  options={SVA_SUBJECTS.map((s) => ({
+                    value: s.name,
+                    label: `${s.name} (${s.maxMarks} Marks)`,
+                  }))}
+                />
+                <p className="text-[11px] text-slate-500">
+                  Updates marks only for <strong className="text-slate-700">{uploadTargetSubject}</strong> using Roll No or Student Name.
                 </p>
                 <button
                   type="button"
                   onClick={() => handleDownloadSubjectTemplate(uploadTargetSubject)}
-                  className="inline-flex items-center gap-1.5 text-xs font-bold text-blue-700 hover:text-blue-900 underline cursor-pointer pt-1"
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 hover:text-slate-900 underline cursor-pointer pt-0.5"
                 >
                   <Download className="w-3.5 h-3.5" />
                   Download {uploadTargetSubject} Sample Sheet (.xlsx)
                 </button>
               </div>
             ) : (
-              <div className="bg-slate-50 border border-slate-200 rounded-xl p-3.5 space-y-2 text-xs">
-                <p className="text-slate-700">
-                  Upload a single Excel or CSV file containing marks for all 7 subjects at once.
+              <div className="bg-slate-50 border border-slate-200/80 rounded-lg p-3 space-y-2 text-xs">
+                <p className="text-slate-600">
+                  Upload an Excel or CSV file containing marks for all 7 subjects.
                 </p>
                 <button
                   type="button"
                   onClick={handleDownloadTemplate}
-                  className="inline-flex items-center gap-1.5 text-xs font-bold text-slate-800 hover:text-slate-900 underline cursor-pointer pt-1"
+                  className="inline-flex items-center gap-1.5 text-xs font-medium text-slate-700 hover:text-slate-900 underline cursor-pointer pt-0.5"
                 >
-                  <Download className="w-3.5 h-3.5 text-emerald-600" />
+                  <Download className="w-3.5 h-3.5 text-slate-500" />
                   Download All-Subjects Sample Sheet (.xlsx)
                 </button>
               </div>
             )}
 
             {uploadError && (
-              <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-700 flex items-center gap-2">
+              <div className="p-2.5 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-700 flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 shrink-0" />
                 <span>{uploadError}</span>
               </div>
@@ -5707,14 +6709,14 @@ export default function SchoolErpPage() {
             {/* Dropzone */}
             <div
               onClick={() => fileInputRef.current?.click()}
-              className="border-2 border-dashed border-slate-300 hover:border-slate-500 bg-slate-50 hover:bg-slate-100/80 transition-colors rounded-xl p-6 flex flex-col items-center justify-center text-center cursor-pointer"
+              className="border-2 border-dashed border-slate-200 hover:border-slate-400 bg-slate-50/50 hover:bg-slate-100/60 transition-colors rounded-lg p-5 flex flex-col items-center justify-center text-center cursor-pointer"
             >
-              <Upload className="w-8 h-8 text-slate-400 mb-2" />
-              <div className="text-xs font-bold text-slate-900">
-                Click to browse or drop {uploadMode === 'subject' ? `${uploadTargetSubject} marks` : 'consolidated marks'} file here
+              <Upload className="w-6 h-6 text-slate-400 mb-1.5" />
+              <div className="text-xs font-medium text-slate-900">
+                Click to browse or drop {uploadMode === 'subject' ? `${uploadTargetSubject} marks` : 'marks file'} here
               </div>
-              <div className="text-[11px] text-slate-400 mt-1 font-mono">
-                Supports .xlsx, .xls, and .csv formats
+              <div className="text-[11px] text-slate-400 mt-0.5 font-mono">
+                Supports .xlsx, .xls, and .csv
               </div>
               <input
                 ref={fileInputRef}
@@ -5725,11 +6727,11 @@ export default function SchoolErpPage() {
               />
             </div>
 
-            <div className="flex items-center justify-end pt-2 border-t border-slate-100">
+            <div className="flex items-center justify-end pt-2 border-t border-slate-200/80">
               <button
                 type="button"
                 onClick={() => setIsUploadModalOpen(false)}
-                className="px-4 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
+                className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
               >
                 Cancel
               </button>
@@ -5740,13 +6742,16 @@ export default function SchoolErpPage() {
 
       {/* ADD STUDENT MODAL */}
       {isAddStudentModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-in fade-in duration-150">
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-2xl w-full max-w-md p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-150">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-200">
-              <h3 className="text-base font-bold text-slate-900">Add New Student</h3>
+        <div 
+          onClick={(e) => { if (e.target === e.currentTarget) setIsAddStudentModalOpen(false); }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+        >
+          <div className="bg-white border border-slate-200/90 rounded-xl shadow-xl w-full max-w-md p-5 flex flex-col gap-3.5 animate-in zoom-in-95 duration-150">
+            <div className="flex items-center justify-between pb-2.5 border-b border-slate-200/80">
+              <h3 className="text-sm font-semibold text-slate-900">Add New Student</h3>
               <button
                 onClick={() => setIsAddStudentModalOpen(false)}
-                className="text-slate-400 hover:text-slate-600 p-1 rounded"
+                className="text-slate-400 hover:text-slate-600 p-1 rounded-md hover:bg-slate-100 transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -5754,7 +6759,7 @@ export default function SchoolErpPage() {
 
             <form onSubmit={handleAddStudent} className="flex flex-col gap-3">
               <div>
-                <label className="text-xs font-semibold text-slate-700 mb-1 block">
+                <label className="text-xs font-medium text-slate-700 mb-1 block">
                   Student Full Name *
                 </label>
                 <input
@@ -5763,29 +6768,27 @@ export default function SchoolErpPage() {
                   value={newStudentName}
                   onChange={(e) => setNewStudentName(e.target.value)}
                   placeholder="e.g. Rohan Sandeep Joshi"
-                  className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-slate-900"
                 />
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 mb-1 block">
+                  <label className="text-xs font-medium text-slate-700 mb-1 block">
                     Class / Division *
                   </label>
-                  <select
+                  <CustomSelect
+                    fullWidth
                     value={newStudentSection}
-                    onChange={(e) => setNewStudentSection(e.target.value)}
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
-                  >
-                    {SVA_ALL_CLASSES.map((cls) => (
-                      <option key={cls} value={cls}>
-                        {getClassGradeLabel(cls)}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={(val) => setNewStudentSection(val)}
+                    options={SVA_ALL_CLASSES.map((cls) => ({
+                      value: cls,
+                      label: getClassGradeLabel(cls),
+                    }))}
+                  />
                 </div>
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 mb-1 block">
+                  <label className="text-xs font-medium text-slate-700 mb-1 block">
                     Roll Number *
                   </label>
                   <input
@@ -5794,14 +6797,14 @@ export default function SchoolErpPage() {
                     value={newStudentRoll}
                     onChange={(e) => setNewStudentRoll(e.target.value)}
                     placeholder="e.g. 31"
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-slate-900"
                   />
                 </div>
               </div>
 
-              <div className="grid grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 mb-1 block">
+                  <label className="text-xs font-medium text-slate-700 mb-1 block">
                     Father&apos;s Name
                   </label>
                   <input
@@ -5809,11 +6812,11 @@ export default function SchoolErpPage() {
                     value={newStudentFather}
                     onChange={(e) => setNewStudentFather(e.target.value)}
                     placeholder="Father's full name"
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-slate-900"
                   />
                 </div>
                 <div>
-                  <label className="text-xs font-semibold text-slate-700 mb-1 block">
+                  <label className="text-xs font-medium text-slate-700 mb-1 block">
                     Mother&apos;s Name
                   </label>
                   <input
@@ -5821,34 +6824,34 @@ export default function SchoolErpPage() {
                     value={newStudentMother}
                     onChange={(e) => setNewStudentMother(e.target.value)}
                     placeholder="Mother's full name"
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+                    className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-slate-900"
                   />
                 </div>
               </div>
 
               <div>
-                <label className="text-xs font-semibold text-slate-700 mb-1 block">
+                <label className="text-xs font-medium text-slate-700 mb-1 block">
                   Date of Birth
                 </label>
                 <input
                   type="date"
                   value={newStudentDob}
                   onChange={(e) => setNewStudentDob(e.target.value)}
-                  className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:ring-1 focus:ring-slate-900"
+                  className="w-full px-2.5 py-1.5 text-xs bg-white border border-slate-200 rounded-lg text-slate-900 focus:outline-none focus:border-slate-900"
                 />
               </div>
 
-              <div className="flex items-center justify-end gap-2 pt-3 border-t border-slate-200 mt-2">
+              <div className="flex items-center justify-end gap-2 pt-2.5 border-t border-slate-200/80 mt-1">
                 <button
                   type="button"
                   onClick={() => setIsAddStudentModalOpen(false)}
-                  className="px-3.5 py-1.5 text-xs font-medium text-slate-700 hover:bg-slate-100 rounded-lg transition-colors"
+                  className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg shadow-sm transition-colors"
+                  className="px-3.5 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors cursor-pointer"
                 >
                   Save Student
                 </button>
@@ -5860,8 +6863,11 @@ export default function SchoolErpPage() {
 
       {/* KEYBOARD SHORTCUTS HELP MODAL */}
       {isShortcutsModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-in fade-in duration-150">
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-2xl w-full max-w-lg p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-150">
+        <div 
+          onClick={(e) => { if (e.target === e.currentTarget) setIsShortcutsModalOpen(false); }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-md p-4 animate-in fade-in duration-200"
+        >
+          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-2xl shadow-slate-950/10 w-full max-w-lg p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200">
             <div className="flex items-center justify-between pb-3 border-b border-slate-200">
               <div className="flex items-center gap-2">
                 <Keyboard className="w-5 h-5 text-slate-800" />
@@ -5942,7 +6948,7 @@ export default function SchoolErpPage() {
             <div className="flex items-center justify-end pt-2 border-t border-slate-200">
               <button
                 onClick={() => setIsShortcutsModalOpen(false)}
-                className="px-4 py-1.5 text-xs font-semibold text-white bg-slate-900 hover:bg-slate-800 rounded-lg shadow-sm transition-colors cursor-pointer"
+                className="px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-sm transition-colors cursor-pointer"
               >
                 Got It
               </button>
@@ -5953,8 +6959,11 @@ export default function SchoolErpPage() {
 
       {/* GOOGLE APPS SCRIPT 2-WAY SYNC MODAL */}
       {isGasModalOpen && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-xs p-4 animate-in fade-in duration-150">
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-2xl w-full max-w-2xl overflow-hidden p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-150 relative">
+        <div 
+          onClick={(e) => { if (e.target === e.currentTarget) setIsGasModalOpen(false); }}
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-md p-4 animate-in fade-in duration-200"
+        >
+          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-2xl shadow-slate-950/10 w-full max-w-2xl overflow-hidden p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200 relative">
             <button
               onClick={() => setIsGasModalOpen(false)}
               className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer z-10"
@@ -5980,6 +6989,14 @@ export default function SchoolErpPage() {
         <InternalAssessmentModal
           data={internalModalData}
           selectedExam={selectedExam}
+          components={
+            getEffectiveExamConfigForClass(
+              baseExamConfig,
+              internalModalData.student.section
+            ).subjects.find(
+              (s) => s.name.toLowerCase() === internalModalData.subjectName.toLowerCase()
+            )?.components
+          }
           onClose={() => setInternalModalData(null)}
           onSave={handleSaveInternalBreakdown}
         />

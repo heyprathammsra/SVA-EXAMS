@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 
+export const dynamic = 'force-dynamic';
+
 /**
  * Server-side proxy for Google Apps Script Web App.
  * Automatically follows 302 redirects from script.google.com to script.googleusercontent.com
@@ -127,7 +129,15 @@ export async function GET(req: NextRequest) {
 
 export async function POST(req: NextRequest) {
   try {
-    const body = await req.json();
+    let body: any = {};
+    try {
+      body = await req.json();
+    } catch {
+      return NextResponse.json(
+        { success: false, error: 'Empty or invalid request body' },
+        { status: 400 }
+      );
+    }
     const { url, students, examName } = body;
     const gasUrl = (url || '').trim();
 

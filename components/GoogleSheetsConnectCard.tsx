@@ -32,24 +32,26 @@ export default function GoogleSheetsConnectCard({
   const displayStudentCount = students.length || 280;
 
   return (
-    <div className="bg-white border border-slate-200/90 rounded-2xl p-6 shadow-2xs font-sans">
-      <div>
-        <h2 className="text-xl sm:text-2xl font-bold text-slate-900 tracking-tight">
-          Google Sheets Backup
-        </h2>
-        <p className="text-sm text-slate-500 mt-1 max-w-2xl leading-relaxed">
-          Connected to Saraswati Vidya Academy&apos;s master Google Sheet. Student marks and teacher remarks are backed up automatically.
-        </p>
+    <div className="bg-white border border-slate-200 rounded-xl p-5 font-sans">
+      <div className="flex items-start justify-between">
+        <div>
+          <h2 className="text-sm font-bold text-slate-900">
+            Google Sheets Backup
+          </h2>
+          <p className="text-xs text-slate-500 mt-1 max-w-xl">
+            Connected to the master Google Sheet. Data is synced automatically.
+          </p>
+        </div>
       </div>
 
-      <div className="mt-5 p-3.5 px-4 bg-slate-50/90 border border-slate-200/70 rounded-2xl text-xs sm:text-sm font-mono text-slate-700 font-normal flex items-center justify-between flex-wrap gap-2">
-        <span>
-          Backed up to Google Sheets ({displayStudentCount} students) &middot; Last updated {displayTime}
+      <div className="mt-4 p-3 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-mono text-slate-600 flex items-center justify-between gap-3">
+        <span className="truncate">
+          Backed up ({displayStudentCount} students) &middot; Last update {displayTime}
         </span>
         {sheetsSyncStatus === 'syncing' && (
-          <span className="text-xs font-sans text-amber-600 font-medium flex items-center gap-1.5">
-            <span className="w-2 h-2 rounded-full bg-amber-500 animate-ping" />
-            Saving changes...
+          <span className="text-amber-600 font-bold flex items-center gap-1.5 shrink-0">
+            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping" />
+            Syncing...
           </span>
         )}
       </div>

@@ -273,7 +273,7 @@ export function calculateStudentResult(
       }
 
       breakdown.push(
-        `Subject ${subj.subjectName}: ${markNum}/${subj.maxMarks} (${subjPercent.toFixed(1)}%) -> Grade ${subjGrade} [${status}]`
+        `Subject ${subj.subjectName}: ${markNum}/${subj.maxMarks} (${subjPercent.toFixed(2)}%) -> Grade ${subjGrade} [${status}]`
       );
     }
 
