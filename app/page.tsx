@@ -195,7 +195,7 @@ const INITIAL_EXAM_CONFIGS: Record<string, ExamConfig> = {
   },
 };
 
-type ActiveTab = 'spreadsheet' | 'remarks' | 'reportcards' | 'sheets' | 'admin';
+type ActiveTab = 'spreadsheet' | 'remarks' | 'reportcards' | 'admin';
 type FilterStatus = 'all' | 'passed' | 'review';
 type SortField = 'rollNo' | 'name' | 'section' | 'total' | 'percentage' | 'rank' | string;
 
@@ -3627,17 +3627,7 @@ export default function SchoolErpPage() {
                 <FileText className="w-3.5 h-3.5 text-slate-500" />
                 <span>Report Cards</span>
               </button>
-              <button
-                onClick={() => setActiveTab('sheets')}
-                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
-                  activeTab === 'sheets'
-                    ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
-                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
-                }`}
-              >
-                <Database className="w-3.5 h-3.5 text-slate-500" />
-                <span>Export Marks</span>
-              </button>
+
               <button
                 onClick={() => setActiveTab('admin')}
                 className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
@@ -6190,118 +6180,7 @@ export default function SchoolErpPage() {
           </div>
         )}
 
-        {activeTab === 'sheets' && (
-          <div className="flex-1 flex flex-col gap-4">
-            {/* Page Header Strip */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <div>
-                <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
-                  Download Excel Marksheets
-                </h1>
-                <p className="text-xs text-slate-500 mt-0.5 font-normal">
-                  Download clean, ready-to-print Excel sheets (.xlsx) for any exam, class, or individual subject.
-                </p>
-              </div>
-            </div>
 
-            {/* Excel Export Main Card */}
-            <div className="bg-white border border-slate-200/80 rounded-xl p-4 shadow-2xs space-y-4">
-              <div>
-                <h3 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
-                  <FileSpreadsheet className="w-4 h-4 text-slate-500" />
-                  Choose What to Include
-                </h3>
-                <p className="text-xs text-slate-500 mt-0.5">
-                  Pick the exam, class, and subjects you want in your Excel file.
-                </p>
-              </div>
-
-              {/* 3-Step Selection Matrix */}
-              <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
-                {/* Step 1: Exam Type */}
-                <div className="bg-white p-3 rounded-lg border border-slate-200/80 space-y-2 shadow-2xs">
-                  <label className="text-xs font-medium text-slate-900 flex items-center gap-1.5">
-                    <span className="w-4 h-4 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] flex items-center justify-center font-mono font-semibold">1</span>
-                    Choose Exam
-                  </label>
-                  <CustomSelect
-                    fullWidth
-                    icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
-                    value={exportExam}
-                    onChange={(val) => setExportExam(val)}
-                    options={Object.values(examConfigs).map((ex) => ({
-                      value: ex.id,
-                      label: `${ex.name} (${ex.id})`,
-                    }))}
-                  />
-                  <p className="text-[10px] text-slate-500">
-                    Selected: <strong className="text-slate-700 font-medium">{exportExam}</strong>
-                  </p>
-                </div>
-
-                {/* Step 2: Class Selection */}
-                <div className="bg-white p-3 rounded-lg border border-slate-200/80 space-y-2 shadow-2xs">
-                  <label className="text-xs font-medium text-slate-900 flex items-center gap-1.5">
-                    <span className="w-4 h-4 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] flex items-center justify-center font-mono font-semibold">2</span>
-                    Choose Class
-                  </label>
-                  <CustomSelect
-                    fullWidth
-                    icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
-                    value={exportClass}
-                    onChange={(val) => setExportClass(val)}
-                    options={[
-                      { value: 'all', label: 'All Classes (Grade 6 to 9)' },
-                      ...SVA_ALL_CLASSES.map((c) => ({
-                        value: c,
-                        label: getClassGradeLabel(c),
-                      })),
-                    ]}
-                  />
-                  <p className="text-[10px] text-slate-500">
-                    Selected: <strong className="text-slate-700 font-medium">{exportClass === 'all' ? 'All 8 Classes' : getClassGradeLabel(exportClass)}</strong>
-                  </p>
-                </div>
-
-                {/* Step 3: Subject or Consolidated */}
-                <div className="bg-white p-3 rounded-lg border border-slate-200/80 space-y-2 shadow-2xs">
-                  <label className="text-xs font-medium text-slate-900 flex items-center gap-1.5">
-                    <span className="w-4 h-4 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] flex items-center justify-center font-mono font-semibold">3</span>
-                    Choose Subjects
-                  </label>
-                  <CustomSelect
-                    fullWidth
-                    icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
-                    value={exportSubjectScope}
-                    onChange={(val) => setExportSubjectScope(val)}
-                    options={[
-                      { value: 'all_consolidated', label: 'All Subjects (Full Class Marksheet)' },
-                      ...SVA_SUBJECTS.map((s) => ({
-                        value: s.name,
-                        label: `Only ${s.name}`,
-                      })),
-                    ]}
-                  />
-                  <p className="text-[10px] text-slate-500">
-                    Includes: <strong className="text-slate-700 font-medium">{exportSubjectScope === 'all_consolidated' ? 'Full Marksheet + Subject Tabs' : `${exportSubjectScope} Only`}</strong>
-                  </p>
-                </div>
-              </div>
-
-              {/* Download Trigger */}
-              <div className="pt-1 flex justify-end">
-                <button
-                  onClick={handleCustomMatrixExport}
-                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors cursor-pointer"
-                >
-                  <Download className="w-4 h-4" />
-                  <span>Download Excel File (.xlsx)</span>
-                </button>
-              </div>
-            </div>
-
-          </div>
-        )}
 
         {/* ========================================================
             VIEW 4: ADMIN CONFIGURATION PANEL
@@ -6469,6 +6348,16 @@ export default function SchoolErpPage() {
             lastSyncTime={lastSyncTime}
             onGoogleSheetsSync={handleGoogleSheetsSync}
             students={students}
+            exportExam={exportExam}
+            setExportExam={setExportExam}
+            exportClass={exportClass}
+            setExportClass={setExportClass}
+            exportSubjectScope={exportSubjectScope}
+            setExportSubjectScope={setExportSubjectScope}
+            onCustomMatrixExport={handleCustomMatrixExport}
+            svaAllClasses={SVA_ALL_CLASSES}
+            svaSubjects={SVA_SUBJECTS}
+            getClassGradeLabel={getClassGradeLabel}
           />
         )}
       </main>

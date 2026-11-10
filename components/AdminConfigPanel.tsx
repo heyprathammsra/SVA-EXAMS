@@ -13,6 +13,9 @@ import {
   SlidersHorizontal,
   Calculator,
   Check,
+  FileSpreadsheet,
+  Award,
+  Download,
 } from 'lucide-react';
 import GoogleSheetsConnectCard from '@/components/GoogleSheetsConnectCard';
 import CustomSelect from '@/components/CustomSelect';
@@ -50,6 +53,16 @@ interface AdminConfigPanelProps {
   lastSyncTime?: string | null;
   onGoogleSheetsSync?: () => void;
   students?: StudentReportRow[];
+  exportExam?: string;
+  setExportExam?: (val: string) => void;
+  exportClass?: string;
+  setExportClass?: (val: string) => void;
+  exportSubjectScope?: string;
+  setExportSubjectScope?: (val: string) => void;
+  onCustomMatrixExport?: () => void;
+  svaAllClasses?: readonly string[] | string[];
+  svaSubjects?: SubjectConfig[];
+  getClassGradeLabel?: (clsName: string) => string;
 }
 
 const PRESET_SUBJECTS = [
@@ -97,6 +110,16 @@ export default function AdminConfigPanel({
   sheetsSyncStatus = 'idle',
   lastSyncTime = null,
   students = [],
+  exportExam,
+  setExportExam,
+  exportClass,
+  setExportClass,
+  exportSubjectScope,
+  setExportSubjectScope,
+  onCustomMatrixExport,
+  svaAllClasses = [],
+  svaSubjects = [],
+  getClassGradeLabel = (c) => c,
 }: AdminConfigPanelProps) {
   const [editingExamId, setEditingExamId] = useState<string>(activeExamId);
   const [selectedSplitSubject, setSelectedSplitSubject] = useState<string>('ALL');
@@ -1489,7 +1512,102 @@ export default function AdminConfigPanel({
             )}
           </div>
 
-          {/* Section 4: Google Sheets Sync */}
+          {/* Section 4: Excel Marksheets Export */}
+          <div className="bg-white border border-slate-200/80 rounded-xl p-4 shadow-2xs space-y-4">
+            <div>
+              <h3 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                <FileSpreadsheet className="w-4 h-4 text-slate-500" />
+                Download Excel Marksheets
+              </h3>
+              <p className="text-xs text-slate-500 mt-0.5">
+                Choose the exam, class, and subjects you want in your Excel file.
+              </p>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+              {/* Step 1: Choose Exam */}
+              <div className="bg-white p-3 rounded-lg border border-slate-200/80 space-y-2 shadow-2xs">
+                <label className="text-xs font-medium text-slate-900 flex items-center gap-1.5">
+                  <span className="w-4 h-4 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] flex items-center justify-center font-mono font-semibold">1</span>
+                  Choose Exam
+                </label>
+                <CustomSelect
+                  fullWidth
+                  icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
+                  value={exportExam || activeExamId}
+                  onChange={(val) => setExportExam && setExportExam(val)}
+                  options={Object.values(examConfigs).map((ex) => ({
+                    value: ex.id,
+                    label: `${ex.name} (${ex.id})`,
+                  }))}
+                />
+                <p className="text-[10px] text-slate-500">
+                  Selected: <strong className="text-slate-700 font-medium">{exportExam || activeExamId}</strong>
+                </p>
+              </div>
+
+              {/* Step 2: Choose Class */}
+              <div className="bg-white p-3 rounded-lg border border-slate-200/80 space-y-2 shadow-2xs">
+                <label className="text-xs font-medium text-slate-900 flex items-center gap-1.5">
+                  <span className="w-4 h-4 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] flex items-center justify-center font-mono font-semibold">2</span>
+                  Choose Class
+                </label>
+                <CustomSelect
+                  fullWidth
+                  icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
+                  value={exportClass || 'all'}
+                  onChange={(val) => setExportClass && setExportClass(val)}
+                  options={[
+                    { value: 'all', label: 'All Classes (Grade 6 to 9)' },
+                    ...svaAllClasses.map((c) => ({
+                      value: c,
+                      label: getClassGradeLabel(c),
+                    })),
+                  ]}
+                />
+                <p className="text-[10px] text-slate-500">
+                  Selected: <strong className="text-slate-700 font-medium">{exportClass === 'all' || !exportClass ? 'All 8 Classes' : getClassGradeLabel(exportClass)}</strong>
+                </p>
+              </div>
+
+              {/* Step 3: Choose Subjects */}
+              <div className="bg-white p-3 rounded-lg border border-slate-200/80 space-y-2 shadow-2xs">
+                <label className="text-xs font-medium text-slate-900 flex items-center gap-1.5">
+                  <span className="w-4 h-4 rounded-full bg-blue-50 text-blue-700 border border-blue-200 text-[10px] flex items-center justify-center font-mono font-semibold">3</span>
+                  Choose Subjects
+                </label>
+                <CustomSelect
+                  fullWidth
+                  icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
+                  value={exportSubjectScope || 'all_consolidated'}
+                  onChange={(val) => setExportSubjectScope && setExportSubjectScope(val)}
+                  options={[
+                    { value: 'all_consolidated', label: 'All Subjects (Full Class Marksheet)' },
+                    ...svaSubjects.map((s) => ({
+                      value: s.name,
+                      label: `Only ${s.name}`,
+                    })),
+                  ]}
+                />
+                <p className="text-[10px] text-slate-500">
+                  Includes: <strong className="text-slate-700 font-medium">{exportSubjectScope === 'all_consolidated' || !exportSubjectScope ? 'Full Marksheet + Subject Tabs' : `${exportSubjectScope} Only`}</strong>
+                </p>
+              </div>
+            </div>
+
+            <div className="pt-1 flex justify-end">
+              <button
+                type="button"
+                onClick={onCustomMatrixExport}
+                className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                <span>Download Excel File (.xlsx)</span>
+              </button>
+            </div>
+          </div>
+
+          {/* Section 5: Google Sheets Sync */}
           <GoogleSheetsConnectCard
             students={students}
             selectedExam={currentConfig.id}
