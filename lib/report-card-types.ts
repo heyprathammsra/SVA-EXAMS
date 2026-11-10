@@ -558,6 +558,7 @@ export function computeStudentResult(
       failedSubjectsCount++;
     } else if (raw === null || raw === undefined || (raw as any) === '') {
       obtained = null;
+      grade = '-';
       status = 'INCOMPLETE';
     } else {
       isAllAbsent = false;
