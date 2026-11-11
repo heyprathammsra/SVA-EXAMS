@@ -16,7 +16,9 @@ test('computeGrade returns accurate letter grades for percentage thresholds', ()
   assert.equal(computeGrade(52), 'C1');
   assert.equal(computeGrade(45), 'C2');
   assert.equal(computeGrade(35), 'D');
-  assert.equal(computeGrade(25), 'E');
+  assert.equal(computeGrade(32), 'D');
+  assert.equal(computeGrade(25), 'E1');
+  assert.equal(computeGrade(15), 'E2');
 });
 
 test('computeStudentResult calculates totals and pass/fail status', () => {
@@ -44,7 +46,7 @@ test('computeStudentResult calculates totals and pass/fail status', () => {
   assert.equal(res.totalObtained, 270);
   assert.equal(res.totalMax, 300);
   assert.equal(res.percentage, 90);
-  assert.equal(res.grade, 'A1');
+  assert.equal(res.grade, 'A2');
   assert.equal(res.status, 'PASS');
 });
 

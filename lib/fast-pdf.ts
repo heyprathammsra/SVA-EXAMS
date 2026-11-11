@@ -1,13 +1,426 @@
 import jsPDF from 'jspdf';
 import autoTable from 'jspdf-autotable';
 import JSZip from 'jszip';
-import { ComputedStudentResult, ExamInfo } from './report-card-types';
+import {
+  ComputedStudentResult,
+  ExamInfo,
+  REPORT_CARD_GRADING_SYSTEM,
+  formatPtPercentage,
+  getPtExamHeading,
+  getPtSubjectDisplayName,
+  getStudentPtProfile,
+  hasCsInPtExam,
+  isPtExam,
+} from './report-card-types';
+
+/**
+ * Renders the exact 2-page PT Report Card matching PT_report_card_sample_5cddbf65.pdf
+ * Page 1: School Header, REPORT CARD, PERIODIC TEST - X, Student Particulars Table,
+ *         Subject Marks Table (6 subjects for Classes 6-8; 7 subjects with CS for Class 9),
+ *         Summary Strip (TOTAL / PERCENTAGE / GRADE), and Class Teacher's Remarks Box.
+ * Page 2: Centered 9-point Grading System Table (A1..E2) and 3-column Signatures.
+ */
+export function renderPtReportCardPages(
+  doc: jsPDF,
+  exam: ExamInfo,
+  result: ComputedStudentResult
+) {
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const student = result.student;
+  const profile = getStudentPtProfile(student);
+
+  // =========================================================================
+  // PAGE 1: PT REPORT CARD
+  // =========================================================================
+
+  // Crest emblem placeholder on the left (x=22, y=14, r=7)
+  doc.setDrawColor(39, 69, 123);
+  doc.setLineWidth(0.6);
+  doc.circle(26, 21, 6.2, 'S');
+  doc.setDrawColor(212, 160, 23);
+  doc.setLineWidth(0.35);
+  doc.circle(26, 21, 5.1, 'S');
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(6.5);
+  doc.setTextColor(39, 69, 123);
+  doc.text('SVA', 26, 21.8, { align: 'center' });
+
+  // School Name in #27457B
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(22);
+  doc.setTextColor(39, 69, 123); // #27457B
+  doc.text('Saraswati Vidya Academy', pageWidth / 2 + 4, 18.5, { align: 'center' });
+
+  // Affiliation / School Code / UDISE Line
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(8.5);
+  doc.setTextColor(0, 0, 0);
+  const udiseNo = exam.udiseNo || '2724100374';
+  doc.text(
+    `CBSE Affiliation No. ${exam.affiliationNo || '1131575'}, School Code. ${exam.schoolCode || '31572'}, UDISE No. ${udiseNo}`,
+    pageWidth / 2 + 4,
+    24,
+    { align: 'center' }
+  );
+
+  // Address Line
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10.5);
+  doc.setTextColor(0, 0, 0);
+  doc.text(
+    `Address: ${exam.schoolAddress || 'Village Shilatne, Maval Dist. Pune, Maharashtra 410405'}`,
+    pageWidth / 2 + 4,
+    29.5,
+    { align: 'center' }
+  );
+
+  // Email Line with blue underlined email address
+  const emailAddress = exam.schoolEmail || 'principal@saraswatividya.academy';
+  const emailLabel = 'Email Id: ';
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(10.5);
+  const labelW = doc.getTextWidth(emailLabel);
+  const emailW = doc.getTextWidth(emailAddress);
+  const totalEmailW = labelW + emailW;
+  const emailStartX = (pageWidth + 8 - totalEmailW) / 2;
+
+  doc.setTextColor(0, 0, 0);
+  doc.text(emailLabel, emailStartX, 35);
+  doc.setTextColor(0, 0, 255);
+  doc.text(emailAddress, emailStartX + labelW, 35);
+  doc.setDrawColor(0, 0, 255);
+  doc.setLineWidth(0.25);
+  doc.line(emailStartX + labelW, 35.8, emailStartX + totalEmailW, 35.8);
+
+  // Horizontal Black Rule below Header
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(0.5);
+  doc.line(16, 40, pageWidth - 19, 40);
+
+  // REPORT CARD & PERIODIC TEST - X Headings
+  doc.setTextColor(0, 0, 0);
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(11.5);
+  doc.text('REPORT CARD', pageWidth / 2, 47, { align: 'center' });
+
+  doc.setFontSize(15);
+  const ptHeading = getPtExamHeading(exam.examCode || exam.examName);
+  doc.text(ptHeading, pageWidth / 2, 54, { align: 'center' });
+
+  const tableMarginX = 21;
+  const tableWidth = pageWidth - tableMarginX * 2; // 168mm
+
+  // Table 1: Student Particulars Box (6 rows, 10-column framed black grid)
+  autoTable(doc, {
+    startY: 57.5,
+    margin: { left: tableMarginX, right: tableMarginX },
+    tableWidth,
+    theme: 'grid',
+    styles: {
+      font: 'helvetica',
+      fontStyle: 'bold',
+      fontSize: 9.5,
+      textColor: [0, 0, 0],
+      lineColor: [0, 0, 0],
+      lineWidth: 0.35,
+      cellPadding: { top: 2.1, bottom: 2.1, left: 2.2, right: 2.2 },
+      valign: 'middle',
+    },
+    columnStyles: {
+      0: { cellWidth: 19 },
+      1: { cellWidth: 24 },
+      2: { cellWidth: 25 },
+      3: { cellWidth: 5 },
+      4: { cellWidth: 19 },
+      5: { cellWidth: 13 },
+      6: { cellWidth: 12 },
+      7: { cellWidth: 10 },
+      8: { cellWidth: 13 },
+      9: { cellWidth: 28 },
+    },
+    body: [
+      [
+        'Roll No.',
+        profile.rollNoDisplay,
+        { content: 'Class & Section:', colSpan: 2 },
+        { content: profile.classSectionDisplay, colSpan: 3 },
+        { content: 'DOB:', colSpan: 2 },
+        profile.dobDisplay,
+      ],
+      [
+        { content: 'Name of the Student:', colSpan: 2 },
+        { content: student.name, colSpan: 8 },
+      ],
+      [
+        { content: 'Father’s Name:', colSpan: 2 },
+        { content: profile.fatherNameDisplay, colSpan: 8 },
+      ],
+      [
+        { content: 'Mother’s Name:', colSpan: 2 },
+        { content: profile.motherNameDisplay, colSpan: 8 },
+      ],
+      [
+        { content: 'House:', colSpan: 2 },
+        profile.house,
+        { content: 'Height:', colSpan: 2 },
+        { content: profile.height, colSpan: 2 },
+        { content: 'Weight:', colSpan: 2 },
+        profile.weight,
+      ],
+      [
+        { content: 'Attendance:', colSpan: 2 },
+        { content: `   ${profile.attendance}`, colSpan: 8 },
+      ],
+    ],
+  });
+  const studentTableEndY = (doc as any).lastAutoTable?.finalY || 105;
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(0.45);
+  doc.rect(
+    tableMarginX - 0.6,
+    57.5 - 0.6,
+    tableWidth + 1.2,
+    studentTableEndY - 57.5 + 1.2
+  );
+
+  const afterStudentTableY = studentTableEndY + 6.5;
+
+  // Class 9 has Computer Science paper in PT exams; Classes 6-8 do not
+  const includeCs = hasCsInPtExam(student.section || student.class);
+  const ptSubjectRows = result.subjectDetails
+    .filter((s) => {
+      if (includeCs) return true;
+      const lower = s.name.trim().toLowerCase();
+      return lower !== 'computer science' && lower !== 'cs';
+    })
+    .map((sub, idx) => {
+      const subRemark =
+        sub.remark && sub.remark.trim().length > 0
+          ? sub.remark.trim()
+          : sub.obtained === 'AB'
+          ? 'Absent'
+          : typeof sub.obtained === 'number' && sub.maxMarks > 0
+          ? (sub.obtained / sub.maxMarks) * 100 >= 90
+            ? 'Outstanding! Strong conceptual understanding.'
+            : (sub.obtained / sub.maxMarks) * 100 >= 75
+            ? 'Excellent performance keep it up.'
+            : (sub.obtained / sub.maxMarks) * 100 >= 50
+            ? 'Good.Keep it up!'
+            : 'Needs regular practice.'
+          : '';
+
+      return [
+        String(idx + 1),
+        getPtSubjectDisplayName(sub.name),
+        sub.obtained === 'AB' ? 'AB' : sub.obtained !== null ? String(sub.obtained) : '',
+        subRemark,
+      ];
+    });
+
+  // Table 2: Subject Marks Table (6 subjects)
+  autoTable(doc, {
+    startY: afterStudentTableY,
+    margin: { left: tableMarginX, right: tableMarginX },
+    tableWidth,
+    theme: 'grid',
+    head: [['SL. NO.', 'NAME OF THE SUBJECT', 'MARKS\nOBTAINED', 'REMARKS']],
+    body: ptSubjectRows,
+    styles: {
+      font: 'helvetica',
+      fontStyle: 'bold',
+      fontSize: 9.5,
+      textColor: [0, 0, 0],
+      lineColor: [0, 0, 0],
+      lineWidth: 0.35,
+      cellPadding: { top: 2.3, bottom: 2.3, left: 2.2, right: 2.2 },
+      valign: 'middle',
+    },
+    headStyles: {
+      fillColor: [255, 255, 255],
+      textColor: [0, 0, 0],
+      fontStyle: 'bold',
+      halign: 'center',
+      valign: 'middle',
+    },
+    columnStyles: {
+      0: { cellWidth: 16, halign: 'center' },
+      1: { cellWidth: 44, halign: 'center' },
+      2: { cellWidth: 25, halign: 'center' },
+      3: { cellWidth: 83, halign: 'left' },
+    },
+  });
+  const marksTableEndY = (doc as any).lastAutoTable?.finalY || 165;
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(0.45);
+  doc.rect(
+    tableMarginX - 0.6,
+    afterStudentTableY - 0.6,
+    tableWidth + 1.2,
+    marksTableEndY - afterStudentTableY + 1.2
+  );
+
+  const afterMarksTableY = marksTableEndY + 6.5;
+
+  // Table 3: Summary Strip (TOTAL / PERCENTAGE / GRADE)
+  const pctFormatted = formatPtPercentage(result.totalObtained, result.totalMax);
+  autoTable(doc, {
+    startY: afterMarksTableY,
+    margin: { left: tableMarginX, right: tableMarginX },
+    tableWidth,
+    theme: 'grid',
+    styles: {
+      font: 'helvetica',
+      fontStyle: 'bold',
+      fontSize: 9.5,
+      textColor: [0, 0, 0],
+      lineColor: [0, 0, 0],
+      lineWidth: 0.35,
+      cellPadding: { top: 2.1, bottom: 2.1, left: 2.2, right: 2.2 },
+      valign: 'middle',
+    },
+    columnStyles: {
+      0: { cellWidth: 24, halign: 'left' },
+      1: { cellWidth: 21, halign: 'center' },
+      2: { cellWidth: 32, halign: 'center' },
+      3: { cellWidth: 41, halign: 'center' },
+      4: { cellWidth: 27, halign: 'left' },
+      5: { cellWidth: 23, halign: 'center' },
+    },
+    body: [
+      [
+        'TOTAL:',
+        `${result.totalObtained}/${result.totalMax}`,
+        'PERCENTAGE:',
+        pctFormatted,
+        'GRADE:',
+        result.grade,
+      ],
+    ],
+  });
+  const summaryTableEndY = (doc as any).lastAutoTable?.finalY || 182;
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(0.45);
+  doc.rect(
+    tableMarginX - 0.6,
+    afterMarksTableY - 0.6,
+    tableWidth + 1.2,
+    summaryTableEndY - afterMarksTableY + 1.2
+  );
+
+  const afterSummaryY = summaryTableEndY + 6.5;
+
+  // Table 4: Class Teacher's Remarks Box
+  const defaultPtRemark =
+    'Excellent and consistent performance with strong understanding and commendable effort.';
+  const teacherRemarkText =
+    student.customRemarks && student.customRemarks.trim().length > 0
+      ? student.customRemarks.trim()
+      : defaultPtRemark;
+
+  autoTable(doc, {
+    startY: afterSummaryY,
+    margin: { left: tableMarginX, right: tableMarginX },
+    tableWidth,
+    theme: 'grid',
+    styles: {
+      font: 'helvetica',
+      fontStyle: 'bold',
+      fontSize: 9.5,
+      textColor: [0, 0, 0],
+      lineColor: [0, 0, 0],
+      lineWidth: 0.35,
+      cellPadding: { top: 2.1, bottom: 2.1, left: 2.2, right: 2.2 },
+      valign: 'middle',
+    },
+    columnStyles: {
+      0: { cellWidth: 57, halign: 'left' },
+      1: { cellWidth: 111, halign: 'left' },
+    },
+    body: [['CLASS TEACHER’S REMARKS:', teacherRemarkText]],
+  });
+  const remarksTableEndY = (doc as any).lastAutoTable?.finalY || 200;
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(0.45);
+  doc.rect(
+    tableMarginX - 0.6,
+    afterSummaryY - 0.6,
+    tableWidth + 1.2,
+    remarksTableEndY - afterSummaryY + 1.2
+  );
+
+  // =========================================================================
+  // PAGE 2: GRADING SYSTEM & SIGNATURES
+  // =========================================================================
+  doc.addPage();
+
+  const gradingTableWidth = 84;
+  const gradingMarginLeft = (pageWidth - gradingTableWidth) / 2;
+
+  autoTable(doc, {
+    startY: 18,
+    margin: { left: gradingMarginLeft, right: gradingMarginLeft },
+    tableWidth: gradingTableWidth,
+    theme: 'grid',
+    styles: {
+      font: 'helvetica',
+      fontStyle: 'bold',
+      fontSize: 9.5,
+      textColor: [0, 0, 0],
+      lineColor: [0, 0, 0],
+      lineWidth: 0.35,
+      cellPadding: { top: 1.4, bottom: 1.4, left: 2, right: 2 },
+      halign: 'center',
+      valign: 'middle',
+    },
+    columnStyles: {
+      0: { cellWidth: 49, halign: 'center' },
+      1: { cellWidth: 35, halign: 'center' },
+    },
+    body: [
+      [{ content: 'Grading System', colSpan: 2 }],
+      ['Range of Marks', 'Grade'],
+      ...REPORT_CARD_GRADING_SYSTEM.map((row) => [row.range.replace('–', '-'), row.grade]),
+    ],
+  });
+  const gradingTableEndY = (doc as any).lastAutoTable?.finalY || 78;
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(0.45);
+  doc.rect(
+    gradingMarginLeft - 0.5,
+    18 - 0.5,
+    gradingTableWidth + 1,
+    gradingTableEndY - 18 + 1
+  );
+
+  // 3 Signature labels matching Page 2 of PT_report_card_sample_5cddbf65.pdf
+  const sigTopY = 110;
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(10);
+  doc.setTextColor(0, 0, 0);
+
+  // Left: Signature of Class Teacher
+  doc.text('Signature of', 30, sigTopY, { align: 'center' });
+  doc.text('Class Teacher', 30, sigTopY + 5, { align: 'center' });
+
+  // Center: Signature of Principal with Seal
+  doc.text('Signature of', pageWidth / 2, sigTopY, { align: 'center' });
+  doc.text('Principal with Seal', pageWidth / 2, sigTopY + 5, { align: 'center' });
+
+  // Right: Signature of Parent / Guardian
+  doc.text('Signature of', pageWidth - 30, sigTopY, { align: 'center' });
+  doc.text('Parent / Guardian', pageWidth - 30, sigTopY + 5, { align: 'center' });
+}
 
 export function renderReportCardPage(
   doc: jsPDF,
   exam: ExamInfo,
   result: ComputedStudentResult
 ) {
+  if (isPtExam(exam.examCode || exam.examName)) {
+    renderPtReportCardPages(doc, exam, result);
+    return;
+  }
+
   const pageWidth = doc.internal.pageSize.getWidth();
   const pageHeight = doc.internal.pageSize.getHeight();
   const student = result.student;
@@ -122,7 +535,7 @@ export function renderReportCardPage(
           ? 'Very good performance'
           : (sub.obtained / sub.maxMarks) * 100 >= 50
           ? 'Good progress'
-          : (sub.obtained / sub.maxMarks) * 100 >= 33
+          : (sub.obtained / sub.maxMarks) * 100 >= 32
           ? 'Needs regular practice'
           : 'Needs remedial attention'
         : '-';

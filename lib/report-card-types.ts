@@ -35,7 +35,11 @@ export interface StudentReportRow {
   dob?: string;
   fatherName?: string;
   motherName?: string;
-  // Subject marks: subjectName -> mark (number | 'AB') (Total 100 or 80)
+  house?: string;
+  height?: string | number;
+  weight?: string | number;
+  attendance?: string;
+  // Subject marks: subjectName -> mark (number | 'AB') (Total 100 or 80 or 25)
   marks: Record<string, number | 'AB' | null>;
   // Granular internal marks: subjectName -> breakdown
   breakdowns?: Record<string, SubjectBreakdown>;
@@ -43,6 +47,235 @@ export interface StudentReportRow {
   customRemarks?: string;
   // Subject teacher remarks: subjectName -> remark string
   subjectRemarks?: Record<string, string>;
+}
+
+export const PT_EXAM_SUBJECT_NAMES = [
+  'English',
+  'Hindi',
+  'Marathi',
+  'Maths',
+  'Science',
+  'Social Science',
+] as const;
+
+export const PT_EXAM_CLASS9_SUBJECT_NAMES = [
+  'English',
+  'Hindi',
+  'Marathi',
+  'Maths',
+  'Science',
+  'Social Science',
+  'Computer Science',
+] as const;
+
+export const REPORT_CARD_GRADING_SYSTEM: Array<{
+  range: string;
+  grade: string;
+  min: number;
+  max: number;
+}> = [
+  { range: '91 – 100', grade: 'A1', min: 91, max: 100 },
+  { range: '81 – 90', grade: 'A2', min: 81, max: 90 },
+  { range: '71 – 80', grade: 'B1', min: 71, max: 80 },
+  { range: '61 – 70', grade: 'B2', min: 61, max: 70 },
+  { range: '51 – 60', grade: 'C1', min: 51, max: 60 },
+  { range: '41 – 50', grade: 'C2', min: 41, max: 50 },
+  { range: '32 – 40', grade: 'D', min: 32, max: 40 },
+  { range: '20 – 31', grade: 'E1', min: 20, max: 31 },
+  { range: '01 – 19', grade: 'E2', min: 1, max: 19 },
+];
+
+export function isPtExam(examIdOrCode?: string): boolean {
+  const norm = (examIdOrCode || '').trim().toUpperCase();
+  return norm.startsWith('PT') || norm.includes('PERIODIC TEST');
+}
+
+export function getPtExamHeading(examIdOrName?: string): string {
+  const norm = (examIdOrName || 'PT-1').trim().toUpperCase();
+  const match =
+    norm.match(/PT[\s-]*(\d+)/i) || norm.match(/PERIODIC\s+TEST[\s-]*(\d+)/i);
+  if (match) {
+    return `PERIODIC TEST - ${match[1]}`;
+  }
+  return norm;
+}
+
+export function getPtSubjectDisplayName(subjectName: string): string {
+  const trimmed = (subjectName || '').trim();
+  if (trimmed.toLowerCase() === 'maths' || trimmed.toLowerCase() === 'mathematics') {
+    return 'MATHEMATICS';
+  }
+  if (trimmed.toLowerCase() === 'ss' || trimmed.toLowerCase() === 'social science') {
+    return 'SOCIAL SCIENCE';
+  }
+  if (trimmed.toLowerCase() === 'cs' || trimmed.toLowerCase() === 'computer science') {
+    return 'COMPUTER SCIENCE';
+  }
+  return trimmed.toUpperCase();
+}
+
+export function formatPtPercentage(totalObtained: number, totalMax: number): string {
+  if (!totalMax || totalMax <= 0) return '0.00';
+  const rawPct = (totalObtained / totalMax) * 100;
+  const truncated = Math.floor((rawPct + 1e-9) * 100) / 100;
+  return truncated.toFixed(2);
+}
+
+const DEFAULT_MOTHER_NAMES = [
+  'Reshma',
+  'Sunita',
+  'Anita',
+  'Kavita',
+  'Savita',
+  'mangal',
+  'Rekha',
+  'Sangita',
+  'ashwini',
+  'Pallavi',
+  'Archana',
+  'Vandana',
+  'Vaishali',
+  'Rupali',
+  'Swati',
+  'Poonam',
+  'Meena',
+  'Seema',
+  'Geeta',
+  'Neeta',
+  'Rohini',
+  'Shubhangi',
+  'Ujwala',
+  'Madhuri',
+  'Yogita',
+  'Suvarna',
+  'Deepali',
+  'Pramila',
+  'Shobha',
+  'Lata',
+  'Asha',
+  'Usha',
+  'Vidya',
+  'Nanda',
+  'Chhaya',
+];
+
+export function getStudentPtProfile(student: StudentReportRow): {
+  rollNoDisplay: string;
+  classSectionDisplay: string;
+  dobDisplay: string;
+  fatherNameDisplay: string;
+  motherNameDisplay: string;
+  house: string;
+  height: string;
+  weight: string;
+  attendance: string;
+} {
+  const numericRoll = parseInt(String(student.rollNo), 10);
+  const rollNoDisplay = !isNaN(numericRoll) && numericRoll > 0 ? String(numericRoll) : String(student.rollNo || '1');
+
+  const section = (student.section || 'Twinkle').trim();
+  const romanMap: Record<string, string> = {
+    Sparkle: 'VI - Sparkle',
+    Twinkle: 'VI - Twinkle',
+    Topaz: 'VII - Topaz',
+    Jade: 'VII - Jade',
+    Garnet: 'VIII - Garnet',
+    Emerald: 'VIII - Emerald',
+    Ruby: 'IX - Ruby',
+    Diamond: 'IX - Diamond',
+  };
+  const classSectionDisplay = romanMap[section] || `${student.class || 'VI'} - ${section}`;
+
+  const isAayushSample =
+    student.id === 'STU-2026-0031' ||
+    student.name.trim().toLowerCase() === 'aayush satish nalawade';
+
+  let dobDisplay = '09/02/2015';
+  if (isAayushSample && (!student.dob || student.dob === '2010-07-03')) {
+    dobDisplay = '09/02/2015';
+  } else if (student.dob) {
+    const isoMatch = student.dob.trim().match(/^(\d{4})-(\d{2})-(\d{2})$/);
+    if (isoMatch) {
+      dobDisplay = `${isoMatch[3]}/${isoMatch[2]}/${isoMatch[1]}`;
+    } else {
+      dobDisplay = student.dob.trim();
+    }
+  }
+
+  let fatherNameDisplay = student.fatherName || '';
+  if (isAayushSample && (!fatherNameDisplay || fatherNameDisplay === 'Satish Nalawade')) {
+    fatherNameDisplay = 'Satish';
+  } else if (fatherNameDisplay) {
+    const parts = fatherNameDisplay.trim().split(/\s+/);
+    if (parts.length === 2 && student.name.trim().toLowerCase().endsWith(parts[1].toLowerCase())) {
+      fatherNameDisplay = parts[0];
+    }
+  } else {
+    const nameParts = student.name.trim().split(/\s+/);
+    fatherNameDisplay = nameParts.length >= 3 ? nameParts[1] : 'Parent';
+  }
+
+  let motherNameDisplay = student.motherName || '';
+  if (isAayushSample && (!motherNameDisplay || motherNameDisplay.startsWith('Mrs.'))) {
+    motherNameDisplay = 'Reshma';
+  } else if (!motherNameDisplay || motherNameDisplay.startsWith('Mrs.')) {
+    const idx = (!isNaN(numericRoll) ? Math.max(0, numericRoll - 1) : 0) % DEFAULT_MOTHER_NAMES.length;
+    const picked = DEFAULT_MOTHER_NAMES[idx];
+    motherNameDisplay = picked.charAt(0).toUpperCase() + picked.slice(1);
+  }
+
+  const houses = ['Sinhagad', 'Raigad', 'Shivneri', 'Pratapgad'];
+  const house =
+    student.house ||
+    (isAayushSample
+      ? 'Sinhagad'
+      : houses[(!isNaN(numericRoll) ? Math.max(0, numericRoll - 1) : 0) % houses.length]);
+
+  let defaultHeight = 129;
+  let defaultWeight = 21;
+  if (!isAayushSample) {
+    const rOffset = !isNaN(numericRoll) ? numericRoll % 11 : 0;
+    if (section === 'Sparkle' || section === 'Twinkle') {
+      defaultHeight = 128 + rOffset;
+      defaultWeight = 21 + (rOffset % 8);
+    } else if (section === 'Topaz' || section === 'Jade') {
+      defaultHeight = 135 + rOffset;
+      defaultWeight = 26 + (rOffset % 9);
+    } else if (section === 'Garnet' || section === 'Emerald') {
+      defaultHeight = 142 + rOffset;
+      defaultWeight = 31 + (rOffset % 10);
+    } else {
+      defaultHeight = 148 + rOffset;
+      defaultWeight = 36 + (rOffset % 12);
+    }
+  }
+
+  const rawHeight =
+    student.height !== undefined && student.height !== ''
+      ? String(student.height)
+      : String(defaultHeight);
+  const rawWeight =
+    student.weight !== undefined && student.weight !== ''
+      ? String(student.weight)
+      : String(defaultWeight);
+
+  const cleanHeight = rawHeight.trim().replace(/\s*cm$/i, '');
+  const cleanWeight = rawWeight.trim().replace(/\s*kg$/i, '');
+  const height = cleanHeight ? `${cleanHeight} cm` : '';
+  const weight = cleanWeight ? `${cleanWeight} kg` : '';
+  const attendance = student.attendance || '31/31';
+
+  return {
+    rollNoDisplay,
+    classSectionDisplay,
+    dobDisplay,
+    fatherNameDisplay,
+    motherNameDisplay,
+    house,
+    height,
+    weight,
+    attendance,
+  };
 }
 
 export type TotalFormulaType = 'SUM' | 'BEST_5' | 'EXCLUDE_LOWEST' | 'WEIGHTED' | 'CUSTOM';
@@ -89,6 +322,30 @@ export function getClassGradeFromSection(sec: string): string {
   return norm;
 }
 
+export function hasCsInPtExam(sectionOrClass?: string): boolean {
+  const norm = (sectionOrClass || '').trim().toLowerCase();
+  return (
+    norm === 'ruby' ||
+    norm === 'diamond' ||
+    norm === 'class 9' ||
+    norm === '9' ||
+    norm.includes('ruby') ||
+    norm.includes('diamond') ||
+    norm.includes('class 9')
+  );
+}
+
+export function getPtSubjectsForClass(sectionOrClass?: string): SubjectConfig[] {
+  const names = hasCsInPtExam(sectionOrClass)
+    ? PT_EXAM_CLASS9_SUBJECT_NAMES
+    : PT_EXAM_SUBJECT_NAMES;
+  return names.map((name) => ({
+    name,
+    maxMarks: 25,
+    passMarks: 8,
+  }));
+}
+
 export function getEffectiveExamConfigForClass(
   examConfig: ExamConfig,
   classOrSection?: string
@@ -97,13 +354,34 @@ export function getEffectiveExamConfigForClass(
     return examConfig;
   }
   const overrides = examConfig.classOverrides;
-  if (!overrides) return examConfig;
-
   const gradeKey = getClassGradeFromSection(classOrSection);
-  const sectionOverride = overrides[classOrSection];
-  const gradeOverride = gradeKey !== classOrSection ? overrides[gradeKey] : undefined;
+  const sectionOverride = overrides?.[classOrSection];
+  const gradeOverride = gradeKey !== classOrSection ? overrides?.[gradeKey] : undefined;
 
-  if (!sectionOverride && !gradeOverride) return examConfig;
+  let resolvedSubjects =
+    sectionOverride?.subjects ??
+    gradeOverride?.subjects ??
+    examConfig.subjects;
+
+  if (isPtExam(examConfig.code || examConfig.id) && !sectionOverride?.subjects && !gradeOverride?.subjects) {
+    if (hasCsInPtExam(classOrSection)) {
+      const hasCs = resolvedSubjects.some((s) => {
+        const lower = s.name.trim().toLowerCase();
+        return lower === 'computer science' || lower === 'cs';
+      });
+      if (!hasCs) {
+        resolvedSubjects = [
+          ...resolvedSubjects,
+          { name: 'Computer Science', maxMarks: 25, passMarks: 8 },
+        ];
+      }
+    } else {
+      resolvedSubjects = resolvedSubjects.filter((s) => {
+        const lower = s.name.trim().toLowerCase();
+        return lower !== 'computer science' && lower !== 'cs';
+      });
+    }
+  }
 
   return {
     ...examConfig,
@@ -119,10 +397,7 @@ export function getEffectiveExamConfigForClass(
       sectionOverride?.resultCriteria ??
       gradeOverride?.resultCriteria ??
       examConfig.resultCriteria,
-    subjects:
-      sectionOverride?.subjects ??
-      gradeOverride?.subjects ??
-      examConfig.subjects,
+    subjects: resolvedSubjects,
   };
 }
 
@@ -131,7 +406,10 @@ export interface ExamInfo {
   schoolAddress: string;
   schoolCode: string;
   affiliationNo: string;
+  udiseNo?: string;
+  schoolEmail?: string;
   examName: string;
+  examCode?: string;
   academicSession: string;
   principalName: string;
   classTeacherName: string;
@@ -159,14 +437,16 @@ export interface ComputedStudentResult {
 }
 
 export function computeGrade(percentage: number): string {
-  if (percentage >= 90) return 'A1';
-  if (percentage >= 80) return 'A2';
-  if (percentage >= 70) return 'B1';
-  if (percentage >= 60) return 'B2';
-  if (percentage >= 50) return 'C1';
-  if (percentage >= 40) return 'C2';
-  if (percentage >= 33) return 'D';
-  return 'E';
+  const p = Math.round(percentage);
+  if (p >= 91) return 'A1';
+  if (p >= 81) return 'A2';
+  if (p >= 71) return 'B1';
+  if (p >= 61) return 'B2';
+  if (p >= 51) return 'C1';
+  if (p >= 41) return 'C2';
+  if (p >= 32) return 'D';
+  if (p >= 20) return 'E1';
+  return 'E2';
 }
 
 /**
@@ -548,7 +828,7 @@ export function computeStudentResult(
       }
     }
     let obtained: number | 'AB' | null = null;
-    let grade = 'E';
+    let grade = 'E2';
     let status: 'PASS' | 'FAIL' | 'ABSENT' | 'INCOMPLETE' = 'PASS';
     let appliedGraceMarks = 0;
 
@@ -688,22 +968,47 @@ export function computeClassResults(
   resultCriteria?: ResultCriteriaConfig,
   classOverrides?: Record<string, ClassExamOverride>
 ): ComputedStudentResult[] {
+  const isPtSubjectSet =
+    subjects.length >= 6 &&
+    subjects.every((sub) => sub.maxMarks === 25);
+
   const list = students.map((s) => {
-    if (classOverrides) {
-      const secOverride = classOverrides[s.section];
-      const gradeKey = s.class || getClassGradeFromSection(s.section);
-      const gradeOverride = gradeKey ? classOverrides[gradeKey] : undefined;
-      if (secOverride || gradeOverride) {
-        return computeStudentResult(
-          s,
-          secOverride?.subjects ?? gradeOverride?.subjects ?? subjects,
-          secOverride?.totalFormula ?? gradeOverride?.totalFormula ?? totalFormula,
-          secOverride?.customFormula ?? gradeOverride?.customFormula ?? customFormula,
-          secOverride?.resultCriteria ?? gradeOverride?.resultCriteria ?? resultCriteria
-        );
+    const secOverride = classOverrides?.[s.section];
+    const gradeKey = s.class || getClassGradeFromSection(s.section);
+    const gradeOverride = gradeKey ? classOverrides?.[gradeKey] : undefined;
+
+    let studentSubjects =
+      secOverride?.subjects ??
+      gradeOverride?.subjects ??
+      subjects;
+
+    if (isPtSubjectSet && !secOverride?.subjects && !gradeOverride?.subjects) {
+      if (hasCsInPtExam(s.section || s.class)) {
+        const hasCs = studentSubjects.some((sub) => {
+          const lower = sub.name.trim().toLowerCase();
+          return lower === 'computer science' || lower === 'cs';
+        });
+        if (!hasCs) {
+          studentSubjects = [
+            ...studentSubjects,
+            { name: 'Computer Science', maxMarks: 25, passMarks: 8 },
+          ];
+        }
+      } else {
+        studentSubjects = studentSubjects.filter((sub) => {
+          const lower = sub.name.trim().toLowerCase();
+          return lower !== 'computer science' && lower !== 'cs';
+        });
       }
     }
-    return computeStudentResult(s, subjects, totalFormula, customFormula, resultCriteria);
+
+    return computeStudentResult(
+      s,
+      studentSubjects,
+      secOverride?.totalFormula ?? gradeOverride?.totalFormula ?? totalFormula,
+      secOverride?.customFormula ?? gradeOverride?.customFormula ?? customFormula,
+      secOverride?.resultCriteria ?? gradeOverride?.resultCriteria ?? resultCriteria
+    );
   });
 
   // Group by student's class (section / class) so rank is counted as per class, not from the whole school

@@ -2,39 +2,34 @@
 
 import React, { useState, useMemo } from 'react';
 import {
-  Layers,
   Check,
   Calculator,
-  CheckCircle2,
-  RotateCcw,
-  Sparkles,
-  ChevronRight,
-  Info,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
 import {
   ExamConfig,
   TotalFormulaType,
   StudentReportRow,
-  SubjectConfig,
   getEffectiveExamConfigForClass,
   evaluateCustomFormula,
   getClassGradeFromSection,
 } from '@/lib/report-card-types';
-import { SVA_ALL_CLASSES } from '@/lib/sva-students-data';
 
-const SPECIFIC_CLASS_OPTIONS: { value: string; label: string; group: string }[] = [
-  { value: 'Sparkle', label: '6 Sparkle', group: 'Classes (Sections)' },
-  { value: 'Twinkle', label: '6 Twinkle', group: 'Classes (Sections)' },
-  { value: 'Topaz', label: '7 Topaz', group: 'Classes (Sections)' },
-  { value: 'Jade', label: '7 Jade', group: 'Classes (Sections)' },
-  { value: 'Garnet', label: '8 Garnet', group: 'Classes (Sections)' },
-  { value: 'Emerald', label: '8 Emerald', group: 'Classes (Sections)' },
-  { value: 'Ruby', label: '9 Ruby', group: 'Classes (Sections)' },
-  { value: 'Diamond', label: '9 Diamond', group: 'Classes (Sections)' },
-  { value: 'Class 6', label: 'Class 6 (Sparkle & Twinkle)', group: 'Whole Grades' },
-  { value: 'Class 7', label: 'Class 7 (Topaz & Jade)', group: 'Whole Grades' },
-  { value: 'Class 8', label: 'Class 8 (Garnet & Emerald)', group: 'Whole Grades' },
-  { value: 'Class 9', label: 'Class 9 (Ruby & Diamond)', group: 'Whole Grades' },
+const SPECIFIC_CLASS_OPTIONS: { value: string; label: string }[] = [
+  { value: 'ALL', label: 'All Classes' },
+  { value: 'Sparkle', label: '6 Sparkle' },
+  { value: 'Twinkle', label: '6 Twinkle' },
+  { value: 'Topaz', label: '7 Topaz' },
+  { value: 'Jade', label: '7 Jade' },
+  { value: 'Garnet', label: '8 Garnet' },
+  { value: 'Emerald', label: '8 Emerald' },
+  { value: 'Ruby', label: '9 Ruby' },
+  { value: 'Diamond', label: '9 Diamond' },
+  { value: 'Class 6', label: 'Class 6 (Both Sections)' },
+  { value: 'Class 7', label: 'Class 7 (Both Sections)' },
+  { value: 'Class 8', label: 'Class 8 (Both Sections)' },
+  { value: 'Class 9', label: 'Class 9 (Both Sections)' },
 ];
 
 function getClassDisplayLabel(scope: string): string {
@@ -43,10 +38,41 @@ function getClassDisplayLabel(scope: string): string {
   return found ? found.label : scope;
 }
 
+type SimplePresetId = 'ALL_SUBJECTS' | 'BEST_5' | 'BEST_6' | 'WRITTEN_ONLY' | 'CUSTOM';
+
+function getActiveSimplePreset(
+  totalFormula?: TotalFormulaType,
+  customFormula?: string,
+  totalSubjectsCount: number = 7
+): SimplePresetId {
+  if (!totalFormula || totalFormula === 'SUM') return 'ALL_SUBJECTS';
+  if (totalFormula === 'BEST_5') return 'BEST_5';
+
+  const raw = (customFormula || '').trim();
+  const upper = raw.toUpperCase().replace(/\s+/g, '');
+
+  if (!raw || upper === 'SUM' || upper === 'SUM_MAIN+SUM_INTERNAL') {
+    return 'ALL_SUBJECTS';
+  }
+  if (upper === 'BEST(5)') return 'BEST_5';
+  if (upper === 'BEST(6)') return 'BEST_6';
+  if (upper === 'SUM_MAIN') return 'WRITTEN_ONLY';
+
+  // If it's a subject list like [English] + [Hindi] ...
+  const bracketMatches = raw.match(/\[([^\]:]+)\]/g);
+  if (bracketMatches && bracketMatches.length > 0 && !raw.includes(':')) {
+    return 'ALL_SUBJECTS';
+  }
+
+  void totalSubjectsCount;
+  return 'CUSTOM';
+}
+
 interface TotalCalculationFormulaCardProps {
   baseExamConfig: ExamConfig;
   activeExamId: string;
   selectedClass?: string;
+  onSelectClassScope?: (scope: string) => void;
   students: StudentReportRow[];
   onUpdateExamConfig: (
     examId: string,
@@ -58,21 +84,23 @@ interface TotalCalculationFormulaCardProps {
 
 export default function TotalCalculationFormulaCard({
   baseExamConfig,
-  activeExamId,
-  selectedClass,
+  selectedClass = 'ALL',
+  onSelectClassScope,
   students,
   onUpdateExamConfig,
   showToast,
 }: TotalCalculationFormulaCardProps) {
-  // Class Scope: 'ALL' vs 'SPECIFIC'
-  const [classScopeMode, setClassScopeMode] = useState<'ALL' | 'SPECIFIC'>('ALL');
-  const [selectedSpecificClass, setSelectedSpecificClass] = useState<string>(
-    selectedClass && selectedClass !== 'all' ? selectedClass : 'Diamond'
-  );
+  const [localScope, setLocalScope] = useState<string>('ALL');
+  const [showCustomInput, setShowCustomInput] = useState<boolean>(false);
 
-  const activeClassScope = classScopeMode === 'ALL' ? 'ALL' : selectedSpecificClass;
+  const activeClassScope =
+    selectedClass && selectedClass !== 'all' ? selectedClass : localScope;
 
-  // Effective config for currently selected scope
+  const handleScopeChange = (newScope: string) => {
+    setLocalScope(newScope);
+    onSelectClassScope?.(newScope);
+  };
+
   const currentConfig: ExamConfig = useMemo(
     () => getEffectiveExamConfigForClass(baseExamConfig, activeClassScope),
     [baseExamConfig, activeClassScope]
@@ -82,7 +110,17 @@ export default function TotalCalculationFormulaCard({
     currentConfig.totalFormula === 'CUSTOM' ? 'CUSTOM' : 'SUM';
   const currentCustomFormula = currentConfig.customFormula || 'SUM_MAIN + SUM_INTERNAL';
 
-  // Sample student for real-time live preview calculation
+  const activePreset = useMemo(
+    () =>
+      getActiveSimplePreset(
+        currentConfig.totalFormula,
+        currentConfig.customFormula,
+        currentConfig.subjects.length
+      ),
+    [currentConfig.totalFormula, currentConfig.customFormula, currentConfig.subjects.length]
+  );
+
+  // Sample student for live total preview
   const sampleStudent = useMemo(() => {
     if (!students || students.length === 0) return null;
     if (activeClassScope !== 'ALL') {
@@ -97,7 +135,6 @@ export default function TotalCalculationFormulaCard({
     return students[0];
   }, [students, activeClassScope]);
 
-  // Preview evaluation
   const previewEvaluation = useMemo(() => {
     if (!currentConfig.subjects || currentConfig.subjects.length === 0) return null;
     const formulaToTest =
@@ -117,34 +154,33 @@ export default function TotalCalculationFormulaCard({
     return evaluateCustomFormula(formulaToTest, sampleMarks, currentConfig.subjects);
   }, [currentTotalFormula, currentCustomFormula, sampleStudent, currentConfig.subjects]);
 
-  // Handler to update config
-  const handleConfigChange = (updater: (prev: ExamConfig) => ExamConfig) => {
+  const updateFormulaConfig = (
+    formulaType: TotalFormulaType,
+    customStr?: string,
+    toastLabel?: string
+  ) => {
     if (activeClassScope === 'ALL') {
-      const updatedBase = updater(baseExamConfig);
       onUpdateExamConfig(
         baseExamConfig.id,
         {
-          ...updatedBase,
+          ...baseExamConfig,
+          totalFormula: formulaType,
+          customFormula: customStr ?? baseExamConfig.customFormula ?? 'SUM_MAIN + SUM_INTERNAL',
           classOverrides: baseExamConfig.classOverrides,
         },
         'ALL'
       );
     } else {
-      const updatedForClass = updater(currentConfig);
       const prevOverride = baseExamConfig.classOverrides?.[activeClassScope] || {};
-
-      const nextClassOverride = {
-        ...prevOverride,
-        totalFormula: updatedForClass.totalFormula,
-        customFormula: updatedForClass.customFormula,
-      };
-
       const nextOverrides = {
         ...(baseExamConfig.classOverrides || {}),
-        [activeClassScope]: nextClassOverride,
+        [activeClassScope]: {
+          ...prevOverride,
+          totalFormula: formulaType,
+          customFormula: customStr ?? currentConfig.customFormula ?? 'SUM_MAIN + SUM_INTERNAL',
+        },
       };
 
-      // If user edited a whole grade (e.g. 'Class 9'), sync constituent sections if they had overrides
       if (activeClassScope.startsWith('Class ')) {
         Object.keys(nextOverrides).forEach((k) => {
           if (k !== activeClassScope && getClassGradeFromSection(k) === activeClassScope) {
@@ -162,462 +198,243 @@ export default function TotalCalculationFormulaCard({
         activeClassScope
       );
     }
+
+    if (toastLabel) {
+      showToast?.(`${toastLabel} applied to ${getClassDisplayLabel(activeClassScope)}`);
+    }
   };
 
-  const handleSetTotalFormula = (formulaType: TotalFormulaType) => {
-    handleConfigChange((prev) => ({
-      ...prev,
-      totalFormula: formulaType,
-      customFormula:
-        formulaType === 'CUSTOM' && !prev.customFormula
-          ? 'SUM_MAIN + SUM_INTERNAL'
-          : prev.customFormula,
-    }));
-    showToast?.(
-      `Set formula to ${formulaType === 'CUSTOM' ? 'Custom Formula' : 'Standard Sum'} for ${getClassDisplayLabel(activeClassScope)}`
-    );
-  };
-
-  const handleCustomFormulaChange = (newFormula: string) => {
-    handleConfigChange((prev) => ({
-      ...prev,
-      customFormula: newFormula,
-    }));
-  };
-
-  const handleInsertFormulaToken = (token: string) => {
-    handleConfigChange((prev) => {
-      const cur = (prev.customFormula || '').trim();
-      let nextStr = '';
-      if (!cur) {
-        nextStr = token;
-      } else if (
-        ['+', '-', '*', '/', '(', ')'].includes(token) ||
-        cur.endsWith('(') ||
-        cur.endsWith('+') ||
-        cur.endsWith('-') ||
-        cur.endsWith('*') ||
-        cur.endsWith('/') ||
-        token.startsWith(')') ||
-        token.startsWith('*')
-      ) {
-        nextStr = `${cur} ${token}`;
-      } else {
-        nextStr = `${cur} + ${token}`;
-      }
-      return {
-        ...prev,
-        customFormula: nextStr,
-      };
-    });
-  };
-
-  const handleResetClassOverride = (clsKey: string) => {
-    if (!baseExamConfig.classOverrides?.[clsKey]) return;
-    const nextOverrides = { ...baseExamConfig.classOverrides };
-    delete nextOverrides[clsKey];
-    onUpdateExamConfig(
-      baseExamConfig.id,
-      {
-        ...baseExamConfig,
-        classOverrides: Object.keys(nextOverrides).length > 0 ? nextOverrides : undefined,
-      },
-      clsKey
-    );
-    showToast?.(`Reset ${getClassDisplayLabel(clsKey)} to All Classes settings`);
-  };
-
-  const handleSelectClassFromOverview = (clsName: string) => {
-    setClassScopeMode('SPECIFIC');
-    setSelectedSpecificClass(clsName);
-  };
-
-  // Inspect formula applied to all 8 classes
-  const classesFormulaSummary = useMemo(() => {
-    return SVA_ALL_CLASSES.map((clsName) => {
-      const effective = getEffectiveExamConfigForClass(baseExamConfig, clsName);
-      const isCustomized = Boolean(
-        baseExamConfig.classOverrides?.[clsName] ||
-          baseExamConfig.classOverrides?.[getClassGradeFromSection(clsName)]
+  // Which subjects are checked when "All Subjects" is active
+  const includedSubjects = useMemo(() => {
+    const allNames = currentConfig.subjects.map((s) => s.name);
+    if (
+      currentTotalFormula === 'CUSTOM' &&
+      currentCustomFormula.includes('[') &&
+      !currentCustomFormula.includes(':')
+    ) {
+      const matches = allNames.filter((name) =>
+        currentCustomFormula.toLowerCase().includes(`[${name.toLowerCase()}]`)
       );
-      const isCurrentlySelected =
-        classScopeMode === 'SPECIFIC' && selectedSpecificClass === clsName;
+      if (matches.length > 0) return matches;
+    }
+    return allNames;
+  }, [currentConfig.subjects, currentTotalFormula, currentCustomFormula]);
 
-      return {
-        clsName,
-        displayLabel: getClassDisplayLabel(clsName),
-        totalFormula: effective.totalFormula,
-        customFormula: effective.customFormula,
-        isCustomized,
-        isCurrentlySelected,
-      };
-    });
-  }, [baseExamConfig, classScopeMode, selectedSpecificClass]);
+  const handleToggleSubject = (subjectName: string) => {
+    const isChecked = includedSubjects.includes(subjectName);
+    let nextSelected: string[];
 
-  const hasSpecificOverride =
-    activeClassScope !== 'ALL' && Boolean(baseExamConfig.classOverrides?.[activeClassScope]);
+    if (isChecked) {
+      if (includedSubjects.length <= 1) {
+        showToast?.('At least 1 subject must stay selected');
+        return;
+      }
+      nextSelected = includedSubjects.filter((s) => s !== subjectName);
+    } else {
+      nextSelected = currentConfig.subjects
+        .map((s) => s.name)
+        .filter((name) => includedSubjects.includes(name) || name === subjectName);
+    }
+
+    if (nextSelected.length === currentConfig.subjects.length) {
+      updateFormulaConfig('SUM', undefined, 'All Subjects Included');
+    } else {
+      const formula = nextSelected.map((name) => `[${name}]`).join(' + ');
+      updateFormulaConfig(
+        'CUSTOM',
+        formula,
+        `${nextSelected.length} of ${currentConfig.subjects.length} Subjects Included`
+      );
+    }
+  };
+
+  const singleSubMax = currentConfig.subjects[0]?.maxMarks || 100;
+  const allSubMax = currentConfig.subjects.reduce((acc, s) => acc + (s.maxMarks || 0), 0);
 
   return (
     <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-xs space-y-4">
-      {/* 1. Header: Total Calculation & Formula, Mode Badge, and Live Preview */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 pb-3 border-b border-slate-100">
+      {/* Header Row */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
         <div>
           <div className="flex items-center gap-2">
             <h2 className="text-sm font-semibold text-slate-900">
-              Total Calculation & Formula
+              Total Calculation
             </h2>
-            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-100 text-slate-700 font-medium">
-              {currentTotalFormula === 'CUSTOM' ? 'Custom Formula' : 'Standard Sum'}
-            </span>
+            <select
+              value={activeClassScope}
+              onChange={(e) => handleScopeChange(e.target.value)}
+              aria-label="Apply Total Calculation Rule To"
+              className="text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200/70 border border-slate-200/80 rounded-md px-2 py-0.5 focus:outline-none focus:border-blue-600 cursor-pointer"
+            >
+              {SPECIFIC_CLASS_OPTIONS.map((opt) => (
+                <option key={opt.value} value={opt.value}>
+                  {opt.label}
+                </option>
+              ))}
+            </select>
           </div>
           <p className="text-xs text-slate-500 mt-0.5">
-            Configure how student totals are computed across main exams and internal assessments
+            Choose how total marks and percentage are calculated
           </p>
         </div>
 
         {previewEvaluation && (
-          <div className="flex items-center gap-1.5 text-xs bg-slate-50 border border-slate-200/80 px-2.5 py-1 rounded-lg self-start sm:self-auto shadow-2xs">
-            <span className="text-slate-400 text-[11px]">Preview:</span>
-            <span className="font-mono font-semibold text-slate-800">
-              {previewEvaluation.obtained}
-            </span>
+          <div className="text-xs text-slate-500 font-mono flex items-center gap-1.5 bg-slate-50 px-2.5 py-1.5 rounded-lg border border-slate-200/70 self-start sm:self-auto">
+            <span className="text-slate-400 font-sans text-[11px]">Sample Total:</span>
+            <strong className="text-slate-900 font-bold">{previewEvaluation.obtained}</strong>
             <span className="text-slate-400">/</span>
-            <span className="font-mono text-slate-600">
-              {previewEvaluation.max}
-            </span>
-            <span className="text-[11px] font-medium text-emerald-600 ml-1">
-              ({((previewEvaluation.obtained / (previewEvaluation.max || 1)) * 100).toFixed(2)}%)
+            <span className="text-slate-600">{previewEvaluation.max}</span>
+            <span className="text-emerald-700 font-semibold">
+              ({((previewEvaluation.obtained / (previewEvaluation.max || 1)) * 100).toFixed(1)}%)
             </span>
           </div>
         )}
       </div>
 
-      {/* 2. Scope Bar: Apply Formula To: All Classes / Specific Class */}
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 bg-slate-50/70 border border-slate-200/70 rounded-lg px-3 py-2">
-        <div className="flex items-center gap-1.5 text-xs text-slate-600">
-          <Layers className="w-3.5 h-3.5 text-slate-400" />
-          <span>Apply Formula To:</span>
-          <strong className="text-slate-900 font-semibold">
-            {getClassDisplayLabel(activeClassScope)}
-          </strong>
-          {hasSpecificOverride && (
-            <span className="ml-1 text-[10px] bg-amber-50 text-amber-700 border border-amber-200/80 px-1.5 py-0.2 rounded font-medium">
-              Custom Class Override
-            </span>
-          )}
-        </div>
-
-        <div className="flex flex-wrap items-center gap-2">
-          {hasSpecificOverride && (
-            <button
-              type="button"
-              onClick={() => handleResetClassOverride(activeClassScope)}
-              className="text-[11px] text-rose-600 hover:text-rose-700 flex items-center gap-1 px-2 py-1 rounded hover:bg-rose-50 transition-colors cursor-pointer"
-              title="Revert to All Classes default"
-            >
-              <RotateCcw className="w-3 h-3" />
-              Reset to Default
-            </button>
-          )}
-
-          <div className="inline-flex items-center bg-slate-100 p-0.5 rounded-lg border border-slate-200/80">
-            <button
-              type="button"
-              onClick={() => setClassScopeMode('ALL')}
-              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer ${
-                classScopeMode === 'ALL'
-                  ? 'bg-white text-slate-900 font-semibold shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              All Classes
-            </button>
-            <button
-              type="button"
-              onClick={() => setClassScopeMode('SPECIFIC')}
-              className={`px-2.5 py-1 rounded-md text-xs font-medium transition-all cursor-pointer ${
-                classScopeMode === 'SPECIFIC'
-                  ? 'bg-white text-slate-900 font-semibold shadow-xs'
-                  : 'text-slate-600 hover:text-slate-900'
-              }`}
-            >
-              Specific Class
-            </button>
-          </div>
-
-          {classScopeMode === 'SPECIFIC' && (
-            <div className="flex items-center gap-1.5 animate-in fade-in duration-150">
-              <select
-                value={selectedSpecificClass}
-                onChange={(e) => setSelectedSpecificClass(e.target.value)}
-                aria-label="Select Specific Class"
-                className="text-xs font-medium text-slate-800 bg-white border border-slate-200 rounded-lg px-2.5 py-1 focus:outline-none focus:border-blue-600 cursor-pointer shadow-xs"
-              >
-                <optgroup label="Classes (Sections)">
-                  {SPECIFIC_CLASS_OPTIONS.filter((o) => o.group === 'Classes (Sections)').map(
-                    (opt) => (
-                      <option key={opt.value} value={opt.value}>
-                        {opt.label}
-                      </option>
-                    )
-                  )}
-                </optgroup>
-                <optgroup label="Whole Grades">
-                  {SPECIFIC_CLASS_OPTIONS.filter((o) => o.group === 'Whole Grades').map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </optgroup>
-              </select>
-            </div>
-          )}
-        </div>
-      </div>
-
-      {/* 3. Formulas Applied on Every Class (Overview Matrix / Grid) */}
-      <div className="space-y-1.5 pt-1">
-        <div className="flex items-center justify-between text-xs">
-          <span className="font-semibold text-slate-700 flex items-center gap-1.5">
-            <Calculator className="w-3.5 h-3.5 text-blue-600" />
-            Formulas Applied on Every Class ({classesFormulaSummary.length} Classes)
-          </span>
-          <span className="text-[11px] text-slate-400">
-            Click any class to edit or inspect its formula
-          </span>
-        </div>
-
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-2">
-          {classesFormulaSummary.map((cls) => {
-            const isStandard = cls.totalFormula !== 'CUSTOM';
-            return (
-              <button
-                key={cls.clsName}
-                type="button"
-                onClick={() => handleSelectClassFromOverview(cls.clsName)}
-                className={`text-left p-2 rounded-lg border transition-all cursor-pointer relative group ${
-                  cls.isCurrentlySelected
-                    ? 'border-blue-600 bg-blue-50/70 ring-2 ring-blue-600/30 shadow-xs'
-                    : cls.isCustomized
-                    ? 'border-purple-300 bg-purple-50/30 hover:border-purple-400'
-                    : 'border-slate-200 bg-slate-50/40 hover:bg-white hover:border-slate-300'
-                }`}
-              >
-                <div className="flex items-center justify-between gap-1">
-                  <span className="text-xs font-semibold text-slate-900 truncate">
-                    {cls.displayLabel}
-                  </span>
-                  {cls.isCustomized && (
-                    <span
-                      title="Custom Override"
-                      className="w-1.5 h-1.5 rounded-full bg-purple-500 shrink-0"
-                    />
-                  )}
-                </div>
-
-                <div className="mt-1 flex items-center gap-1">
-                  <span
-                    className={`text-[10px] font-medium px-1.5 py-0.5 rounded leading-tight truncate ${
-                      isStandard
-                        ? 'bg-slate-100 text-slate-700'
-                        : 'bg-blue-100 text-blue-800 font-mono'
-                    }`}
-                  >
-                    {isStandard ? 'Standard Sum' : 'Custom'}
-                  </span>
-                </div>
-
-                <p className="text-[9px] text-slate-400 mt-1 truncate">
-                  {cls.isCustomized ? 'Class Override' : 'All Classes'}
-                </p>
-              </button>
-            );
-          })}
-        </div>
-      </div>
-
-      {/* 4. Formula Selection Cards: Standard Sum vs Custom Formula */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+      {/* Simple 4-Option Selector */}
+      <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
         {[
           {
-            id: 'SUM',
-            label: 'Standard Sum',
-            desc: 'Sum of all subject totals',
+            id: 'ALL_SUBJECTS' as const,
+            title: 'All Subjects',
+            subtitle: `${allSubMax} Marks Total`,
+            onClick: () => updateFormulaConfig('SUM', undefined, 'All Subjects'),
           },
           {
-            id: 'CUSTOM',
-            label: 'Custom Formula',
-            desc: 'Integrate internals & main papers',
+            id: 'BEST_5' as const,
+            title: 'Best 5 Subjects',
+            subtitle: `Top 5 (${singleSubMax * 5}m)`,
+            onClick: () => updateFormulaConfig('CUSTOM', 'BEST(5)', 'Best 5 Subjects'),
           },
-        ].map((opt) => {
-          const isSelected = currentTotalFormula === opt.id;
+          {
+            id: 'BEST_6' as const,
+            title: 'Best 6 Subjects',
+            subtitle: `Top 6 (${singleSubMax * 6}m)`,
+            onClick: () => updateFormulaConfig('CUSTOM', 'BEST(6)', 'Best 6 Subjects'),
+          },
+          {
+            id: 'WRITTEN_ONLY' as const,
+            title: 'Written Exam Only',
+            subtitle: 'Ignore Internals',
+            onClick: () => updateFormulaConfig('CUSTOM', 'SUM_MAIN', 'Written Exam Only'),
+          },
+        ].map((item) => {
+          const isSelected = activePreset === item.id;
           return (
             <button
-              key={opt.id}
+              key={item.id}
               type="button"
-              onClick={() => handleSetTotalFormula(opt.id as TotalFormulaType)}
+              onClick={item.onClick}
               className={`p-3 rounded-lg border text-left transition-all cursor-pointer ${
                 isSelected
-                  ? 'border-blue-600 bg-blue-50/60 text-slate-900 ring-1 ring-blue-600/30 shadow-xs'
-                  : 'border-slate-200 hover:border-slate-300 bg-white text-slate-800 hover:bg-slate-50/50'
+                  ? 'border-blue-600 bg-blue-50/70 ring-1 ring-blue-600/20'
+                  : 'border-slate-200 bg-white hover:border-slate-300 hover:bg-slate-50/50'
               }`}
             >
-              <div className="flex items-center justify-between">
-                <span className="text-xs font-semibold">{opt.label}</span>
-                {isSelected && <Check className="w-3.5 h-3.5 text-blue-600" />}
+              <div className="flex items-center justify-between gap-1.5">
+                <span
+                  className={`text-xs font-semibold ${
+                    isSelected ? 'text-blue-700' : 'text-slate-900'
+                  }`}
+                >
+                  {item.title}
+                </span>
+                {isSelected && (
+                  <span className="w-4 h-4 rounded-full bg-blue-600 text-white flex items-center justify-center shrink-0">
+                    <Check className="w-2.5 h-2.5" />
+                  </span>
+                )}
               </div>
-              <p
-                className={`text-[11px] mt-0.5 line-clamp-1 ${
-                  isSelected ? 'text-blue-700/80 font-medium' : 'text-slate-400'
-                }`}
-              >
-                {opt.desc}
-              </p>
+              <div className="text-[11px] text-slate-500 mt-0.5">{item.subtitle}</div>
             </button>
           );
         })}
       </div>
 
-      {/* 5. Custom Formula Editor (when CUSTOM is active) */}
-      {currentTotalFormula === 'CUSTOM' && (
-        <div className="p-4 bg-slate-50/70 border border-slate-200/90 rounded-xl space-y-3 animate-in fade-in duration-150">
-          <div className="space-y-1.5">
-            <div className="flex items-center justify-between text-xs">
-              <label className="font-semibold text-slate-800 flex items-center gap-1.5">
-                <Calculator className="w-3.5 h-3.5 text-slate-500" />
-                Custom Formula ({getClassDisplayLabel(activeClassScope)})
-              </label>
-              <div className="flex items-center gap-2.5">
-                <button
-                  type="button"
-                  onClick={() => handleCustomFormulaChange('')}
-                  className="text-[11px] text-slate-400 hover:text-rose-600 transition-colors cursor-pointer"
-                >
-                  Clear
-                </button>
-                <button
-                  type="button"
-                  onClick={() => handleCustomFormulaChange('SUM_MAIN + SUM_INTERNAL')}
-                  className="text-[11px] text-blue-600 hover:text-blue-800 transition-colors font-medium cursor-pointer"
-                >
-                  Reset to Main + Internals
-                </button>
-              </div>
-            </div>
-
-            <input
-              type="text"
-              value={currentConfig.customFormula ?? 'SUM_MAIN + SUM_INTERNAL'}
-              onChange={(e) => handleCustomFormulaChange(e.target.value)}
-              placeholder="e.g. SUM_MAIN + SUM_INTERNAL or [English:Main] + [English:Internal]"
-              className="w-full font-mono text-xs text-slate-900 bg-white border border-slate-300 rounded-md px-3 py-2 focus:outline-none focus:border-blue-600 focus:ring-1 focus:ring-blue-600"
-            />
-
-            {previewEvaluation && (
-              <div className="flex items-center justify-between text-[11px] pt-0.5">
-                <span className="text-emerald-700 flex items-center gap-1">
-                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-600" />
-                  Valid formula • Evaluates to <strong>{previewEvaluation.obtained}</strong> /{' '}
-                  {previewEvaluation.max} marks
-                  {sampleStudent
-                    ? ` (${sampleStudent.name} · ${getClassDisplayLabel(sampleStudent.section)})`
-                    : ''}
-                </span>
-                <span className="text-slate-500 font-mono">
-                  {((previewEvaluation.obtained / (previewEvaluation.max || 1)) * 100).toFixed(2)}%
-                </span>
-              </div>
+      {/* Subject Checkboxes (Only shown when "All Subjects" is active so user can easily uncheck extra subjects like Computer Science) */}
+      {activePreset === 'ALL_SUBJECTS' && (
+        <div className="pt-2 border-t border-slate-100 space-y-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-slate-600 font-medium">
+              Subjects counted in Grand Total ({includedSubjects.length} of{' '}
+              {currentConfig.subjects.length}):
+            </span>
+            {includedSubjects.length < currentConfig.subjects.length && (
+              <button
+                type="button"
+                onClick={() => updateFormulaConfig('SUM', undefined, 'All Subjects Included')}
+                className="text-[11px] font-medium text-blue-600 hover:underline cursor-pointer"
+              >
+                Select All
+              </button>
             )}
           </div>
 
-          {/* Quick Presets */}
-          <div className="space-y-1.5 pt-2 border-t border-slate-200/60">
-            <span className="text-[11px] font-medium text-slate-500 block">
-              Quick Presets:
-            </span>
-            <div className="flex flex-wrap gap-1.5">
-              {[
-                {
-                  label: 'Main + Internals',
-                  formula: 'SUM_MAIN + SUM_INTERNAL',
-                },
-                {
-                  label: 'Main + 50% Internals',
-                  formula: 'SUM_MAIN + (SUM_INTERNAL * 0.5)',
-                },
-                {
-                  label: 'Internals Only',
-                  formula: 'SUM_INTERNAL',
-                },
-                {
-                  label: 'Main Exams Only',
-                  formula: 'SUM_MAIN',
-                },
-                {
-                  label: 'Best 5 Subjects',
-                  formula: 'BEST(5)',
-                },
-                {
-                  label: 'All Subjects (SUM)',
-                  formula: 'SUM',
-                },
-              ].map((preset) => (
+          <div className="flex flex-wrap gap-1.5">
+            {currentConfig.subjects.map((sub) => {
+              const isChecked = includedSubjects.includes(sub.name);
+              return (
                 <button
-                  key={preset.formula}
+                  key={sub.name}
                   type="button"
-                  onClick={() => handleCustomFormulaChange(preset.formula)}
-                  className={`text-[11px] px-2.5 py-1 rounded border transition-colors cursor-pointer ${
-                    currentConfig.customFormula === preset.formula
-                      ? 'bg-blue-50 text-blue-700 border-blue-300 font-semibold shadow-xs'
-                      : 'bg-white text-slate-600 border-slate-200 hover:border-slate-300 hover:text-slate-900'
+                  onClick={() => handleToggleSubject(sub.name)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border text-xs transition-all cursor-pointer ${
+                    isChecked
+                      ? 'bg-blue-50/60 border-blue-200 text-slate-900 font-medium'
+                      : 'bg-slate-50 border-slate-200 text-slate-400 line-through'
                   }`}
                 >
-                  {preset.label}
+                  <span
+                    className={`w-3.5 h-3.5 rounded flex items-center justify-center ${
+                      isChecked
+                        ? 'bg-blue-600 text-white'
+                        : 'border border-slate-300 bg-white'
+                    }`}
+                  >
+                    {isChecked && <Check className="w-2.5 h-2.5" />}
+                  </span>
+                  <span>{sub.name}</span>
                 </button>
-              ))}
-            </div>
+              );
+            })}
           </div>
+        </div>
+      )}
 
-          {/* Token Insertion Buttons */}
-          <div className="space-y-2 pt-2 border-t border-slate-200/60">
-            <span className="text-[11px] font-medium text-slate-500 block">
-              Click to insert tokens into formula:
-            </span>
+      {/* Minimal Custom Formula Toggle */}
+      <div className="pt-1 flex items-center justify-between">
+        <button
+          type="button"
+          onClick={() => setShowCustomInput((v) => !v)}
+          className="text-[11px] text-slate-400 hover:text-slate-600 flex items-center gap-1 cursor-pointer"
+        >
+          <Calculator className="w-3 h-3" />
+          <span>{showCustomInput ? 'Hide custom formula' : 'Custom formula'}</span>
+          {showCustomInput ? (
+            <ChevronUp className="w-3 h-3" />
+          ) : (
+            <ChevronDown className="w-3 h-3" />
+          )}
+        </button>
+      </div>
 
-            <div className="flex flex-wrap items-center gap-1.5">
-              <button
-                type="button"
-                onClick={() => handleInsertFormulaToken('SUM_MAIN')}
-                className="text-[11px] font-mono px-2 py-0.5 rounded bg-blue-50 text-blue-700 border border-blue-200/80 hover:bg-blue-100 transition-colors cursor-pointer"
-              >
-                + SUM_MAIN
-              </button>
-              <button
-                type="button"
-                onClick={() => handleInsertFormulaToken('SUM_INTERNAL')}
-                className="text-[11px] font-mono px-2 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200/80 hover:bg-amber-100 transition-colors cursor-pointer"
-              >
-                + SUM_INTERNAL
-              </button>
-              <button
-                type="button"
-                onClick={() => handleInsertFormulaToken('SUM')}
-                className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-100 text-slate-700 border border-slate-200 hover:bg-slate-200 transition-colors cursor-pointer"
-              >
-                + SUM
-              </button>
-
-              {['+', '-', '*', '/', '(', ')', '* 0.5'].map((op) => (
-                <button
-                  key={op}
-                  type="button"
-                  onClick={() => handleInsertFormulaToken(op)}
-                  className="text-[11px] font-mono px-2 py-0.5 rounded bg-white text-slate-700 border border-slate-200 hover:bg-slate-100 transition-colors cursor-pointer"
-                >
-                  {op}
-                </button>
-              ))}
-            </div>
+      {showCustomInput && (
+        <div className="p-3 bg-slate-50 border border-slate-200 rounded-lg space-y-2">
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={currentTotalFormula === 'SUM' ? 'SUM' : currentCustomFormula}
+              onChange={(e) => updateFormulaConfig('CUSTOM', e.target.value)}
+              placeholder="e.g. BEST(5) or (SUM_MAIN * 0.8) + (SUM_INTERNAL * 0.2)"
+              className="flex-1 font-mono text-xs text-slate-900 bg-white border border-slate-300 rounded-md px-2.5 py-1.5 focus:outline-none focus:border-blue-600"
+            />
+            <button
+              type="button"
+              onClick={() => updateFormulaConfig('SUM', undefined, 'Reset to All Subjects')}
+              className="px-2.5 py-1.5 text-xs text-slate-600 hover:text-slate-900 bg-white border border-slate-200 rounded-md cursor-pointer"
+            >
+              Reset
+            </button>
           </div>
         </div>
       )}

@@ -12,6 +12,17 @@ import {
   InternalComponentConfig,
   syncBreakdownWithTotal,
   mergePulledStudentsWithRoster,
+  PT_EXAM_SUBJECT_NAMES,
+  PT_EXAM_CLASS9_SUBJECT_NAMES,
+  REPORT_CARD_GRADING_SYSTEM,
+  isPtExam,
+  hasCsInPtExam,
+  getPtSubjectsForClass,
+  getEffectiveExamConfigForClass,
+  getPtExamHeading,
+  getPtSubjectDisplayName,
+  formatPtPercentage,
+  getStudentPtProfile,
 } from './report-card-types';
 
 const SAMPLE_SUBJECTS: SubjectConfig[] = [
@@ -21,7 +32,7 @@ const SAMPLE_SUBJECTS: SubjectConfig[] = [
   { name: 'Science', maxMarks: 80, passMarks: 26 },
 ];
 
-test('computeGrade maps percentage to CBSE grades', () => {
+test('computeGrade maps percentage to the 9-point report card grading system', () => {
   assert.equal(computeGrade(95), 'A1');
   assert.equal(computeGrade(85), 'A2');
   assert.equal(computeGrade(75), 'B1');
@@ -29,7 +40,82 @@ test('computeGrade maps percentage to CBSE grades', () => {
   assert.equal(computeGrade(55), 'C1');
   assert.equal(computeGrade(45), 'C2');
   assert.equal(computeGrade(35), 'D');
-  assert.equal(computeGrade(20), 'E');
+  assert.equal(computeGrade(32), 'D');
+  assert.equal(computeGrade(25), 'E1');
+  assert.equal(computeGrade(20), 'E1');
+  assert.equal(computeGrade(19), 'E2');
+  assert.equal(computeGrade(10), 'E2');
+});
+
+test('PT report card helpers format PT exams, Class 6-8 (6 subjects) vs Class 9 (7 subjects with CS), truncated percentage, and student profile', () => {
+  assert.deepEqual(PT_EXAM_SUBJECT_NAMES, [
+    'English',
+    'Hindi',
+    'Marathi',
+    'Maths',
+    'Science',
+    'Social Science',
+  ]);
+  assert.deepEqual(PT_EXAM_CLASS9_SUBJECT_NAMES, [
+    'English',
+    'Hindi',
+    'Marathi',
+    'Maths',
+    'Science',
+    'Social Science',
+    'Computer Science',
+  ]);
+  assert.equal(hasCsInPtExam('Twinkle'), false);
+  assert.equal(hasCsInPtExam('Sparkle'), false);
+  assert.equal(hasCsInPtExam('Topaz'), false);
+  assert.equal(hasCsInPtExam('Garnet'), false);
+  assert.equal(hasCsInPtExam('Diamond'), true);
+  assert.equal(hasCsInPtExam('Ruby'), true);
+  assert.equal(hasCsInPtExam('Class 9'), true);
+  assert.equal(getPtSubjectsForClass('Twinkle').length, 6);
+  assert.equal(getPtSubjectsForClass('Diamond').length, 7);
+  assert.equal(getPtSubjectsForClass('Ruby')[6].name, 'Computer Science');
+
+  const pt1Base = {
+    id: 'PT-1',
+    name: 'PT-1 (Periodic Test 1)',
+    code: 'PT-1',
+    totalFormula: 'SUM' as const,
+    subjects: getPtSubjectsForClass('Twinkle'),
+  };
+  assert.equal(getEffectiveExamConfigForClass(pt1Base, 'Twinkle').subjects.length, 6);
+  assert.equal(getEffectiveExamConfigForClass(pt1Base, 'Diamond').subjects.length, 7);
+  assert.equal(getEffectiveExamConfigForClass(pt1Base, 'Ruby').subjects.length, 7);
+
+  assert.equal(REPORT_CARD_GRADING_SYSTEM.length, 9);
+  assert.equal(isPtExam('PT-1'), true);
+  assert.equal(isPtExam('PT-4'), true);
+  assert.equal(isPtExam('SA-1'), false);
+  assert.equal(getPtExamHeading('PT-1'), 'PERIODIC TEST - 1');
+  assert.equal(getPtExamHeading('PT-3'), 'PERIODIC TEST - 3');
+  assert.equal(getPtSubjectDisplayName('Maths'), 'MATHEMATICS');
+  assert.equal(getPtSubjectDisplayName('Social Science'), 'SOCIAL SCIENCE');
+  assert.equal(getPtSubjectDisplayName('Computer Science'), 'COMPUTER SCIENCE');
+  assert.equal(formatPtPercentage(145, 150), '96.66');
+
+  const profile = getStudentPtProfile({
+    id: 'STU-2026-0031',
+    rollNo: '01',
+    name: 'Aayush Satish Nalawade',
+    admissionNo: 'ADM-031',
+    class: 'Class 6',
+    section: 'Twinkle',
+    marks: {},
+  });
+  assert.equal(profile.rollNoDisplay, '1');
+  assert.equal(profile.classSectionDisplay, 'VI - Twinkle');
+  assert.equal(profile.dobDisplay, '09/02/2015');
+  assert.equal(profile.fatherNameDisplay, 'Satish');
+  assert.equal(profile.motherNameDisplay, 'Reshma');
+  assert.equal(profile.house, 'Sinhagad');
+  assert.equal(profile.height, '129 cm');
+  assert.equal(profile.weight, '21 kg');
+  assert.equal(profile.attendance, '31/31');
 });
 
 test('evaluateCustomFormula handles standard SUM and custom alias expressions', () => {

@@ -72,6 +72,15 @@ import {
   getClassGradeFromSection,
   syncBreakdownWithTotal,
   mergePulledStudentsWithRoster,
+  PT_EXAM_SUBJECT_NAMES,
+  PT_EXAM_CLASS9_SUBJECT_NAMES,
+  REPORT_CARD_GRADING_SYSTEM,
+  isPtExam,
+  hasCsInPtExam,
+  getPtExamHeading,
+  getPtSubjectDisplayName,
+  formatPtPercentage,
+  getStudentPtProfile,
 } from '@/lib/report-card-types';
 import CustomSelect from '@/components/CustomSelect';
 import {
@@ -103,31 +112,62 @@ import {
 import { StorageService } from '@/lib/storage';
 import { copyToClipboard } from '@/lib/utils';
 import { ALL_SVA_STUDENTS, SVA_ALL_CLASSES, SvaClassName } from '@/lib/sva-students-data';
+import {
+  downloadReferenceFormatExcel,
+  downloadConsolidatedFormatExcel,
+  orderSubjectsForConsolidated,
+  resolveSubjectComponentsForExport,
+  formatComponentColumnHeader,
+  computeCbseGrade,
+} from '@/lib/excel-export';
+import ReferenceSheetPreviewCard from '@/components/ReferenceSheetPreviewCard';
 
 // Official School Crest Logo
 const SCHOOL_LOGO_SRC = '/school_logo.png';
 
 const SVA_EXAM_INFO: ExamInfo = {
   schoolName: 'Saraswati Vidya Academy',
-  schoolAddress: 'Sector 14, Institutional Area, Knowledge Park, New Delhi - 110092',
-  schoolCode: 'SVA-90821',
-  affiliationNo: 'CBSE/AFF/1130982',
+  schoolAddress: 'Village Shilatne, Maval Dist. Pune, Maharashtra 410405',
+  schoolCode: '31572',
+  affiliationNo: '1131575',
+  udiseNo: '2724100374',
+  schoolEmail: 'principal@saraswatividya.academy',
   examName: 'Annual Examination',
   academicSession: '2025-2026',
   principalName: 'Dr. Ramesh Chandra Sharma',
   classTeacherName: 'Mrs. S. Sen',
 };
 
-// Exact 7 subjects: English, Hindi, Marathi, Maths, Science, Social Science, Computer Science
+// Exact 7 subjects for SA exams: English, Hindi, Marathi, Maths, Science, Social Science, Computer Science
 const SVA_SUBJECTS: SubjectConfig[] = [
-  { name: 'English', maxMarks: 100, passMarks: 35 },
-  { name: 'Hindi', maxMarks: 100, passMarks: 35 },
-  { name: 'Marathi', maxMarks: 100, passMarks: 35 },
-  { name: 'Maths', maxMarks: 100, passMarks: 35 },
-  { name: 'Science', maxMarks: 100, passMarks: 35 },
-  { name: 'Social Science', maxMarks: 100, passMarks: 35 },
-  { name: 'Computer Science', maxMarks: 100, passMarks: 35 },
+  { name: 'English', maxMarks: 100, passMarks: 32 },
+  { name: 'Hindi', maxMarks: 100, passMarks: 32 },
+  { name: 'Marathi', maxMarks: 100, passMarks: 32 },
+  { name: 'Maths', maxMarks: 100, passMarks: 32 },
+  { name: 'Science', maxMarks: 100, passMarks: 32 },
+  { name: 'Social Science', maxMarks: 100, passMarks: 32 },
+  { name: 'Computer Science', maxMarks: 100, passMarks: 32 },
 ];
+
+// Exact 6 subjects for PT exams in Classes 6-8 (no CS paper)
+const SVA_PT_SUBJECTS: SubjectConfig[] = PT_EXAM_SUBJECT_NAMES.map((name) => ({
+  name,
+  maxMarks: 25,
+  passMarks: 8,
+}));
+
+// Exact 7 subjects for PT exams in Class 9 (includes CS paper)
+const SVA_PT_CLASS9_SUBJECTS: SubjectConfig[] = PT_EXAM_CLASS9_SUBJECT_NAMES.map((name) => ({
+  name,
+  maxMarks: 25,
+  passMarks: 8,
+}));
+
+const PT_CLASS9_OVERRIDES = {
+  'Class 9': { subjects: SVA_PT_CLASS9_SUBJECTS.map((s) => ({ ...s })) },
+  Ruby: { subjects: SVA_PT_CLASS9_SUBJECTS.map((s) => ({ ...s })) },
+  Diamond: { subjects: SVA_PT_CLASS9_SUBJECTS.map((s) => ({ ...s })) },
+};
 
 type ExamType = string;
 
@@ -146,28 +186,32 @@ const INITIAL_EXAM_CONFIGS: Record<string, ExamConfig> = {
     name: 'PT-1 (Periodic Test 1)',
     code: 'PT-1',
     totalFormula: 'SUM',
-    subjects: SVA_SUBJECTS.map((s) => ({ ...s, maxMarks: 20, passMarks: 7 })),
+    subjects: SVA_PT_SUBJECTS.map((s) => ({ ...s })),
+    classOverrides: PT_CLASS9_OVERRIDES,
   },
   'PT-2': {
     id: 'PT-2',
     name: 'PT-2 (Periodic Test 2)',
     code: 'PT-2',
     totalFormula: 'SUM',
-    subjects: SVA_SUBJECTS.map((s) => ({ ...s, maxMarks: 20, passMarks: 7 })),
+    subjects: SVA_PT_SUBJECTS.map((s) => ({ ...s })),
+    classOverrides: PT_CLASS9_OVERRIDES,
   },
   'PT-3': {
     id: 'PT-3',
     name: 'PT-3 (Periodic Test 3)',
     code: 'PT-3',
     totalFormula: 'SUM',
-    subjects: SVA_SUBJECTS.map((s) => ({ ...s, maxMarks: 20, passMarks: 7 })),
+    subjects: SVA_PT_SUBJECTS.map((s) => ({ ...s })),
+    classOverrides: PT_CLASS9_OVERRIDES,
   },
   'PT-4': {
     id: 'PT-4',
     name: 'PT-4 (Periodic Test 4)',
     code: 'PT-4',
     totalFormula: 'SUM',
-    subjects: SVA_SUBJECTS.map((s) => ({ ...s, maxMarks: 20, passMarks: 7 })),
+    subjects: SVA_PT_SUBJECTS.map((s) => ({ ...s })),
+    classOverrides: PT_CLASS9_OVERRIDES,
   },
   'SA-1': {
     id: 'SA-1',
@@ -177,7 +221,7 @@ const INITIAL_EXAM_CONFIGS: Record<string, ExamConfig> = {
     subjects: SVA_SUBJECTS.map((s) => ({
       ...s,
       maxMarks: 100,
-      passMarks: 33,
+      passMarks: 32,
       components: getDefaultSubjectComponents(s.name, 'SA-1'),
     })),
   },
@@ -189,13 +233,42 @@ const INITIAL_EXAM_CONFIGS: Record<string, ExamConfig> = {
     subjects: SVA_SUBJECTS.map((s) => ({
       ...s,
       maxMarks: 100,
-      passMarks: 33,
+      passMarks: 32,
       components: getDefaultSubjectComponents(s.name, 'SA-2'),
     })),
   },
 };
 
-type ActiveTab = 'spreadsheet' | 'remarks' | 'reportcards' | 'admin';
+function sanitizePtExamConfigs(configs: Record<string, ExamConfig>): Record<string, ExamConfig> {
+  const cleaned: Record<string, ExamConfig> = {};
+  Object.entries(configs).forEach(([key, cfg]) => {
+    if (isPtExam(cfg.code || key)) {
+      const filteredSubjects = (cfg.subjects || [])
+        .filter((s) => {
+          const lower = s.name.trim().toLowerCase();
+          return lower !== 'computer science' && lower !== 'cs';
+        })
+        .map((s) => ({
+          ...s,
+          maxMarks: s.maxMarks === 20 ? 25 : s.maxMarks || 25,
+          passMarks: s.passMarks === 7 ? 8 : s.passMarks || 8,
+        }));
+      cleaned[key] = {
+        ...cfg,
+        subjects: filteredSubjects.length > 0 ? filteredSubjects : SVA_PT_SUBJECTS.map((s) => ({ ...s })),
+        classOverrides: {
+          ...(cfg.classOverrides || {}),
+          ...PT_CLASS9_OVERRIDES,
+        },
+      };
+    } else {
+      cleaned[key] = cfg;
+    }
+  });
+  return cleaned;
+}
+
+type ActiveTab = 'spreadsheet' | 'remarks' | 'reportcards' | 'export' | 'admin';
 type FilterStatus = 'all' | 'passed' | 'review';
 type SortField = 'rollNo' | 'name' | 'section' | 'total' | 'percentage' | 'rank' | string;
 
@@ -398,7 +471,7 @@ export default function SchoolErpPage() {
         if (saved) {
           const parsed = JSON.parse(saved);
           if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
-            return { ...INITIAL_EXAM_CONFIGS, ...parsed };
+            return sanitizePtExamConfigs({ ...INITIAL_EXAM_CONFIGS, ...parsed });
           }
         }
       } catch {}
@@ -408,15 +481,31 @@ export default function SchoolErpPage() {
 
   // Base exam config (global across classes, including classOverrides)
   const baseExamConfig: ExamConfig = useMemo(() => {
-    return (
+    const raw =
       examConfigs[selectedExam] || {
         id: selectedExam,
         name: selectedExam,
         code: selectedExam,
         totalFormula: 'SUM',
-        subjects: SVA_SUBJECTS.map((s) => ({ ...s, maxMarks: 80, passMarks: 26 })),
-      }
-    );
+        subjects: isPtExam(selectedExam)
+          ? SVA_PT_SUBJECTS.map((s) => ({ ...s }))
+          : SVA_SUBJECTS.map((s) => ({ ...s, maxMarks: 80, passMarks: 26 })),
+        classOverrides: isPtExam(selectedExam) ? PT_CLASS9_OVERRIDES : undefined,
+      };
+    if (isPtExam(raw.code || selectedExam)) {
+      return {
+        ...raw,
+        subjects: raw.subjects.filter((s) => {
+          const lower = s.name.trim().toLowerCase();
+          return lower !== 'computer science' && lower !== 'cs';
+        }),
+        classOverrides: {
+          ...(raw.classOverrides || {}),
+          ...PT_CLASS9_OVERRIDES,
+        },
+      };
+    }
+    return raw;
   }, [examConfigs, selectedExam]);
 
   // Effective exam config for currently selected class filter
@@ -447,12 +536,29 @@ export default function SchoolErpPage() {
           subjectRemarks[normSub] = getDefaultSubjectRemark(total, 100);
         }
       });
+
+      const isAayushSample =
+        st.id === 'STU-2026-0031' ||
+        st.name.trim().toLowerCase() === 'aayush satish nalawade';
+
+      if (isAayushSample) {
+        subjectRemarks['English'] = 'Outstanding! Strong command of language.';
+        subjectRemarks['Hindi'] = 'Excellent performance keep it up.';
+        subjectRemarks['Marathi'] = 'Excellent Performance';
+        subjectRemarks['Maths'] = 'Outstanding! Strong conceptual understanding.';
+        subjectRemarks['Science'] = 'Outstanding! Strong conceptual understanding.';
+        subjectRemarks['Social Science'] = 'Good.Keep it up!';
+      }
+
       return {
         ...st,
         class: getClassNumberForSection(st.section),
         marks: normalizedMarks,
         breakdowns,
         subjectRemarks,
+        customRemarks: isAayushSample
+          ? 'Excellent and consistent performance with strong understanding and commendable effort.'
+          : st.customRemarks,
       };
     });
   });
@@ -533,11 +639,34 @@ export default function SchoolErpPage() {
     const exams: string[] = ['PT-1', 'PT-2', 'PT-3', 'PT-4', 'SA-1', 'SA-2'];
     exams.forEach((ex) => {
       const isPt = ex.startsWith('PT');
-      const max = isPt ? 20 : 100;
+      const max = isPt ? 25 : 100;
       ALL_SVA_STUDENTS.forEach((st) => {
+        const isAayushSample =
+          st.id === 'STU-2026-0031' ||
+          st.name.trim().toLowerCase() === 'aayush satish nalawade';
+
+        if (ex === 'PT-1' && isAayushSample) {
+          store[ex][st.id] = {
+            English: 25,
+            Hindi: 25,
+            Marathi: 24,
+            Maths: 22,
+            Science: 25,
+            'Social Science': 24,
+          };
+          return;
+        }
+
         const scaled: Record<string, number | 'AB' | null> = {};
         Object.entries(st.marks).forEach(([sub, val]) => {
           const normSub = sub === 'Mathematics' ? 'Maths' : sub;
+          if (
+            isPt &&
+            !hasCsInPtExam(st.section) &&
+            (normSub.toLowerCase() === 'computer science' || normSub.toLowerCase() === 'cs')
+          ) {
+            return;
+          }
           scaled[normSub] = typeof val === 'number' ? Math.round((val / 100) * max) : val;
         });
         store[ex][st.id] = scaled;
@@ -592,11 +721,14 @@ export default function SchoolErpPage() {
   const [selectedSubject, setSelectedSubject] = useState<string>('all');
 
   const displayedSubjects = useMemo(() => {
-    if (selectedSubject === 'all') return activeSubjects;
+    if (selectedSubject === 'all' || selectedSubject === 'consolidated') return activeSubjects;
     return activeSubjects.filter((s) => s.name.toLowerCase() === selectedSubject.toLowerCase());
   }, [activeSubjects, selectedSubject]);
 
-  const activeInternalSubject = selectedSubject !== 'all' ? selectedSubject : internalActiveSubject;
+  const activeInternalSubject =
+    selectedSubject !== 'all' && selectedSubject !== 'consolidated'
+      ? selectedSubject
+      : internalActiveSubject;
   const activeSubConfig = useMemo(
     () =>
       activeSubjects.find(
@@ -645,7 +777,10 @@ export default function SchoolErpPage() {
     [internalFields]
   );
 
-  const isSubjectWiseTable = selectedSubject !== 'all' && internalFields.length > 1;
+  const isSubjectWiseTable =
+    selectedSubject !== 'all' &&
+    selectedSubject !== 'consolidated' &&
+    internalFields.length > 1;
   const activeGridColumnKeys = useMemo(() => {
     if (isSubjectWiseTable) {
       return internalFieldKeys;
@@ -653,10 +788,45 @@ export default function SchoolErpPage() {
     return displayedSubjects.map((s) => s.name);
   }, [isSubjectWiseTable, internalFieldKeys, displayedSubjects]);
 
+  const consolidatedMarksStructure = useMemo(() => {
+    const isPt = selectedExam.toUpperCase().startsWith('PT');
+    const orderedSubs = orderSubjectsForConsolidated(activeSubjects);
+    const sections = orderedSubs.map((sub) => {
+      const sampleBd = students.find((s) => s.breakdowns?.[sub.name])?.breakdowns?.[sub.name];
+      const comps = resolveSubjectComponentsForExport(sub, selectedExam, sampleBd);
+      const isMulti = !isPt && comps.length > 1;
+      const colSpan = isMulti ? comps.length + 2 : comps.length;
+      return {
+        subject: sub,
+        components: comps,
+        isMulti,
+        colSpan,
+      };
+    });
+    const totalCols = 2 + sections.reduce((sum, sec) => sum + sec.colSpan, 0) + 3;
+    return {
+      totalCols,
+      sections,
+    };
+  }, [activeSubjects, selectedExam, students]);
+
   // Excel & PDF Export Hub selection Matrix
   const [exportExam, setExportExam] = useState<string>('SA-1');
-  const [exportClass, setExportClass] = useState<string>('all');
+  const [exportClass, setExportClass] = useState<string>('Diamond');
   const [exportSubjectScope, setExportSubjectScope] = useState<string>('all_consolidated');
+
+  // Resolved student list with target exam marks for export and preview
+  const exportStudentsList = useMemo(() => {
+    const targetExam = exportExam || selectedExam;
+    if (targetExam === selectedExam) return students;
+    const targetMarks = examMarksStore[targetExam];
+    const targetBds = examBreakdownsStore[targetExam];
+    return students.map((s) => ({
+      ...s,
+      marks: targetMarks?.[s.id] ? { ...targetMarks[s.id] } : { ...s.marks },
+      breakdowns: targetBds?.[s.id] ? { ...targetBds[s.id] } : s.breakdowns,
+    }));
+  }, [students, exportExam, selectedExam, examMarksStore, examBreakdownsStore]);
 
 
 
@@ -894,11 +1064,57 @@ export default function SchoolErpPage() {
               INITIAL_EXAM_CONFIGS['SA-1'];
 
             setStudents((prevRoster) => {
-              const merged = mergePulledStudentsWithRoster(
+              const rawMerged = mergePulledStudentsWithRoster(
                 prevRoster,
                 res.students!,
                 targetCfg
               );
+              const merged = rawMerged.map((s) => {
+                const isAayushSample =
+                  s.id === 'STU-2026-0031' ||
+                  s.name.trim().toLowerCase() === 'aayush satish nalawade';
+                if (examName === 'PT-1' && isAayushSample) {
+                  return {
+                    ...s,
+                    marks: {
+                      English: 25,
+                      Hindi: 25,
+                      Marathi: 24,
+                      Maths: 22,
+                      Science: 25,
+                      'Social Science': 24,
+                    },
+                    subjectRemarks: {
+                      ...(s.subjectRemarks || {}),
+                      English: 'Outstanding! Strong command of language.',
+                      Hindi: 'Excellent performance keep it up.',
+                      Marathi: 'Excellent Performance',
+                      Maths: 'Outstanding! Strong conceptual understanding.',
+                      Science: 'Outstanding! Strong conceptual understanding.',
+                      'Social Science': 'Good.Keep it up!',
+                    },
+                    customRemarks:
+                      'Excellent and consistent performance with strong understanding and commendable effort.',
+                  };
+                }
+                if (isPtExam(examName) && hasCsInPtExam(s.section)) {
+                  const currentCs = s.marks['Computer Science'];
+                  if (currentCs === null || currentCs === undefined) {
+                    const baseSt = ALL_SVA_STUDENTS.find((b) => b.id === s.id);
+                    const baseCs = baseSt?.marks['Computer Science'];
+                    const fallbackCs =
+                      typeof baseCs === 'number' ? Math.round((baseCs / 100) * 25) : 22;
+                    return {
+                      ...s,
+                      marks: {
+                        ...s.marks,
+                        'Computer Science': fallbackCs,
+                      },
+                    };
+                  }
+                }
+                return s;
+              });
               // Update stores for this exam
               const marksMap: Record<string, Record<string, number | 'AB' | null>> = {};
               const bdMap: Record<string, Record<string, SubjectBreakdown>> = {};
@@ -1055,6 +1271,14 @@ export default function SchoolErpPage() {
 
       selectedExamRef.current = newExam;
       setSelectedExam(newExam);
+      if (isPtExam(newExam) && !hasCsInPtExam(selectedClass)) {
+        if (selectedSubject.toLowerCase() === 'computer science' || selectedSubject.toLowerCase() === 'cs') {
+          setSelectedSubject('all');
+        }
+        if (selectedRemarkScope.toLowerCase() === 'computer science' || selectedRemarkScope.toLowerCase() === 'cs') {
+          setSelectedRemarkScope('all');
+        }
+      }
       setSelectedRange(null);
       setIsSelecting(false);
       showToast(`Switched ledger to ${newExam}`);
@@ -1064,6 +1288,9 @@ export default function SchoolErpPage() {
     },
     [
       selectedExam,
+      selectedClass,
+      selectedSubject,
+      selectedRemarkScope,
       students,
       examMarksStore,
       examBreakdownsStore,
@@ -1225,7 +1452,7 @@ export default function SchoolErpPage() {
 
   const handleCopyStudentSummary = (student: StudentReportRow) => {
     const res = computedResultsMap.get(student.id);
-    const marksStr = SVA_SUBJECTS.map((s) => `${s.name}: ${student.marks[s.name] ?? 'AB'}`).join(', ');
+    const marksStr = activeSubjects.map((s) => `${s.name}: ${student.marks[s.name] ?? 'AB'}`).join(', ');
     const summary = `${student.name} (Roll ${student.rollNo}, ${student.section}): ${marksStr} | Total: ${res?.totalObtained ?? 0}/${res?.totalMax ?? 700} (${res?.percentage.toFixed(2) ?? '0.00'}%) | Grade: ${res?.grade ?? '-'} | Rank: ${res?.rank ? '#' + res.rank : '-'}`;
     navigator.clipboard.writeText(summary);
     showToast(`Copied details for ${student.name}`);
@@ -1545,385 +1772,138 @@ export default function SchoolErpPage() {
     return ws;
   };
 
-  // Export Master Excel Workbook (Master Sheet + 7 Subject Worksheets with Aptos font & headers)
-  const handleExportMasterExcel = () => {
-    const wb = XLSX.utils.book_new();
-
-    // Sheet 1: Master Roster
-    const masterCols = [
-      'Roll No',
-      'Student Name',
-      'Class',
-      'Section',
-      ...activeSubjects.map((s) => s.name),
-      'Total Obtained',
-      'Total Max',
-      'Percentage',
-      'Grade',
-      'Class Rank',
-      'Status',
-    ];
-
-    const masterData = processedStudents.map((s) => {
-      const res = computedResults.find((r) => r.student.id === s.id);
-      return [
-        s.rollNo,
-        s.name,
-        getClassNumberForSection(s.section),
-        s.section,
-        ...activeSubjects.map((sub) => s.marks[sub.name] ?? 'AB'),
-        res?.totalObtained ?? 0,
-        res?.totalMax ?? 0,
-        res ? `${res.percentage.toFixed(2)}%` : '0.00%',
-        res?.grade ?? '-',
-        res?.rank ? `#${res.rank}` : '-',
-        res?.status ?? 'PASS',
-      ];
+  // Export Master Excel Workbook (7 Subject Tabs in exact reference sheet format)
+  const handleExportMasterExcel = async () => {
+    const fileName = await downloadReferenceFormatExcel({
+      students,
+      examConfig: baseExamConfig,
+      examId: selectedExam,
+      classScope: selectedClass || 'Diamond',
+      subjectScope: 'all_consolidated',
     });
-
-    const masterWs = buildAptosFormattedSheet(
-      selectedExam,
-      'All Subjects Consolidated Master Ledger',
-      'All Classes (Grade 6 to 9)',
-      masterCols,
-      masterData
-    );
-    XLSX.utils.book_append_sheet(wb, masterWs, 'Master Ledger');
-
-    // Individual Subject Worksheets
-    activeSubjects.forEach((sub) => {
-      const subCols = [
-        'Roll No',
-        'Student Name',
-        'Class',
-        'Section',
-        'Subject',
-        'Max Marks',
-        'Pass Marks',
-        'Marks Obtained',
-        'Grade',
-        'Status',
-      ];
-
-      const subData = processedStudents.map((s) => {
-        const markVal = s.marks[sub.name];
-        const ob = markVal === 'AB' ? 'AB' : markVal ?? '-';
-        const pct = typeof markVal === 'number' && sub.maxMarks > 0 ? (markVal / sub.maxMarks) * 100 : 0;
-        return [
-          s.rollNo,
-          s.name,
-          getClassNumberForSection(s.section),
-          s.section,
-          sub.name,
-          sub.maxMarks,
-          sub.passMarks,
-          ob,
-          typeof markVal === 'number' ? computeGrade(pct) : 'E',
-          markVal === 'AB' ? 'ABSENT' : typeof markVal === 'number' && markVal < sub.passMarks ? 'FAIL' : 'PASS',
-        ];
-      });
-
-      const subWs = buildAptosFormattedSheet(
-        selectedExam,
-        sub.name,
-        'All Classes (Grade 6 to 9)',
-        subCols,
-        subData
-      );
-      XLSX.utils.book_append_sheet(wb, subWs, sub.name.substring(0, 30));
-    });
-
-    XLSX.writeFile(wb, `SVA_Master_Ledger_${selectedExam}_AllSubjects.xlsx`);
-    showToast('Downloaded Aptos Formatted Master Excel Workbook');
+    showToast(`Downloaded Excel Marksheet (${fileName})`);
   };
 
   // Export Subject-Wise Excel File
-  const handleExportSubjectExcel = (subjectName: string) => {
-    const subConfig = activeSubjects.find((s) => s.name === subjectName) || activeSubjects[0];
-    const cols = [
-      'Roll No',
-      'Student Name',
-      'Class',
-      'Section',
-      'Subject',
-      'Max Marks',
-      'Pass Marks',
-      'Marks Obtained',
-      'Grade',
-      'Status',
-    ];
-
-    const data = processedStudents.map((s) => {
-      const markVal = s.marks[subConfig.name];
-      const ob = markVal === 'AB' ? 'AB' : markVal ?? '-';
-      const pct = typeof markVal === 'number' && subConfig.maxMarks > 0 ? (markVal / subConfig.maxMarks) * 100 : 0;
-      return [
-        s.rollNo,
-        s.name,
-        getClassNumberForSection(s.section),
-        s.section,
-        subConfig.name,
-        subConfig.maxMarks,
-        subConfig.passMarks,
-        ob,
-        typeof markVal === 'number' ? computeGrade(pct) : 'E',
-        markVal === 'AB' ? 'ABSENT' : typeof markVal === 'number' && markVal < subConfig.passMarks ? 'FAIL' : 'PASS',
-      ];
+  const handleExportSubjectExcel = async (subjectName: string) => {
+    const fileName = await downloadReferenceFormatExcel({
+      students,
+      examConfig: baseExamConfig,
+      examId: selectedExam,
+      classScope: selectedClass || 'Diamond',
+      subjectScope: subjectName,
     });
-
-    const wb = XLSX.utils.book_new();
-    const ws = buildAptosFormattedSheet(
-      selectedExam,
-      subConfig.name,
-      'All Classes (Grade 6 to 9)',
-      cols,
-      data
-    );
-    XLSX.utils.book_append_sheet(wb, ws, subConfig.name);
-    XLSX.writeFile(wb, `SVA_Marks_${selectedExam}_${subConfig.name.replace(/\s+/g, '_')}.xlsx`);
-    showToast(`Downloaded Aptos Formatted ${subConfig.name} Excel File`);
+    showToast(`Downloaded ${subjectName} Excel Sheet (${fileName})`);
   };
 
   // Export Class-Wise Excel File
-  const handleExportClassExcel = (className: string) => {
-    const classStudents = students.filter((s) => className === 'all' || s.section === className);
-    const classResults = computedResults.filter((r) => className === 'all' || r.student.section === className);
-
-    const cols = [
-      'Roll No',
-      'Student Name',
-      'Class',
-      'Section',
-      ...activeSubjects.map((s) => s.name),
-      'Total Obtained',
-      'Total Max',
-      'Percentage',
-      'Grade',
-      'Class Rank',
-      'Status',
-    ];
-
-    const data = classStudents.map((s) => {
-      const res = classResults.find((r) => r.student.id === s.id);
-      return [
-        s.rollNo,
-        s.name,
-        getClassNumberForSection(s.section),
-        s.section,
-        ...activeSubjects.map((sub) => s.marks[sub.name] ?? 'AB'),
-        res?.totalObtained ?? 0,
-        res?.totalMax ?? 0,
-        res ? `${res.percentage.toFixed(2)}%` : '0.00%',
-        res?.grade ?? '-',
-        res?.rank ? `#${res.rank}` : '-',
-        res?.status ?? 'PASS',
-      ];
+  const handleExportClassExcel = async (className: string) => {
+    const fileName = await downloadReferenceFormatExcel({
+      students,
+      examConfig: baseExamConfig,
+      examId: selectedExam,
+      classScope: className || 'Diamond',
+      subjectScope: 'all_consolidated',
     });
-
-    const displayClassTitle = className === 'all' ? 'All Classes (Grade 6 to 9)' : `${getClassNumberForSection(className)} - ${className}`;
-
-    const wb = XLSX.utils.book_new();
-    const ws = buildAptosFormattedSheet(
-      selectedExam,
-      'Class Marks Summary',
-      displayClassTitle,
-      cols,
-      data
-    );
-    XLSX.utils.book_append_sheet(wb, ws, `Class_${className}`);
-    XLSX.writeFile(wb, `SVA_Marks_${selectedExam}_Class_${className}.xlsx`);
-    showToast(`Downloaded Aptos Formatted Class ${className} Excel File`);
+    showToast(`Downloaded Class ${className} Excel Sheet (${fileName})`);
   };
 
-  // Download Custom Excel Matrix (1. Exam Type -> 2. Class -> 3. Subject or All Consolidated)
-  const handleCustomMatrixExport = () => {
-    // 1. Target Exam Config
-    const targetExamConfig = examConfigs[exportExam] || {
+  // Download Custom Excel Matrix in exact format of sheet 1FuU-gS2AxSG81nDnwSOL5NFlV4PlZ99tCevzmIsgot8
+  const handleCustomMatrixExport = async () => {
+    const rawTargetConfig = examConfigs[exportExam] || {
       id: exportExam,
       name: exportExam,
       code: exportExam,
       totalFormula: 'SUM',
-      subjects: SVA_SUBJECTS.map((s) => ({
-        ...s,
-        maxMarks: exportExam.startsWith('PT') ? 20 : 80,
-        passMarks: exportExam.startsWith('PT') ? 7 : 26,
-      })),
+      subjects: isPtExam(exportExam)
+        ? SVA_PT_SUBJECTS.map((s) => ({ ...s }))
+        : SVA_SUBJECTS.map((s) => ({
+            ...s,
+            maxMarks: 100,
+            passMarks: 32,
+            components: getDefaultSubjectComponents(s.name, exportExam),
+          })),
+      classOverrides: isPtExam(exportExam) ? PT_CLASS9_OVERRIDES : undefined,
     };
-
-    // 2. Target Exam Marks
-    const targetExamStore =
-      exportExam === selectedExam
-        ? students.reduce((acc, s) => {
-            acc[s.id] = { ...s.marks };
-            return acc;
-          }, {} as Record<string, Record<string, number | 'AB' | null>>)
-        : examMarksStore[exportExam] || {};
-
-    // 3. Target Students by Class with exam-specific marks
-    const targetStudents = students
-      .filter((s) => exportClass === 'all' || s.section === exportClass)
-      .map((s) => ({
-        ...s,
-        class: getClassNumberForSection(s.section),
-        marks: targetExamStore[s.id] || s.marks,
-      }));
-
-    // 4. Compute Results for target dataset
-    const examResults = computeClassResults(
-      targetStudents,
-      targetExamConfig.subjects,
-      targetExamConfig.totalFormula,
-      targetExamConfig.customFormula,
-      targetExamConfig.resultCriteria,
-      targetExamConfig.classOverrides
+    const targetExamConfig: ExamConfig = getEffectiveExamConfigForClass(
+      rawTargetConfig,
+      exportClass || 'Diamond'
     );
 
-    const classDisplayTitle =
-      exportClass === 'all'
-        ? 'All Classes (Grade 6 to 9)'
-        : `${getClassNumberForSection(exportClass)} - ${exportClass}`;
+    const targetExamMarks =
+      exportExam === selectedExam ? null : examMarksStore[exportExam] || {};
+    const targetExamBreakdowns =
+      exportExam === selectedExam ? null : examBreakdownsStore[exportExam] || {};
 
-    const wb = XLSX.utils.book_new();
+    const studentsForExport: StudentReportRow[] = students.map((s) => ({
+      ...s,
+      marks: targetExamMarks ? targetExamMarks[s.id] || s.marks : s.marks,
+      breakdowns: targetExamBreakdowns
+        ? targetExamBreakdowns[s.id] || s.breakdowns
+        : s.breakdowns,
+    }));
 
-    if (exportSubjectScope === 'all_consolidated') {
-      // 1. Master Consolidated Ledger
-      const masterCols = [
-        'Roll No',
-        'Student Name',
-        'Class',
-        'Section',
-        ...targetExamConfig.subjects.map((s) => s.name),
-        'Total Obtained',
-        'Total Max',
-        'Percentage',
-        'Grade',
-        'Class Rank',
-        'Status',
-      ];
+    if (exportSubjectScope === 'consolidated') {
+      await handleDownloadConsolidatedSheet();
+      return;
+    }
 
-      const masterDataRows = targetStudents.map((s) => {
-        const res = examResults.find((r) => r.student.id === s.id);
-        const marks = targetExamStore[s.id] || s.marks;
-        return [
-          s.rollNo,
-          s.name,
-          getClassNumberForSection(s.section),
-          s.section,
-          ...targetExamConfig.subjects.map((sub) => marks[sub.name] ?? 'AB'),
-          res?.totalObtained ?? 0,
-          res?.totalMax ?? 0,
-          res ? `${res.percentage.toFixed(2)}%` : '0.00%',
-          res?.grade ?? '-',
-          res?.rank ? `#${res.rank}` : '-',
-          res?.status ?? 'PASS',
-        ];
-      });
+    const fileName = await downloadReferenceFormatExcel({
+      students: studentsForExport,
+      examConfig: targetExamConfig,
+      examId: exportExam,
+      classScope: exportClass || 'Diamond',
+      subjectScope: exportSubjectScope || 'all_consolidated',
+    });
+    showToast(`Downloaded Excel Marksheet (${fileName})`);
+  };
 
-      const masterWs = buildAptosFormattedSheet(
-        exportExam,
-        'All Subjects Consolidated Master Ledger',
-        classDisplayTitle,
-        masterCols,
-        masterDataRows
+  // Download Consolidated Excel file matching demo sheet 1QMuO9-8j9TM-b8zWW_5kIL8rjzwNJBIvSmH6uU9SPmk
+  const handleDownloadConsolidatedSheet = async () => {
+    try {
+      const rawTargetConfig = examConfigs[exportExam] || {
+        id: exportExam,
+        name: exportExam,
+        code: exportExam,
+        totalFormula: 'SUM',
+        subjects: isPtExam(exportExam)
+          ? SVA_PT_SUBJECTS.map((s) => ({ ...s }))
+          : SVA_SUBJECTS.map((s) => ({
+              ...s,
+              maxMarks: 100,
+              passMarks: 32,
+              components: getDefaultSubjectComponents(s.name, exportExam),
+            })),
+        classOverrides: isPtExam(exportExam) ? PT_CLASS9_OVERRIDES : undefined,
+      };
+      const targetExamConfig: ExamConfig = getEffectiveExamConfigForClass(
+        rawTargetConfig,
+        exportClass || 'Diamond'
       );
-      XLSX.utils.book_append_sheet(wb, masterWs, 'Master Ledger');
 
-      // 2. Individual Subject Worksheets
-      targetExamConfig.subjects.forEach((sub) => {
-        const subCols = [
-          'Roll No',
-          'Student Name',
-          'Class',
-          'Section',
-          'Subject',
-          'Max Marks',
-          'Pass Marks',
-          'Marks Obtained',
-          'Grade',
-          'Status',
-        ];
+      const targetExamMarks =
+        exportExam === selectedExam ? null : examMarksStore[exportExam] || {};
+      const targetExamBreakdowns =
+        exportExam === selectedExam ? null : examBreakdownsStore[exportExam] || {};
 
-        const subRows = targetStudents.map((s) => {
-          const marks = targetExamStore[s.id] || s.marks;
-          const markVal = marks[sub.name];
-          const ob = markVal === 'AB' ? 'AB' : markVal ?? '-';
-          const pct = typeof markVal === 'number' && sub.maxMarks > 0 ? (markVal / sub.maxMarks) * 100 : 0;
-          return [
-            s.rollNo,
-            s.name,
-            getClassNumberForSection(s.section),
-            s.section,
-            sub.name,
-            sub.maxMarks,
-            sub.passMarks,
-            ob,
-            typeof markVal === 'number' ? computeGrade(pct) : 'E',
-            markVal === 'AB' ? 'ABSENT' : typeof markVal === 'number' && markVal < sub.passMarks ? 'FAIL' : 'PASS',
-          ];
-        });
+      const studentsForExport: StudentReportRow[] = students.map((s) => ({
+        ...s,
+        marks: targetExamMarks ? targetExamMarks[s.id] || s.marks : s.marks,
+        breakdowns: targetExamBreakdowns
+          ? targetExamBreakdowns[s.id] || s.breakdowns
+          : s.breakdowns,
+      }));
 
-        const subWs = buildAptosFormattedSheet(
-          exportExam,
-          sub.name,
-          classDisplayTitle,
-          subCols,
-          subRows
-        );
-        XLSX.utils.book_append_sheet(wb, subWs, sub.name.substring(0, 30));
+      const fileName = await downloadConsolidatedFormatExcel({
+        students: studentsForExport,
+        examConfig: targetExamConfig,
+        examId: exportExam || selectedExam,
+        classScope: exportClass || 'Diamond',
       });
-
-      const fileName = `SVA_Marks_${exportExam}_Class_${exportClass}_AllSubjects_Consolidated.xlsx`;
-      XLSX.writeFile(wb, fileName);
-      showToast(`Downloaded Aptos Formatted Excel Workbook (${fileName})`);
-    } else {
-      // Single Subject Worksheet
-      const subConfig =
-        targetExamConfig.subjects.find((s) => s.name === exportSubjectScope) ||
-        targetExamConfig.subjects[0];
-
-      const subCols = [
-        'Roll No',
-        'Student Name',
-        'Class',
-        'Section',
-        'Subject',
-        'Max Marks',
-        'Pass Marks',
-        'Marks Obtained',
-        'Grade',
-        'Status',
-      ];
-
-      const subRows = targetStudents.map((s) => {
-        const marks = targetExamStore[s.id] || s.marks;
-        const markVal = marks[subConfig.name];
-        const ob = markVal === 'AB' ? 'AB' : markVal ?? '-';
-        const pct = typeof markVal === 'number' && subConfig.maxMarks > 0 ? (markVal / subConfig.maxMarks) * 100 : 0;
-        return [
-          s.rollNo,
-          s.name,
-          getClassNumberForSection(s.section),
-          s.section,
-          subConfig.name,
-          subConfig.maxMarks,
-          subConfig.passMarks,
-          ob,
-          typeof markVal === 'number' ? computeGrade(pct) : 'E',
-          markVal === 'AB' ? 'ABSENT' : typeof markVal === 'number' && markVal < subConfig.passMarks ? 'FAIL' : 'PASS',
-        ];
-      });
-
-      const ws = buildAptosFormattedSheet(
-        exportExam,
-        subConfig.name,
-        classDisplayTitle,
-        subCols,
-        subRows
-      );
-      XLSX.utils.book_append_sheet(wb, ws, subConfig.name);
-      const fileName = `SVA_Marks_${exportExam}_Class_${exportClass}_${subConfig.name.replace(/\s+/g, '_')}.xlsx`;
-      XLSX.writeFile(wb, fileName);
-      showToast(`Downloaded Aptos Formatted ${subConfig.name} Excel Sheet (${fileName})`);
+      showToast(`Downloaded Consolidated Marksheet (${fileName})`);
+    } catch (err) {
+      console.error('Error downloading consolidated marksheet:', err);
+      showToast('Failed to download consolidated marksheet');
     }
   };
 
@@ -2014,16 +1994,23 @@ export default function SchoolErpPage() {
     showToast(`Copied ${cellCount} cell${cellCount > 1 ? 's' : ''} to clipboard`);
   };
 
-  // Selected student for Report Card view
+  // Selected student for Report Card view (always scoped to current class filter if selectedStudentId is outside filtered list)
+  const isSelectedStudentInFilteredList = useMemo(
+    () => processedStudents.some((s) => s.id === selectedStudentId),
+    [processedStudents, selectedStudentId]
+  );
+
   const activeStudentResult =
-    computedResultsMap.get(selectedStudentId) ||
+    (isSelectedStudentInFilteredList ? computedResultsMap.get(selectedStudentId) : null) ||
     (processedStudents.length > 0 ? computedResultsMap.get(processedStudents[0].id) : null) ||
+    computedResultsMap.get(selectedStudentId) ||
     computedResultsMap.values().next().value ||
     null;
 
   // Navigation index for current selected student within the filtered list
   const currentStudentIndex = useMemo(() => {
-    return processedStudents.findIndex((s) => s.id === selectedStudentId);
+    const idx = processedStudents.findIndex((s) => s.id === selectedStudentId);
+    return idx >= 0 ? idx : 0;
   }, [processedStudents, selectedStudentId]);
 
   const handleNextStudent = useCallback(() => {
@@ -2121,7 +2108,8 @@ export default function SchoolErpPage() {
       C1: 0,
       C2: 0,
       D: 0,
-      E: 0,
+      E1: 0,
+      E2: 0,
     };
 
     targetStudentsForSummary.forEach((stu) => {
@@ -3164,39 +3152,26 @@ export default function SchoolErpPage() {
     showToast('Auto-generated tailored academic remarks for all students');
   };
 
-  // Export to Excel file
-  const handleExportExcel = () => {
-    const targetResults =
-      selectedClass === 'all'
-        ? computedResults
-        : computedResults.filter((r) => r.student.section === selectedClass);
-
-    const exportData = targetResults.map((r) => ({
-      'Roll No': r.student.rollNo,
-      'Student Name': r.student.name,
-      Class: `${getClassNumberForSection(r.student.section)} - ${r.student.section}`,
-      Section: r.student.section,
-      English: r.student.marks['English'] ?? '',
-      Hindi: r.student.marks['Hindi'] ?? '',
-      Marathi: r.student.marks['Marathi'] ?? '',
-      Maths: r.student.marks['Maths'] ?? r.student.marks['Mathematics'] ?? '',
-      Science: r.student.marks['Science'] ?? '',
-      'Social Science': r.student.marks['Social Science'] ?? '',
-      'Computer Science': r.student.marks['Computer Science'] ?? '',
-      'Total Marks': r.totalObtained,
-      'Max Marks': r.totalMax,
-      'Percentage (%)': r.percentage.toFixed(2),
-      Grade: r.grade,
-      Rank: r.rank ? `#${r.rank}` : '',
-      Status: r.status,
-    }));
-
-    const ws = XLSX.utils.json_to_sheet(exportData);
-    const wb = XLSX.utils.book_new();
-    const sheetName = selectedClass === 'all' ? 'All_8_Classes' : `Class_${selectedClass}`;
-    XLSX.utils.book_append_sheet(wb, ws, sheetName);
-    XLSX.writeFile(wb, `SVA_Marks_${sheetName}_${new Date().toISOString().split('T')[0]}.xlsx`);
-    showToast(`Exported ${targetResults.length} students to Excel`);
+  // Export to Excel file (in exact format of reference sheet)
+  const handleExportExcel = async () => {
+    if (selectedSubject === 'consolidated') {
+      const fileName = await downloadConsolidatedFormatExcel({
+        students,
+        examConfig: baseExamConfig,
+        examId: selectedExam,
+        classScope: selectedClass || 'Diamond',
+      });
+      showToast(`Downloaded Consolidated Marksheet (${fileName})`);
+      return;
+    }
+    const fileName = await downloadReferenceFormatExcel({
+      students,
+      examConfig: baseExamConfig,
+      examId: selectedExam,
+      classScope: selectedClass || 'Diamond',
+      subjectScope: selectedSubject === 'all' ? 'all_consolidated' : selectedSubject,
+    });
+    showToast(`Downloaded Excel Marksheet (${fileName})`);
   };
 
   // Download Sample Template
@@ -3506,7 +3481,7 @@ export default function SchoolErpPage() {
     setIsExporting(true);
     try {
       downloadSinglePDF(
-        { ...SVA_EXAM_INFO, examName: currentExamConfig.name },
+        { ...SVA_EXAM_INFO, examName: currentExamConfig.name, examCode: selectedExam },
         activeStudentResult
       );
       showToast(`Downloaded PDF for ${activeStudentResult.student.name}`);
@@ -3531,7 +3506,7 @@ export default function SchoolErpPage() {
         : `SVA_ReportCards_${selectedClass}_${selectedExam}_${targetResults.length}_Students`;
 
       await downloadAllPDFsAsZip(
-        { ...SVA_EXAM_INFO, examName: currentExamConfig.name },
+        { ...SVA_EXAM_INFO, examName: currentExamConfig.name, examCode: selectedExam },
         targetResults,
         zipName
       );
@@ -3629,6 +3604,18 @@ export default function SchoolErpPage() {
               </button>
 
               <button
+                onClick={() => setActiveTab('export')}
+                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                  activeTab === 'export'
+                    ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                }`}
+              >
+                <Download className="w-3.5 h-3.5 text-slate-500" />
+                <span>Export Marks</span>
+              </button>
+
+              <button
                 onClick={() => setActiveTab('admin')}
                 className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
                   activeTab === 'admin'
@@ -3693,6 +3680,14 @@ export default function SchoolErpPage() {
                   onChange={(val) => {
                     setSelectedClass(val);
                     setCurrentPage(1);
+                    if (isPtExam(selectedExam) && !hasCsInPtExam(val)) {
+                      if (
+                        selectedSubject.toLowerCase() === 'computer science' ||
+                        selectedSubject.toLowerCase() === 'cs'
+                      ) {
+                        setSelectedSubject('all');
+                      }
+                    }
                   }}
                   options={[
                     { value: 'all', label: `All Classes (${students.length})` },
@@ -3712,7 +3707,7 @@ export default function SchoolErpPage() {
                   onChange={(val) => handleExamChange(val)}
                   options={Object.values(examConfigs).map((ex) => ({
                     value: ex.id,
-                    label: ex.name,
+                    label: ex.code || ex.id,
                   }))}
                 />
 
@@ -3726,12 +3721,13 @@ export default function SchoolErpPage() {
                     setSelectedSubject(val);
                     setSelectedRange(null);
                     setIsSelecting(false);
-                    if (val !== 'all') {
+                    if (val !== 'all' && val !== 'consolidated') {
                       setInternalActiveSubject(val);
                     }
                   }}
                   options={[
-                    { value: 'all', label: 'All Subjects (7)' },
+                    { value: 'all', label: `All Subjects (${activeSubjects.length})` },
+                    { value: 'consolidated', label: 'Consolidated Sheet' },
                     ...activeSubjects.map((sub) => ({
                       value: sub.name,
                       label: sub.name,
@@ -3769,7 +3765,7 @@ export default function SchoolErpPage() {
                 ref={marksScrollContainerRef}
                 className="overflow-x-auto excel-grid-container relative w-full"
               >
-                {selectedSubject !== 'all' && internalFields.length > 1 ? (
+                {selectedSubject !== 'all' && selectedSubject !== 'consolidated' && internalFields.length > 1 ? (
                   /* =====================================================================
                      SUBJECT INTERNAL + PAPER MARKS ENTRY TABLE (When a Subject is selected)
                      - Dynamically reflects any Internal + Main Exam components configured by Admin
@@ -4166,6 +4162,297 @@ export default function SchoolErpPage() {
                       )}
                     </tbody>
                   </table>
+                ) : selectedSubject === 'consolidated' ? (
+                  /* =====================================================================
+                     CONSOLIDATED SHEET MARKS ENTRY TABLE (All 7 Subjects + Components)
+                     ===================================================================== */
+                  <table className="w-full text-center text-xs border-separate border-spacing-0">
+                    <thead
+                      onMouseDown={(e) => handleHeaderDragStart(e, marksScrollContainerRef.current)}
+                      title="Click and drag header to scroll horizontally"
+                      className={isHeaderDragging ? 'cursor-grabbing select-none' : 'cursor-grab select-none'}
+                    >
+                      {/* Row 1: Group Headers */}
+                      <tr className="bg-slate-100 text-slate-800 font-bold uppercase tracking-wider text-[11px] select-none h-9">
+                        <th
+                          rowSpan={2}
+                          onClick={() => toggleSort('rollNo')}
+                          className="sticky left-0 z-30 bg-slate-50 py-2 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200 cursor-pointer align-middle"
+                        >
+                          <div className="text-center font-bold">Roll</div>
+                        </th>
+                        <th
+                          rowSpan={2}
+                          onClick={() => toggleSort('name')}
+                          className="sticky left-[48px] z-30 bg-slate-50 py-2 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200 cursor-pointer align-middle"
+                        >
+                          <div className="text-center font-bold">Student Name</div>
+                        </th>
+                        {consolidatedMarksStructure.sections.map((sec) => (
+                          <th
+                            key={`group-${sec.subject.name}`}
+                            colSpan={sec.colSpan}
+                            className="py-1.5 px-2 text-center bg-slate-100 border-b border-l border-slate-300 text-slate-900 font-bold"
+                          >
+                            {sec.subject.name.toUpperCase()}
+                          </th>
+                        ))}
+                        <th
+                          colSpan={3}
+                          className="py-1.5 px-2 text-center bg-emerald-50 border-b border-l border-slate-300 text-emerald-900 font-bold"
+                        >
+                          OVERALL PERFORMANCE
+                        </th>
+                      </tr>
+
+                      {/* Row 2: Component & Total Sub-Headers */}
+                      <tr className="bg-slate-50 text-slate-700 font-semibold uppercase tracking-wider text-[10px] select-none h-11">
+                        {consolidatedMarksStructure.sections.map((sec) => (
+                          <React.Fragment key={`sub-${sec.subject.name}`}>
+                            {sec.components.map((comp) => {
+                              let headerLabel = comp.label.toUpperCase();
+                              if (comp.isMainExam) {
+                                headerLabel = `${selectedExam} ${sec.subject.name.toUpperCase()}`;
+                              }
+                              return (
+                                <th
+                                  key={`${sec.subject.name}-${comp.key}`}
+                                  className="py-1.5 px-1.5 text-center min-w-[92px] bg-slate-50 border-b border-l border-slate-200 text-slate-700"
+                                >
+                                  <div className="font-bold text-slate-800 leading-tight">{headerLabel}</div>
+                                  <div className="text-[10px] font-normal text-slate-400 mt-0.5">{comp.maxMarks}</div>
+                                </th>
+                              );
+                            })}
+                            {sec.isMulti && (
+                              <>
+                                <th
+                                  onClick={() => toggleSort(sec.subject.name)}
+                                  className="py-1.5 px-1.5 text-center min-w-[78px] bg-slate-100/80 border-b border-l border-slate-200 text-slate-900 cursor-pointer hover:bg-slate-200/60"
+                                >
+                                  <div className="font-bold">TOTAL</div>
+                                  <div className="text-[10px] font-normal text-slate-500 mt-0.5">
+                                    {sec.subject.maxMarks || 100}
+                                  </div>
+                                </th>
+                                <th className="py-1.5 px-1.5 text-center min-w-[64px] bg-slate-100/80 border-b border-l border-slate-200 text-slate-900">
+                                  <div className="font-bold">GRADE</div>
+                                </th>
+                              </>
+                            )}
+                          </React.Fragment>
+                        ))}
+                        <th
+                          onClick={() => toggleSort('total')}
+                          className="py-1.5 px-2 text-center min-w-[92px] bg-emerald-50/70 border-b border-l border-slate-300 text-emerald-950 cursor-pointer"
+                        >
+                          <div className="font-bold">GRAND TOTAL</div>
+                          <div className="text-[10px] font-normal text-emerald-700 mt-0.5">
+                            {consolidatedMarksStructure.sections.reduce(
+                              (acc, s) => acc + (s.subject.maxMarks || 100),
+                              0
+                            )}
+                          </div>
+                        </th>
+                        <th
+                          onClick={() => toggleSort('percentage')}
+                          className="py-1.5 px-2 text-center min-w-[82px] bg-emerald-50/70 border-b border-l border-slate-200 text-emerald-950 cursor-pointer"
+                        >
+                          <div className="font-bold">PERCENTAGE</div>
+                          <div className="text-[10px] font-normal text-emerald-700 mt-0.5">%</div>
+                        </th>
+                        <th className="py-1.5 px-2 text-center min-w-[64px] bg-emerald-50/70 border-b border-l border-slate-200 text-emerald-950">
+                          <div className="font-bold">GRADE</div>
+                        </th>
+                      </tr>
+                    </thead>
+
+                    <tbody>
+                      {paginatedStudents.length === 0 ? (
+                        <tr>
+                          <td
+                            colSpan={consolidatedMarksStructure.totalCols}
+                            className="py-12 text-center text-slate-400 text-sm border-b border-slate-100"
+                          >
+                            No students matching your search criteria.
+                          </td>
+                        </tr>
+                      ) : (
+                        paginatedStudents.map((student, rowIdx) => {
+                          const isSelectedForReport = student.id === selectedStudentId;
+                          const isRowActive = focusedCell?.rowIdx === rowIdx || isSelectedForReport;
+                          const totalMaxAll = consolidatedMarksStructure.sections.reduce(
+                            (acc, s) => acc + (s.subject.maxMarks || 100),
+                            0
+                          );
+                          const grandTotal = consolidatedMarksStructure.sections.reduce(
+                            (sum, sec) => {
+                              const subName = sec.subject.name;
+                              const bd =
+                                student.breakdowns?.[subName] ||
+                                generateDefaultBreakdown(
+                                  student.marks[subName],
+                                  subName,
+                                  student.section
+                                );
+                              const liveTotal = computeSubjectTotalFromBreakdown(
+                                subName,
+                                student.section,
+                                bd,
+                                sec.subject.components
+                              );
+                              const mark = sec.isMulti
+                                ? liveTotal !== null
+                                  ? liveTotal
+                                  : student.marks[subName]
+                                : student.marks[subName];
+                              return sum + (typeof mark === 'number' ? mark : 0);
+                            },
+                            0
+                          );
+
+                          return (
+                            <tr
+                              key={student.id}
+                              onClick={() => setSelectedStudentId(student.id)}
+                              onContextMenu={(e) => handleRowContextMenu(e, student)}
+                              className={`group/row transition-colors cursor-pointer h-10 min-h-10 max-h-10 ${
+                                isRowActive
+                                  ? 'bg-blue-50/70 text-slate-900'
+                                  : 'hover:bg-slate-100/70 text-slate-800'
+                              }`}
+                            >
+                              {/* Frozen Roll Number */}
+                              <td
+                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 transition-colors select-none cursor-default ${
+                                  isRowActive
+                                    ? 'bg-blue-100 font-bold text-blue-950'
+                                    : 'bg-white group-hover/row:bg-slate-100'
+                                }`}
+                              >
+                                {student.rollNo}
+                              </td>
+
+                              {/* Frozen Student Name */}
+                              <td
+                                className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 transition-colors ${
+                                  isRowActive
+                                    ? 'bg-blue-100 font-semibold text-blue-950'
+                                    : 'bg-white group-hover/row:bg-slate-100'
+                                }`}
+                              >
+                                <div className="flex items-center justify-between gap-1.5 w-full group/name">
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSelectedStudentId(student.id);
+                                      setActiveTab('reportcards');
+                                    }}
+                                    title="View official report card"
+                                    className="font-medium text-slate-900 hover:text-blue-600 transition-colors text-left flex items-center gap-1 truncate flex-1"
+                                  >
+                                    <span className="truncate">{student.name}</span>
+                                    <ChevronRight className="w-3 h-3 text-slate-400 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0" />
+                                  </button>
+                                </div>
+                              </td>
+
+                              {/* Subject Component & Total Cells */}
+                              {consolidatedMarksStructure.sections.map((sec) => {
+                                const subName = sec.subject.name;
+                                const bd =
+                                  student.breakdowns?.[subName] ||
+                                  generateDefaultBreakdown(
+                                    student.marks[subName],
+                                    subName,
+                                    student.section
+                                  );
+                                const liveTotalFromBd = computeSubjectTotalFromBreakdown(
+                                  subName,
+                                  student.section,
+                                  bd,
+                                  sec.subject.components
+                                );
+                                const totalMark = sec.isMulti
+                                  ? liveTotalFromBd !== null
+                                    ? liveTotalFromBd
+                                    : student.marks[subName]
+                                  : student.marks[subName];
+
+                                const subMax = sec.subject.maxMarks || 100;
+                                const subPct =
+                                  typeof totalMark === 'number' && subMax > 0
+                                    ? (totalMark / subMax) * 100
+                                    : 0;
+                                const subGrade =
+                                  totalMark === 'AB'
+                                    ? 'AB'
+                                    : typeof totalMark === 'number'
+                                    ? computeCbseGrade(subPct)
+                                    : '-';
+
+                                return (
+                                  <React.Fragment key={`cells-${student.id}-${subName}`}>
+                                    {sec.components.map((comp) => {
+                                      const rawVal = sec.isMulti ? bd[comp.key] : student.marks[subName];
+                                      const displayVal =
+                                        rawVal === null || rawVal === undefined ? '' : String(rawVal);
+                                      return (
+                                        <td
+                                          key={`${student.id}-${subName}-${comp.key}`}
+                                          className="min-w-[92px] h-10 p-0 border-b border-l border-slate-200 relative transition-colors"
+                                        >
+                                          <input
+                                            type="text"
+                                            value={displayVal}
+                                            placeholder={`/${comp.maxMarks}`}
+                                            onChange={(e) => {
+                                              if (sec.isMulti) {
+                                                handleInternalCellChange(
+                                                  student.id,
+                                                  subName,
+                                                  comp.key,
+                                                  e.target.value
+                                                );
+                                              } else {
+                                                handleMarkChange(student.id, subName, e.target.value);
+                                              }
+                                            }}
+                                            className="w-full h-10 px-1 text-center font-mono tabular-nums text-xs font-semibold bg-transparent text-slate-800 focus:bg-white focus:ring-2 focus:ring-inset focus:ring-blue-600 focus:outline-none"
+                                          />
+                                        </td>
+                                      );
+                                    })}
+                                    {sec.isMulti && (
+                                      <>
+                                        <td className="min-w-[78px] h-10 p-0 text-center font-mono tabular-nums text-xs font-extrabold border-b border-l border-slate-200 bg-slate-50/90 text-slate-900 select-none">
+                                          {totalMark === null || totalMark === undefined ? '-' : totalMark}
+                                        </td>
+                                        <td className="min-w-[64px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-slate-50/90 text-slate-800 select-none">
+                                          {subGrade}
+                                        </td>
+                                      </>
+                                    )}
+                                  </React.Fragment>
+                                );
+                              })}
+
+                              {/* Overall Performance Cells */}
+                              <td className="min-w-[92px] h-10 p-0 text-center font-mono tabular-nums text-xs font-extrabold border-b border-l border-slate-300 bg-emerald-50/40 text-emerald-950 select-none">
+                                {grandTotal}
+                              </td>
+                              <td className="min-w-[82px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-emerald-50/40 text-emerald-950 select-none">
+                                {totalMaxAll > 0 ? ((grandTotal / totalMaxAll) * 100).toFixed(2) : '0.00'}%
+                              </td>
+                              <td className="min-w-[64px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-emerald-50/40 text-emerald-950 select-none">
+                                {computeCbseGrade(totalMaxAll > 0 ? (grandTotal / totalMaxAll) * 100 : 0)}
+                              </td>
+                            </tr>
+                          );
+                        })
+                      )}
+                    </tbody>
+                  </table>
                 ) : (
                   /* All 7 Subjects Consolidated Summary Grid */
                   <table className="w-full text-center text-xs border-separate border-spacing-0">
@@ -4551,7 +4838,7 @@ export default function SchoolErpPage() {
                               <td className={`w-[58px] min-w-[58px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 transition-colors select-none cursor-default ${
                                 isRowActive ? 'bg-blue-50/90 text-blue-950 font-bold' : 'text-slate-800 group-hover/row:bg-slate-100/70'
                               }`}>
-                                {result?.grade ?? 'E'}
+                                {result?.grade ?? 'E2'}
                               </td>
 
                               {/* Rank */}
@@ -4864,7 +5151,7 @@ export default function SchoolErpPage() {
                   onChange={(val) => handleExamChange(val)}
                   options={Object.values(examConfigs).map((ex) => ({
                     value: ex.id,
-                    label: ex.name,
+                    label: ex.code || ex.id,
                   }))}
                 />
 
@@ -5054,7 +5341,7 @@ export default function SchoolErpPage() {
                                 {result ? `${result.percentage.toFixed(2)}%` : '0.00%'}
                               </td>
                               <td className="w-[65px] min-w-[65px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-slate-50/60 select-none cursor-default">
-                                {result?.grade ?? 'E'}
+                                {result?.grade ?? 'E2'}
                               </td>
                               <td className="h-10 p-0 border-b border-l border-slate-200 bg-white focus-within:ring-2 focus-within:ring-inset focus-within:ring-blue-600 focus-within:z-10">
                                 <div className="flex items-center h-10 w-full">
@@ -5132,7 +5419,9 @@ export default function SchoolErpPage() {
                           className="py-2 px-2 text-center w-[80px] min-w-[80px] bg-slate-50 border-b border-l border-slate-200 hover:bg-slate-100 transition-colors"
                         >
                           <div className="text-center font-bold text-slate-800">{getSubjectHeaderLabel(selectedRemarkScope)}</div>
-                          <div className="text-[10px] font-normal text-slate-400 mt-0.5">100</div>
+                          <div className="text-[10px] font-normal text-slate-400 mt-0.5">
+                            {activeSubjects.find((s) => s.name === selectedRemarkScope)?.maxMarks ?? 100}
+                          </div>
                         </th>
                         <th className="py-2 px-2 text-center w-[65px] min-w-[65px] bg-slate-50 border-b border-l border-slate-200">
                           <div className="text-center font-bold text-slate-800">Grade</div>
@@ -5154,11 +5443,13 @@ export default function SchoolErpPage() {
                           const isSelectedForReport = student.id === selectedStudentId;
                           const markVal = student.marks[selectedRemarkScope];
                           const numMark = typeof markVal === 'number' ? markVal : 0;
+                          const subMax =
+                            activeSubjects.find((s) => s.name === selectedRemarkScope)?.maxMarks || 100;
                           const subGrade =
                             markVal === 'AB'
-                              ? 'E'
+                              ? 'E2'
                               : markVal !== null && markVal !== undefined
-                              ? computeGrade(numMark)
+                              ? computeGrade((numMark / subMax) * 100)
                               : '-';
                           const subCellKey = `rem-sub-${rowIdx}-${selectedRemarkScope}`;
 
@@ -5575,7 +5866,7 @@ export default function SchoolErpPage() {
                         .filter((r) => (selectedClass === 'all' ? true : r.student.section === selectedClass))
                         .sort((a, b) => (parseInt(a.student.rollNo, 10) || 0) - (parseInt(b.student.rollNo, 10) || 0));
                       downloadAllReportCardsSinglePDF(
-                        { ...SVA_EXAM_INFO, examName: currentExamConfig.name },
+                        { ...SVA_EXAM_INFO, examName: currentExamConfig.name, examCode: selectedExam },
                         filteredResults,
                         `Class_PDF_${selectedClass === 'all' ? 'AllClasses' : selectedClass}_${selectedExam}`
                       );
@@ -5596,7 +5887,7 @@ export default function SchoolErpPage() {
                     showToast('Generating School PDF for all 280 student report cards...');
                     setTimeout(() => {
                       downloadAllReportCardsSinglePDF(
-                        { ...SVA_EXAM_INFO, examName: currentExamConfig.name },
+                        { ...SVA_EXAM_INFO, examName: currentExamConfig.name, examCode: selectedExam },
                         computedResults,
                         `SVA_School_All_Report_Cards_${selectedExam}.pdf`
                       );
@@ -5625,16 +5916,36 @@ export default function SchoolErpPage() {
 
             {/* Two-Column Studio Layout */}
             <div className="grid grid-cols-1 lg:grid-cols-12 gap-5 items-start">
-              {/* Left Column: Class Filter, Student Selector & Remarks (4 columns) */}
-              <div className="lg:col-span-4 flex flex-col gap-4">
-                {/* Class & Student Selector Card */}
+              {/* Left Column: Exam & Class Filter, Student Selector (3 columns) */}
+              <div className="lg:col-span-3 flex flex-col gap-4">
+                {/* Exam, Class & Student Selector Card */}
                 <div className="bg-white border border-slate-200/80 rounded-xl shadow-2xs p-3.5 flex flex-col gap-3">
+                  {/* Exam Selector Dropdown */}
+                  <div>
+                    <label className="text-[11px] font-medium text-slate-500 uppercase tracking-wide block mb-1">
+                      Select Examination:
+                    </label>
+                    <CustomSelect
+                      id="reportcard-exam-select"
+                      fullWidth
+                      icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
+                      prefixLabel="Exam:"
+                      value={selectedExam}
+                      onChange={(val) => handleExamChange(val)}
+                      options={Object.values(examConfigs).map((ex) => ({
+                        value: ex.id,
+                        label: ex.code || ex.id,
+                      }))}
+                    />
+                  </div>
+
                   {/* Class Filter Dropdown */}
                   <div>
                     <label className="text-[11px] font-medium text-slate-500 uppercase tracking-wide block mb-1">
                       Filter by Class ({SVA_ALL_CLASSES.length} Classes):
                     </label>
                     <CustomSelect
+                      id="reportcard-class-select"
                       fullWidth
                       icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
                       prefixLabel="Class:"
@@ -5744,10 +6055,10 @@ export default function SchoolErpPage() {
 
               </div>
 
-              {/* Right Column: A4 Luxury Report Card Preview (8 columns) */}
-              <div className="lg:col-span-8 flex flex-col items-center">
+              {/* Right Column: Report Card Preview (9 columns) */}
+              <div className="lg:col-span-9 flex flex-col items-center">
                 {/* Navigation Bar Above Report Card */}
-                <div className="w-full max-w-[780px] flex items-center justify-between pb-3 text-xs text-slate-500">
+                <div className="w-full max-w-[794px] flex items-center justify-between pb-3 text-xs text-slate-500">
                   <button
                     onClick={handlePrevStudent}
                     className="inline-flex items-center gap-1 hover:text-slate-900 transition-colors"
@@ -5755,8 +6066,8 @@ export default function SchoolErpPage() {
                     <ChevronLeft className="w-4 h-4" />
                     <span>Previous</span>
                   </button>
-                  <span className="font-mono text-slate-700 font-medium">
-                    Student {currentStudentIndex + 1} of {processedStudents.length} ({activeStudentResult?.student.section})
+                  <span className="text-slate-700 font-medium">
+                    Student {currentStudentIndex + 1} of {processedStudents.length} ({activeStudentResult?.student.section}) · {selectedExam}
                   </span>
                   <button
                     onClick={handleNextStudent}
@@ -5767,15 +6078,432 @@ export default function SchoolErpPage() {
                   </button>
                 </div>
 
-                {activeStudentResult && (
+                {activeStudentResult && isPtExam(selectedExam) ? (() => {
+                  const ptProfile = getStudentPtProfile(activeStudentResult.student);
+                  const includeCsInPt = hasCsInPtExam(
+                    activeStudentResult.student.section || activeStudentResult.student.class
+                  );
+                  const ptSubjects = activeStudentResult.subjectDetails.filter((d) => {
+                    if (includeCsInPt) return true;
+                    const lower = d.name.trim().toLowerCase();
+                    return lower !== 'computer science' && lower !== 'cs';
+                  });
+                  const ptHeading = getPtExamHeading(selectedExam);
+                  const ptPctStr = formatPtPercentage(
+                    activeStudentResult.totalObtained,
+                    activeStudentResult.totalMax
+                  );
+                  const ctRemark =
+                    activeStudentResult.student.customRemarks ||
+                    getDefaultClassTeacherRemark(
+                      activeStudentResult.percentage,
+                      activeStudentResult.status
+                    );
+
+                  return (
+                    <div
+                      style={{
+                        transform:
+                          reportZoom === '80%'
+                            ? 'scale(0.8)'
+                            : reportZoom === '90%'
+                            ? 'scale(0.9)'
+                            : 'scale(1)',
+                        transformOrigin: 'top center',
+                        transition: 'transform 0.2s ease',
+                        fontFamily: "'Calibri', 'Segoe UI', sans-serif",
+                      }}
+                      id="report-card-print-area"
+                      className="printable-report-card w-full max-w-[794px] flex flex-col gap-6 text-black"
+                    >
+                      {/* =========================================================
+                          PAGE 1: EXACT PT REPORT CARD (MATCHING SAMPLE PDF)
+                         ========================================================= */}
+                      <div
+                        data-testid="pt-report-card-page-1"
+                        className="w-full bg-white border border-slate-300 shadow-xl px-12 pt-8 pb-14 text-black"
+                        style={{ minHeight: '1040px' }}
+                      >
+                        {/* Header with Crest on Left and School Identity Centered */}
+                        <div className="relative pb-2.5 border-b-[1.5px] border-black text-center">
+                          <div className="absolute left-0 top-0.5">
+                            <Image
+                              src={SCHOOL_LOGO_SRC}
+                              alt="Saraswati Vidya Academy Crest"
+                              width={68}
+                              height={68}
+                              className="w-[62px] h-[62px] object-contain"
+                              priority
+                            />
+                          </div>
+                          <div>
+                            <h2
+                              className="text-[30px] sm:text-[33px] font-black leading-tight tracking-normal text-[#27457B]"
+                              style={{
+                                fontFamily: "'Rockwell Extra Bold', 'Rockwell', 'Courier New', Georgia, serif",
+                                fontWeight: 900,
+                                WebkitTextStroke: '0.6px #27457B',
+                              }}
+                            >
+                              {SVA_EXAM_INFO.schoolName}
+                            </h2>
+                            <p className="text-[11px] font-bold text-black mt-0.5 leading-snug">
+                              CBSE Affiliation No. {SVA_EXAM_INFO.affiliationNo}, School Code. {SVA_EXAM_INFO.schoolCode}, UDISE No. {SVA_EXAM_INFO.udiseNo}
+                            </p>
+                            <p className="text-[13px] font-normal text-black leading-snug">
+                              Address: {SVA_EXAM_INFO.schoolAddress}
+                            </p>
+                            <p className="text-[13px] font-normal text-black leading-snug">
+                              Email Id:{' '}
+                              <a
+                                href={`mailto:${SVA_EXAM_INFO.schoolEmail}`}
+                                className="text-[#0000FF] underline"
+                              >
+                                {SVA_EXAM_INFO.schoolEmail}
+                              </a>
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* REPORT CARD & PERIODIC TEST - X Titles */}
+                        <div className="text-center mt-2.5 mb-2.5">
+                          <div className="text-[14.5px] font-bold uppercase tracking-normal text-black leading-snug">
+                            REPORT CARD
+                          </div>
+                          <div
+                            data-testid="pt-report-card-heading"
+                            className="text-[19px] font-bold uppercase tracking-normal text-black leading-snug mt-0.5"
+                          >
+                            {ptHeading}
+                          </div>
+                        </div>
+
+                        {/* Table 1: Student Particulars Box (10-column double-bordered framed table) */}
+                        <table
+                          data-testid="pt-student-particulars-table"
+                          className="w-full text-[13px] font-bold text-black border border-black mb-5"
+                          style={{ borderCollapse: 'separate', borderSpacing: '1.5px' }}
+                        >
+                          <colgroup>
+                            <col style={{ width: '11.5%' }} />
+                            <col style={{ width: '14.0%' }} />
+                            <col style={{ width: '15.0%' }} />
+                            <col style={{ width: '3.0%' }} />
+                            <col style={{ width: '11.0%' }} />
+                            <col style={{ width: '8.0%' }} />
+                            <col style={{ width: '7.0%' }} />
+                            <col style={{ width: '6.0%' }} />
+                            <col style={{ width: '8.0%' }} />
+                            <col style={{ width: '16.5%' }} />
+                          </colgroup>
+                          <tbody>
+                            <tr>
+                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                Roll No.
+                              </td>
+                              <td className="border border-black px-2 py-1 text-left">
+                                {ptProfile.rollNoDisplay}
+                              </td>
+                              <td
+                                colSpan={2}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                Class &amp; Section:
+                              </td>
+                              <td
+                                colSpan={3}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                {ptProfile.classSectionDisplay}
+                              </td>
+                              <td
+                                colSpan={2}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                DOB:
+                              </td>
+                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                {ptProfile.dobDisplay}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td
+                                colSpan={2}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                Name of the Student:
+                              </td>
+                              <td colSpan={8} className="border border-black px-2 py-1 text-left">
+                                {activeStudentResult.student.name}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td
+                                colSpan={2}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                Father’s Name:
+                              </td>
+                              <td colSpan={8} className="border border-black px-2 py-1 text-left">
+                                {ptProfile.fatherNameDisplay}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td
+                                colSpan={2}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                Mother’s Name:
+                              </td>
+                              <td colSpan={8} className="border border-black px-2 py-1 text-left">
+                                {ptProfile.motherNameDisplay}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td
+                                colSpan={2}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                House:
+                              </td>
+                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                {ptProfile.house}
+                              </td>
+                              <td
+                                colSpan={2}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                Height:
+                              </td>
+                              <td
+                                colSpan={2}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                {ptProfile.height}
+                              </td>
+                              <td
+                                colSpan={2}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                Weight:
+                              </td>
+                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                {ptProfile.weight}
+                              </td>
+                            </tr>
+                            <tr>
+                              <td
+                                colSpan={2}
+                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                              >
+                                Attendance:
+                              </td>
+                              <td colSpan={8} className="border border-black px-4 py-1 text-left">
+                                {ptProfile.attendance}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+
+                        {/* Table 2: Subject Marks Table (6 subjects for Classes 6-8; 7 subjects with CS for Class 9) */}
+                        <table
+                          data-testid="pt-subjects-table"
+                          className="w-full text-[13px] font-bold text-black border border-black mb-7"
+                          style={{ borderCollapse: 'separate', borderSpacing: '1.5px' }}
+                        >
+                          <colgroup>
+                            <col style={{ width: '10%' }} />
+                            <col style={{ width: '26%' }} />
+                            <col style={{ width: '14%' }} />
+                            <col style={{ width: '50%' }} />
+                          </colgroup>
+                          <thead>
+                            <tr>
+                              <th className="border border-black px-2 py-1 text-center align-middle leading-tight whitespace-nowrap">
+                                <div>SL.</div>
+                                <div>NO.</div>
+                              </th>
+                              <th className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap">
+                                NAME OF THE SUBJECT
+                              </th>
+                              <th className="border border-black px-2 py-1 text-center align-middle leading-tight whitespace-nowrap">
+                                <div>MARKS</div>
+                                <div>OBTAINED</div>
+                              </th>
+                              <th className="border border-black px-2 py-1.5 text-center align-top whitespace-nowrap">
+                                REMARKS
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {ptSubjects.map((detail, idx) => {
+                              const markStr =
+                                detail.obtained === 'AB'
+                                  ? 'AB'
+                                  : detail.obtained !== null && detail.obtained !== undefined
+                                  ? String(detail.obtained)
+                                  : '-';
+                              const remarkText =
+                                detail.remark ||
+                                getDefaultSubjectRemark(detail.obtained, detail.maxMarks);
+
+                              return (
+                                <tr key={detail.name}>
+                                  <td className="border border-black px-2 py-1.5 text-center align-middle font-bold">
+                                    {idx + 1}
+                                  </td>
+                                  <td className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap font-bold">
+                                    {getPtSubjectDisplayName(detail.name)}
+                                  </td>
+                                  <td className="border border-black px-2 py-1.5 text-center align-middle font-bold">
+                                    {markStr}
+                                  </td>
+                                  <td className="border border-black px-2.5 py-1.5 text-left align-middle font-bold">
+                                    {remarkText}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+
+                        {/* Table 3: Summary Strip (TOTAL, PERCENTAGE, GRADE) */}
+                        <table
+                          data-testid="pt-summary-table"
+                          className="w-full text-[13px] font-bold text-black border border-black mb-6"
+                          style={{ borderCollapse: 'separate', borderSpacing: '1.5px' }}
+                        >
+                          <colgroup>
+                            <col style={{ width: '14%' }} />
+                            <col style={{ width: '13%' }} />
+                            <col style={{ width: '19%' }} />
+                            <col style={{ width: '24%' }} />
+                            <col style={{ width: '16%' }} />
+                            <col style={{ width: '14%' }} />
+                          </colgroup>
+                          <tbody>
+                            <tr>
+                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                TOTAL:
+                              </td>
+                              <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                {activeStudentResult.totalObtained}/{activeStudentResult.totalMax}
+                              </td>
+                              <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                PERCENTAGE:
+                              </td>
+                              <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                {ptPctStr}
+                              </td>
+                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                GRADE:
+                              </td>
+                              <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                {activeStudentResult.grade}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+
+                        {/* Table 4: Class Teacher's Remarks Box */}
+                        <table
+                          className="w-full text-[13px] font-bold text-black border border-black"
+                          style={{ borderCollapse: 'separate', borderSpacing: '1.5px' }}
+                        >
+                          <colgroup>
+                            <col style={{ width: '33%' }} />
+                            <col style={{ width: '67%' }} />
+                          </colgroup>
+                          <tbody>
+                            <tr>
+                              <td className="border border-black px-2 py-2.5 text-left align-middle whitespace-nowrap">
+                                CLASS TEACHER’S REMARKS:
+                              </td>
+                              <td className="border border-black px-2.5 py-1.5 text-left align-middle leading-snug">
+                                {ctRemark}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+
+                      {/* =========================================================
+                          PAGE 2: GRADING SYSTEM & SIGNATURES (MATCHING SAMPLE PDF)
+                         ========================================================= */}
+                      <div
+                        data-testid="pt-report-card-page-2"
+                        className="w-full bg-white border border-slate-300 shadow-xl px-12 pt-11 pb-20 text-black"
+                        style={{ minHeight: '960px', pageBreakBefore: 'always' }}
+                      >
+                        {/* Centered Grading System Table */}
+                        <div className="flex justify-center">
+                          <table
+                            data-testid="pt-grading-system-table"
+                            className="w-[310px] text-[13px] font-bold text-black border border-black"
+                            style={{ borderCollapse: 'separate', borderSpacing: '1.5px' }}
+                          >
+                            <colgroup>
+                              <col style={{ width: '58%' }} />
+                              <col style={{ width: '42%' }} />
+                            </colgroup>
+                            <thead>
+                              <tr>
+                                <th colSpan={2} className="border border-black px-2 py-0.5 text-center">
+                                  Grading System
+                                </th>
+                              </tr>
+                              <tr>
+                                <th className="border border-black px-2 py-0.5 text-center">
+                                  Range of Marks
+                                </th>
+                                <th className="border border-black px-2 py-0.5 text-center">
+                                  Grade
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {REPORT_CARD_GRADING_SYSTEM.map((row) => (
+                                <tr key={row.grade}>
+                                  <td className="border border-black px-2 py-0.5 text-center">
+                                    {row.range}
+                                  </td>
+                                  <td className="border border-black px-2 py-0.5 text-center">
+                                    {row.grade}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+
+                        {/* Signatures Row */}
+                        <div className="grid grid-cols-3 gap-6 mt-36 text-center text-[13.5px] font-bold text-black leading-snug">
+                          <div>
+                            <div>Signature of</div>
+                            <div>Class Teacher</div>
+                          </div>
+                          <div>
+                            <div>Signature of</div>
+                            <div>Principal with Seal</div>
+                          </div>
+                          <div>
+                            <div>Signature of</div>
+                            <div>Parent / Guardian</div>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })() : activeStudentResult ? (
                   <div
                     style={{
                       transform: reportZoom === '80%' ? 'scale(0.8)' : reportZoom === '90%' ? 'scale(0.9)' : 'scale(1)',
                       transformOrigin: 'top center',
                       transition: 'transform 0.2s ease',
+                      fontFamily: "'Calibri', 'Segoe UI', sans-serif",
                     }}
                     id="report-card-print-area"
-                    className="printable-report-card w-full max-w-[780px] bg-white border-2 border-slate-900 p-8 shadow-xl rounded-sm font-aptos text-slate-900 relative"
+                    className="printable-report-card w-full max-w-[780px] bg-white border-2 border-slate-900 p-8 shadow-xl rounded-sm text-slate-900 relative"
                   >
                     {/* Official SVA Header - Direct Image without enclosing div */}
                     <div className="flex flex-col items-center text-center pb-4 border-b border-slate-200">
@@ -5787,21 +6515,30 @@ export default function SchoolErpPage() {
                         className="w-[72px] h-[72px] object-contain mb-2"
                         priority
                       />
-                      <h2 className="font-display text-xl font-bold tracking-tight text-slate-900 uppercase">
+                      <h2
+                        className="text-[26px] font-black leading-tight tracking-normal text-[#27457B]"
+                        style={{
+                          fontFamily: "'Rockwell Extra Bold', 'Rockwell', 'Courier New', Georgia, serif",
+                          fontWeight: 900,
+                          WebkitTextStroke: '0.6px #27457B',
+                        }}
+                      >
                         {SVA_EXAM_INFO.schoolName}
                       </h2>
                       <p className="text-[11px] text-slate-500 max-w-md mt-0.5">
                         {SVA_EXAM_INFO.schoolAddress}
                       </p>
-                      <div className="text-[11px] text-slate-400 mt-1 flex items-center justify-center gap-2 font-mono">
-                        <span>Affiliation No: {SVA_EXAM_INFO.affiliationNo}</span>
+                      <div className="text-[11px] text-slate-500 mt-1 flex items-center justify-center gap-2">
+                        <span>CBSE Affiliation No. {SVA_EXAM_INFO.affiliationNo}</span>
                         <span>·</span>
-                        <span>School Code: {SVA_EXAM_INFO.schoolCode}</span>
+                        <span>School Code. {SVA_EXAM_INFO.schoolCode}</span>
+                        <span>·</span>
+                        <span>UDISE No. {SVA_EXAM_INFO.udiseNo}</span>
                       </div>
-                      <div className="mt-2.5 inline-flex items-center gap-2 border-y border-slate-900/30 py-1 px-5 text-xs font-semibold tracking-widest uppercase text-slate-800 font-display">
+                      <div className="mt-2.5 inline-flex items-center gap-2 border-y border-slate-900/30 py-1 px-5 text-xs font-semibold tracking-widest uppercase text-slate-800">
                         <span>{currentExamConfig.name || 'Progress Report Card'}</span>
                         <span>·</span>
-                        <span className="font-mono font-normal text-slate-600">Session {SVA_EXAM_INFO.academicSession}</span>
+                        <span className="font-normal text-slate-600">Session {SVA_EXAM_INFO.academicSession}</span>
                       </div>
                     </div>
 
@@ -5809,7 +6546,7 @@ export default function SchoolErpPage() {
                     <div className="flex items-center gap-4 py-4 border-b border-slate-200 text-xs">
                       {/* Avatar / Photo Box */}
                       <div className="w-16 h-20 border border-slate-300 rounded bg-slate-50 flex flex-col items-center justify-center shrink-0 text-slate-400">
-                        <div className="text-[11px] font-mono font-bold text-slate-700">
+                        <div className="text-[11px] font-bold text-slate-700">
                           {activeStudentResult.student.rollNo}
                         </div>
                         <div className="text-[9px] text-slate-400">Photo</div>
@@ -5824,14 +6561,14 @@ export default function SchoolErpPage() {
                           </strong>
                         </div>
                         <div>
-                          <span className="text-slate-500 font-medium">Class & Section:</span>{' '}
+                          <span className="text-slate-500 font-medium">Class &amp; Section:</span>{' '}
                           <strong className="font-semibold text-slate-900">
                             {activeStudentResult.student.class} - {activeStudentResult.student.section}
                           </strong>
                         </div>
                         <div>
                           <span className="text-slate-500 font-medium">Roll Number:</span>{' '}
-                          <span className="font-mono font-bold text-slate-900">
+                          <span className="font-bold text-slate-900">
                             {activeStudentResult.student.rollNo}
                           </span>
                         </div>
@@ -5844,165 +6581,163 @@ export default function SchoolErpPage() {
                         <div>
                           <span className="text-slate-500 font-medium">Parents:</span>{' '}
                           <span className="text-slate-800">
-                            {activeStudentResult.student.fatherName} & {activeStudentResult.student.motherName}
+                            {activeStudentResult.student.fatherName} &amp; {activeStudentResult.student.motherName}
                           </span>
                         </div>
                       </div>
                     </div>
 
-                      {/* Scholastic Marks Table (Exact 7 subjects with Internal + Written Examination breakdown) */}
-                      <div className="pt-4">
-                        <div className="text-xs font-bold text-slate-900 uppercase tracking-wide mb-2 flex items-center justify-between">
-                          <span>Part 1: Scholastic Assessment</span>
-                          <span className="text-[10px] font-normal text-slate-500">
-                            {selectedExam.startsWith('PT') ? 'Periodic Test (Max 20)' : 'Internal Assessment + Written Examination (Max 100)'}
-                          </span>
-                        </div>
-                        <table className="w-full text-xs border border-slate-300 border-collapse">
-                          <thead>
-                            <tr className="bg-slate-100 text-slate-800 font-semibold border-b border-slate-300">
-                              <th className="py-2 px-2.5 text-left">Subject</th>
-                              {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
-                                <>
-                                  <th className="py-2 px-2 text-center w-24 bg-blue-50/50">Internal</th>
-                                  <th className="py-2 px-2 text-center w-20">Exam</th>
-                                </>
-                              )}
-                              <th className="py-2 px-1.5 text-center w-14">Max</th>
-                              <th className="py-2 px-1.5 text-center w-14">Pass</th>
-                              <th className="py-2 px-2 text-center w-20">Obtained</th>
-                              <th className="py-2 px-1.5 text-center w-14">Grade</th>
-                              <th className="py-2 px-2.5 text-center">Remark</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-200">
-                            {activeStudentResult.subjectDetails.map((detail) => {
-                              const bd = detail.breakdown;
-                              const isClass9 = isClass9Section(activeStudentResult.student.section);
-                              const isHindi = detail.name.toLowerCase() === 'hindi';
-
-                              let internalLabel = '-';
-                              let writtenLabel = '-';
-
-                              if (bd) {
-                                if (isClass9 && isHindi) {
-                                  // Listening (20), Speaking (20), Project (15)
-                                  const list = typeof bd.listening === 'number' ? bd.listening : 0;
-                                  const spk = typeof bd.speaking === 'number' ? bd.speaking : 0;
-                                  const prj = typeof bd.project === 'number' ? bd.project : 0;
-                                  const intTot = list + spk + prj;
-                                  internalLabel = `${intTot}/55`;
-                                  writtenLabel = `${bd.saExam ?? '-'}/45`;
-                                } else {
-                                  // Internal (20) + Written Exam (80)
-                                  const pp = typeof bd.penPaper === 'number' ? bd.penPaper : 0;
-                                  const ma = typeof bd.multipleAssessment === 'number' ? bd.multipleAssessment : 0;
-                                  const se = typeof bd.subjectEnrichment === 'number' ? bd.subjectEnrichment : 0;
-                                  const pf = typeof bd.portfolio === 'number' ? bd.portfolio : 0;
-                                  const intTot =
-                                    bd.internalMarks !== undefined && bd.internalMarks !== null
-                                      ? bd.internalMarks
-                                      : pp + ma + se + pf;
-                                  internalLabel = `${intTot}/20`;
-                                  writtenLabel = `${bd.writtenExam ?? '-'}/80`;
-                                }
-                              }
-
-                              return (
-                                <tr key={detail.name} className="hover:bg-slate-50/50">
-                                  <td className="py-1.5 px-2.5 font-medium text-slate-900">
-                                    {detail.name}
-                                    {isClass9 && isHindi && (
-                                      <span className="ml-1 text-[9px] text-blue-700 bg-blue-50 px-1 py-0.2 rounded font-normal">
-                                        L+S+P+SA
-                                      </span>
-                                    )}
-                                  </td>
-                                  {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
-                                    <>
-                                      <td className="py-1.5 px-2 text-center font-mono text-[11px] text-slate-700 bg-blue-50/30">
-                                        {internalLabel}
-                                      </td>
-                                      <td className="py-1.5 px-2 text-center font-mono text-[11px] text-slate-700">
-                                        {writtenLabel}
-                                      </td>
-                                    </>
-                                  )}
-                                  <td className="py-1.5 px-1.5 text-center font-mono text-slate-600">
-                                    {detail.maxMarks}
-                                  </td>
-                                  <td className="py-1.5 px-1.5 text-center font-mono text-slate-600">
-                                    {detail.passMarks}
-                                  </td>
-                                  <td className="py-1.5 px-2 text-center font-mono font-bold text-slate-900">
-                                    {detail.obtained === 'AB' ? (
-                                      <span className="text-rose-600">AB</span>
-                                    ) : detail.obtained !== null ? (
-                                      detail.obtained
-                                    ) : (
-                                      '-'
-                                    )}
-                                  </td>
-                                  <td className="py-1.5 px-1.5 text-center font-mono font-semibold text-slate-800">
-                                    {detail.grade}
-                                  </td>
-                                  <td className="py-1.5 px-2.5 text-left text-[11px] text-slate-600 italic">
-                                    {detail.remark || getDefaultSubjectRemark(detail.obtained, detail.maxMarks)}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-
-                            {/* Grand Total Row */}
-                            <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
-                              <td className="py-2 px-2.5 text-slate-900">Grand Total</td>
-                              {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
-                                <>
-                                  <td className="py-2 px-2 text-center font-mono text-[11px] text-slate-600 bg-blue-50/50">
-                                    Internal
-                                  </td>
-                                  <td className="py-2 px-2 text-center font-mono text-[11px] text-slate-600">
-                                    Written
-                                  </td>
-                                </>
-                              )}
-                              <td className="py-2 px-1.5 text-center font-mono">
-                                {activeStudentResult.totalMax}
-                              </td>
-                              <td className="py-2 px-1.5 text-center font-mono">
-                                {Math.round(activeStudentResult.totalMax * 0.33)}
-                              </td>
-                              <td className="py-2 px-2 text-center font-mono text-slate-900">
-                                {activeStudentResult.totalObtained}
-                              </td>
-                              <td className="py-2 px-1.5 text-center font-mono text-emerald-800">
-                                {activeStudentResult.grade}
-                              </td>
-                              <td className="py-2 px-2.5 text-left text-[11px] font-medium text-slate-600">
-                                Overall Result: {activeStudentResult.status === 'PASS' ? 'Passed' : 'Needs Improvement'}
-                              </td>
-                            </tr>
-                          </tbody>
-                        </table>
+                    {/* Scholastic Marks Table */}
+                    <div className="pt-4">
+                      <div className="text-xs font-bold text-slate-900 uppercase tracking-wide mb-2 flex items-center justify-between">
+                        <span>Part 1: Scholastic Assessment</span>
+                        <span className="text-[10px] font-normal text-slate-500">
+                          Internal Assessment + Written Examination (Max 100)
+                        </span>
                       </div>
+                      <table className="w-full text-xs border border-slate-300 border-collapse">
+                        <thead>
+                          <tr className="bg-slate-100 text-slate-800 font-semibold border-b border-slate-300">
+                            <th className="py-2 px-2.5 text-left">Subject</th>
+                            {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
+                              <>
+                                <th className="py-2 px-2 text-center w-24 bg-blue-50/50">Internal</th>
+                                <th className="py-2 px-2 text-center w-20">Exam</th>
+                              </>
+                            )}
+                            <th className="py-2 px-1.5 text-center w-14">Max</th>
+                            <th className="py-2 px-1.5 text-center w-14">Pass</th>
+                            <th className="py-2 px-2 text-center w-20">Obtained</th>
+                            <th className="py-2 px-1.5 text-center w-14">Grade</th>
+                            <th className="py-2 px-2.5 text-center">Remark</th>
+                          </tr>
+                        </thead>
+                        <tbody className="divide-y divide-slate-200">
+                          {activeStudentResult.subjectDetails.map((detail) => {
+                            const bd = detail.breakdown;
+                            const isClass9 = isClass9Section(activeStudentResult.student.section);
+                            const isHindi = detail.name.toLowerCase() === 'hindi';
+
+                            let internalLabel = '-';
+                            let writtenLabel = '-';
+
+                            if (bd) {
+                              if (isClass9 && isHindi) {
+                                const list = typeof bd.listening === 'number' ? bd.listening : 0;
+                                const spk = typeof bd.speaking === 'number' ? bd.speaking : 0;
+                                const prj = typeof bd.project === 'number' ? bd.project : 0;
+                                const intTot = list + spk + prj;
+                                internalLabel = `${intTot}/55`;
+                                writtenLabel = `${bd.saExam ?? '-'}/45`;
+                              } else {
+                                const pp = typeof bd.penPaper === 'number' ? bd.penPaper : 0;
+                                const ma = typeof bd.multipleAssessment === 'number' ? bd.multipleAssessment : 0;
+                                const se = typeof bd.subjectEnrichment === 'number' ? bd.subjectEnrichment : 0;
+                                const pf = typeof bd.portfolio === 'number' ? bd.portfolio : 0;
+                                const intTot =
+                                  bd.internalMarks !== undefined && bd.internalMarks !== null
+                                    ? bd.internalMarks
+                                    : pp + ma + se + pf;
+                                internalLabel = `${intTot}/20`;
+                                writtenLabel = `${bd.writtenExam ?? '-'}/80`;
+                              }
+                            }
+
+                            return (
+                              <tr key={detail.name} className="hover:bg-slate-50/50">
+                                <td className="py-1.5 px-2.5 font-medium text-slate-900">
+                                  {detail.name}
+                                  {isClass9 && isHindi && (
+                                    <span className="ml-1 text-[9px] text-blue-700 bg-blue-50 px-1 py-0.2 rounded font-normal">
+                                      L+S+P+SA
+                                    </span>
+                                  )}
+                                </td>
+                                {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
+                                  <>
+                                    <td className="py-1.5 px-2 text-center text-[11px] text-slate-700 bg-blue-50/30">
+                                      {internalLabel}
+                                    </td>
+                                    <td className="py-1.5 px-2 text-center text-[11px] text-slate-700">
+                                      {writtenLabel}
+                                    </td>
+                                  </>
+                                )}
+                                <td className="py-1.5 px-1.5 text-center text-slate-600">
+                                  {detail.maxMarks}
+                                </td>
+                                <td className="py-1.5 px-1.5 text-center text-slate-600">
+                                  {detail.passMarks}
+                                </td>
+                                <td className="py-1.5 px-2 text-center font-bold text-slate-900">
+                                  {detail.obtained === 'AB' ? (
+                                    <span className="text-rose-600">AB</span>
+                                  ) : detail.obtained !== null ? (
+                                    detail.obtained
+                                  ) : (
+                                    '-'
+                                  )}
+                                </td>
+                                <td className="py-1.5 px-1.5 text-center font-semibold text-slate-800">
+                                  {detail.grade}
+                                </td>
+                                <td className="py-1.5 px-2.5 text-left text-[11px] text-slate-600 italic">
+                                  {detail.remark || getDefaultSubjectRemark(detail.obtained, detail.maxMarks)}
+                                </td>
+                              </tr>
+                            );
+                          })}
+
+                          {/* Grand Total Row */}
+                          <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
+                            <td className="py-2 px-2.5 text-slate-900">Grand Total</td>
+                            {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
+                              <>
+                                <td className="py-2 px-2 text-center text-[11px] text-slate-600 bg-blue-50/50">
+                                  Internal
+                                </td>
+                                <td className="py-2 px-2 text-center text-[11px] text-slate-600">
+                                  Written
+                                </td>
+                              </>
+                            )}
+                            <td className="py-2 px-1.5 text-center">
+                              {activeStudentResult.totalMax}
+                            </td>
+                            <td className="py-2 px-1.5 text-center">
+                              {Math.round(activeStudentResult.totalMax * 0.32)}
+                            </td>
+                            <td className="py-2 px-2 text-center text-slate-900">
+                              {activeStudentResult.totalObtained}
+                            </td>
+                            <td className="py-2 px-1.5 text-center text-emerald-800">
+                              {activeStudentResult.grade}
+                            </td>
+                            <td className="py-2 px-2.5 text-left text-[11px] font-medium text-slate-600">
+                              Overall Result: {activeStudentResult.status === 'PASS' ? 'Passed' : 'Needs Improvement'}
+                            </td>
+                          </tr>
+                        </tbody>
+                      </table>
+                    </div>
 
                     {/* Performance Summary Metrics */}
                     <div className="grid grid-cols-4 gap-3 my-4 p-3 bg-slate-50 border border-slate-200 rounded text-center text-xs">
                       <div>
                         <div className="text-[11px] text-slate-500 font-medium">Percentage</div>
-                        <div className="text-base font-bold font-mono text-slate-900">
+                        <div className="text-base font-bold text-slate-900">
                           {activeStudentResult.percentage.toFixed(2)}%
                         </div>
                       </div>
                       <div>
                         <div className="text-[11px] text-slate-500 font-medium">Overall Grade</div>
-                        <div className="text-base font-bold font-mono text-emerald-700">
+                        <div className="text-base font-bold text-emerald-700">
                           {activeStudentResult.grade}
                         </div>
                       </div>
                       <div>
                         <div className="text-[11px] text-slate-500 font-medium">Class Rank</div>
-                        <div className="text-base font-bold font-mono text-slate-900">
+                        <div className="text-base font-bold text-slate-900">
                           {activeStudentResult.rank ? `#${activeStudentResult.rank}` : '-'}
                         </div>
                       </div>
@@ -6023,23 +6758,23 @@ export default function SchoolErpPage() {
                     {/* Part 2: Co-Scholastic & Life Skills Assessment */}
                     <div className="mb-4">
                       <div className="text-xs font-bold text-slate-900 uppercase tracking-wide mb-1.5">
-                        Part 2: Co-Scholastic & Personality Assessment
+                        Part 2: Co-Scholastic &amp; Personality Assessment
                       </div>
                       <div className="grid grid-cols-4 gap-2 text-xs">
                         <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                          <div className="text-[10px] text-slate-500">Work Education & ICT</div>
+                          <div className="text-[10px] text-slate-500">Work Education &amp; ICT</div>
                           <div className="font-bold text-slate-800">Grade A</div>
                         </div>
                         <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                          <div className="text-[10px] text-slate-500">Art & Expression</div>
+                          <div className="text-[10px] text-slate-500">Art &amp; Expression</div>
                           <div className="font-bold text-slate-800">Grade A</div>
                         </div>
                         <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                          <div className="text-[10px] text-slate-500">Health & Physical</div>
+                          <div className="text-[10px] text-slate-500">Health &amp; Physical</div>
                           <div className="font-bold text-slate-800">Grade A</div>
                         </div>
                         <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                          <div className="text-[10px] text-slate-500">Discipline & Ethics</div>
+                          <div className="text-[10px] text-slate-500">Discipline &amp; Ethics</div>
                           <div className="font-bold text-slate-800">Grade A</div>
                         </div>
                       </div>
@@ -6062,23 +6797,25 @@ export default function SchoolErpPage() {
                       </button>
                     </div>
 
-                    {/* CBSE 8-Point Grading Scale Reference */}
-                    <div className="p-2 bg-slate-50 border border-slate-200 rounded text-[9.5px] text-slate-500 flex items-center justify-between mb-6">
-                      <span><strong>CBSE Scale:</strong> A1 (91-100)</span>
+                    {/* Sitewide 9-Point Grading Scale Reference */}
+                    <div className="p-2 bg-slate-50 border border-slate-200 rounded text-[9.5px] text-slate-600 flex flex-wrap items-center justify-between gap-1 mb-6">
+                      <span><strong>Grading System:</strong> A1 (91–100)</span>
                       <span>·</span>
-                      <span>A2 (81-90)</span>
+                      <span>A2 (81–90)</span>
                       <span>·</span>
-                      <span>B1 (71-80)</span>
+                      <span>B1 (71–80)</span>
                       <span>·</span>
-                      <span>B2 (61-70)</span>
+                      <span>B2 (61–70)</span>
                       <span>·</span>
-                      <span>C1 (51-60)</span>
+                      <span>C1 (51–60)</span>
                       <span>·</span>
-                      <span>C2 (41-50)</span>
+                      <span>C2 (41–50)</span>
                       <span>·</span>
-                      <span>D (33-40)</span>
+                      <span>D (32–40)</span>
                       <span>·</span>
-                      <span>E (&lt;33 Fail)</span>
+                      <span>E1 (20–31)</span>
+                      <span>·</span>
+                      <span>E2 (01–19)</span>
                     </div>
 
                     {/* Official Signatures Section */}
@@ -6086,31 +6823,24 @@ export default function SchoolErpPage() {
                       <div>
                         <div className="h-10" />
                         <div className="border-t border-slate-400 pt-1 font-medium text-slate-900">
-                          {SVA_EXAM_INFO.classTeacherName}
+                          Signature of Class Teacher
                         </div>
-                        <div className="text-[10px] text-slate-500">Class Teacher</div>
-                      </div>
-                      <div>
-                        <div className="h-10 flex items-center justify-center">
-                          <span className="text-[10px] font-mono text-slate-400 border border-dashed border-slate-300 rounded px-2 py-0.5">
-                            [ Official School Seal ]
-                          </span>
-                        </div>
-                        <div className="border-t border-slate-400 pt-1 font-medium text-slate-900">
-                          Examination Cell
-                        </div>
-                        <div className="text-[10px] text-slate-500">Coordinator</div>
                       </div>
                       <div>
                         <div className="h-10" />
                         <div className="border-t border-slate-400 pt-1 font-medium text-slate-900">
-                          {SVA_EXAM_INFO.principalName}
+                          Signature of Principal with Seal
                         </div>
-                        <div className="text-[10px] text-slate-500">Principal</div>
+                      </div>
+                      <div>
+                        <div className="h-10" />
+                        <div className="border-t border-slate-400 pt-1 font-medium text-slate-900">
+                          Signature of Parent / Guardian
+                        </div>
                       </div>
                     </div>
                   </div>
-                )}
+                ) : null}
               </div>
             </div>
           </div>
@@ -6119,7 +6849,157 @@ export default function SchoolErpPage() {
 
 
         {/* ========================================================
-            VIEW 4: ADMIN CONFIGURATION PANEL
+            VIEW 4: EXPORT MARKS TAB
+           ======================================================== */}
+        {activeTab === 'export' && (
+          <div className="max-w-4xl mx-auto w-full space-y-6 pb-16">
+            {/* Page Header */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
+                  Export Marks
+                </h1>
+                <p className="text-xs sm:text-sm text-slate-500 mt-0.5 font-normal">
+                  Download formatted Excel marksheets (.xlsx) for any exam, class, or subject.
+                </p>
+              </div>
+            </div>
+
+            {/* Main 3-Step Excel Marksheets Export Card */}
+            <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-xs space-y-5">
+              <div>
+                <h2 className="text-sm font-semibold text-slate-900 flex items-center gap-2">
+                  <FileSpreadsheet className="w-4 h-4 text-blue-600" />
+                  Download Excel Marksheets
+                </h2>
+                <p className="text-xs text-slate-500 mt-0.5">
+                  Choose the exam, class, and subjects you want in your Excel file.
+                </p>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-3.5">
+                {/* Step 1: Choose Exam */}
+                <div className="bg-slate-50/60 p-3.5 rounded-xl border border-slate-200/80 space-y-2">
+                  <label className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[11px] flex items-center justify-center font-bold">
+                      1
+                    </span>
+                    Choose Exam
+                  </label>
+                  <CustomSelect
+                    fullWidth
+                    icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
+                    value={exportExam || selectedExam}
+                    onChange={(val) => setExportExam(val)}
+                    options={Object.values(examConfigs).map((ex) => ({
+                      value: ex.id,
+                      label: ex.code || ex.id,
+                    }))}
+                  />
+                </div>
+
+                {/* Step 2: Choose Class */}
+                <div className="bg-slate-50/60 p-3.5 rounded-xl border border-slate-200/80 space-y-2">
+                  <label className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[11px] flex items-center justify-center font-bold">
+                      2
+                    </span>
+                    Choose Class
+                  </label>
+                  <CustomSelect
+                    fullWidth
+                    icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
+                    value={exportClass || 'all'}
+                    onChange={(val) => setExportClass(val)}
+                    options={[
+                      { value: 'all', label: 'All Classes (Grade 6 to 9)' },
+                      ...SVA_ALL_CLASSES.map((c) => ({
+                        value: c,
+                        label: getClassGradeLabel(c),
+                      })),
+                    ]}
+                  />
+                </div>
+
+                {/* Step 3: Choose Subjects */}
+                <div className="bg-slate-50/60 p-3.5 rounded-xl border border-slate-200/80 space-y-2">
+                  <label className="text-xs font-semibold text-slate-900 flex items-center gap-1.5">
+                    <span className="w-5 h-5 rounded-full bg-blue-600 text-white text-[11px] flex items-center justify-center font-bold">
+                      3
+                    </span>
+                    Choose Subjects
+                  </label>
+                  <CustomSelect
+                    fullWidth
+                    icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
+                    value={exportSubjectScope || 'all_consolidated'}
+                    onChange={(val) => setExportSubjectScope(val)}
+                    options={[
+                      { value: 'all_consolidated', label: 'All Subjects' },
+                      { value: 'consolidated', label: 'Consolidated Sheet' },
+                      ...getEffectiveExamConfigForClass(
+                        examConfigs[exportExam || selectedExam] || baseExamConfig,
+                        exportClass || 'Diamond'
+                      ).subjects.map((s) => ({
+                        value: s.name,
+                        label: s.name,
+                      })),
+                    ]}
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                <div className="text-xs text-slate-500">
+                  Ready to export:{' '}
+                  <strong className="text-slate-800">
+                    {exportExam || selectedExam}
+                  </strong>{' '}
+                  ·{' '}
+                  <strong className="text-slate-800">
+                    {exportClass === 'all' || !exportClass
+                      ? 'All 8 Classes'
+                      : getClassGradeLabel(exportClass)}
+                  </strong>{' '}
+                  ·{' '}
+                  <strong className="text-slate-800">
+                    {exportSubjectScope === 'consolidated'
+                      ? 'Consolidated Sheet'
+                      : exportSubjectScope === 'all_consolidated' || !exportSubjectScope
+                      ? `All ${
+                          getEffectiveExamConfigForClass(
+                            examConfigs[exportExam || selectedExam] || baseExamConfig,
+                            exportClass || 'Diamond'
+                          ).subjects.length
+                        } Subjects`
+                      : exportSubjectScope}
+                  </strong>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={handleCustomMatrixExport}
+                  className="w-full sm:w-auto inline-flex items-center justify-center gap-2 px-5 py-2.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors cursor-pointer whitespace-nowrap"
+                >
+                  <Download className="w-4 h-4" />
+                  <span>Download Excel File (.xlsx)</span>
+                </button>
+              </div>
+            </div>
+
+            <ReferenceSheetPreviewCard
+              students={exportStudentsList}
+              examConfig={examConfigs[exportExam || selectedExam] || baseExamConfig}
+              examId={exportExam || selectedExam}
+              classScope={exportClass || 'Diamond'}
+              subjectScope={exportSubjectScope || 'all_consolidated'}
+              onSubjectScopeChange={(val) => setExportSubjectScope(val)}
+            />
+          </div>
+        )}
+
+        {/* ========================================================
+            VIEW 5: ADMIN CONFIGURATION PANEL (SETTINGS)
            ======================================================== */}
         {activeTab === 'admin' && (
           <AdminConfigPanel
@@ -6489,7 +7369,7 @@ export default function SchoolErpPage() {
                   icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
                   value={uploadTargetSubject}
                   onChange={(val) => setUploadTargetSubject(val)}
-                  options={SVA_SUBJECTS.map((s) => ({
+                  options={activeSubjects.map((s) => ({
                     value: s.name,
                     label: `${s.name} (${s.maxMarks} Marks)`,
                   }))}

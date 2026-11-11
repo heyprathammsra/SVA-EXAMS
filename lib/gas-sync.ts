@@ -164,10 +164,16 @@ function doPost(e) {
     // Open or create the separate tab specifically for this exam (e.g. SA-1, PT-1)
     var sheet = getTargetSheet(examName);
     var isPt = String(examName).toUpperCase().indexOf("PT") === 0;
-    var maxPerSubject = isPt ? 20 : 100;
-    var totalMax = 7 * maxPerSubject;
+    var maxPerSubject = isPt ? 25 : 100;
+    var subjectCount = isPt ? 6 : 7;
+    var totalMax = subjectCount * maxPerSubject;
 
-    var headers = [
+    var headers = isPt ? [
+      "Roll No", "Student Name", "Section",
+      "English (" + maxPerSubject + ")", "Hindi (" + maxPerSubject + ")", "Marathi (" + maxPerSubject + ")",
+      "Maths (" + maxPerSubject + ")", "Science (" + maxPerSubject + ")", "Social Science (" + maxPerSubject + ")",
+      "Total (" + totalMax + ")", "Percentage", "Grade"
+    ] : [
       "Roll No", "Student Name", "Section",
       "English (" + maxPerSubject + ")", "Hindi (" + maxPerSubject + ")", "Marathi (" + maxPerSubject + ")",
       "Maths (" + maxPerSubject + ")", "Science (" + maxPerSubject + ")", "Social Science (" + maxPerSubject + ")",
@@ -187,38 +193,58 @@ function doPost(e) {
       var soc = m["Social Science"] !== undefined && m["Social Science"] !== null ? m["Social Science"] : "";
       var comp = m["Computer Science"] !== undefined && m["Computer Science"] !== null ? m["Computer Science"] : "";
 
-      var scores = [eng, hin, mar, mat, sci, soc, comp].filter(function(v) { return typeof v === "number"; });
+      var rawSubjectScores = isPt ? [eng, hin, mar, mat, sci, soc] : [eng, hin, mar, mat, sci, soc, comp];
+      var scores = rawSubjectScores.filter(function(v) { return typeof v === "number"; });
       var total = scores.length > 0 ? scores.reduce(function(a, b) { return a + b; }, 0) : "";
       var pct = scores.length > 0 ? (total / totalMax) * 100 : 0;
       var pctStr = scores.length > 0 ? pct.toFixed(2) + "%" : "";
 
       var grade = "-";
       if (scores.length > 0) {
-        if (pct >= 91) grade = "A1";
-        else if (pct >= 81) grade = "A2";
-        else if (pct >= 71) grade = "B1";
-        else if (pct >= 61) grade = "B2";
-        else if (pct >= 51) grade = "C1";
-        else if (pct >= 41) grade = "C2";
-        else if (pct >= 33) grade = "D";
-        else grade = "E";
+        var roundedPct = Math.round(pct);
+        if (roundedPct >= 91) grade = "A1";
+        else if (roundedPct >= 81) grade = "A2";
+        else if (roundedPct >= 71) grade = "B1";
+        else if (roundedPct >= 61) grade = "B2";
+        else if (roundedPct >= 51) grade = "C1";
+        else if (roundedPct >= 41) grade = "C2";
+        else if (roundedPct >= 32) grade = "D";
+        else if (roundedPct >= 20) grade = "E1";
+        else grade = "E2";
       }
 
-      rows.push([
-        s.rollNo || (i + 1),
-        s.name || "",
-        s.section || "Sparkle",
-        eng,
-        hin,
-        mar,
-        mat,
-        sci,
-        soc,
-        comp,
-        total,
-        pctStr,
-        grade
-      ]);
+      if (isPt) {
+        rows.push([
+          s.rollNo || (i + 1),
+          s.name || "",
+          s.section || "Sparkle",
+          eng,
+          hin,
+          mar,
+          mat,
+          sci,
+          soc,
+          total,
+          pctStr,
+          grade
+        ]);
+      } else {
+        rows.push([
+          s.rollNo || (i + 1),
+          s.name || "",
+          s.section || "Sparkle",
+          eng,
+          hin,
+          mar,
+          mat,
+          sci,
+          soc,
+          comp,
+          total,
+          pctStr,
+          grade
+        ]);
+      }
     }
 
     sheet.clearContents();
@@ -258,14 +284,15 @@ function doPost(e) {
                        (typeof project === "number" ? project : 0) +
                        (typeof saExam === "number" ? saExam : 0);
 
-          var hGrade = "E";
+          var hGrade = "E2";
           if (hTotal >= 91) hGrade = "A1";
           else if (hTotal >= 81) hGrade = "A2";
           else if (hTotal >= 71) hGrade = "B1";
           else if (hTotal >= 61) hGrade = "B2";
           else if (hTotal >= 51) hGrade = "C1";
           else if (hTotal >= 41) hGrade = "C2";
-          else if (hTotal >= 33) hGrade = "D";
+          else if (hTotal >= 32) hGrade = "D";
+          else if (hTotal >= 20) hGrade = "E1";
 
           hindiRows.push([
             st.rollNo || (j + 1),

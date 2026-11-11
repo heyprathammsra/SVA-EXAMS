@@ -193,7 +193,7 @@ function evaluateRPN(rpn: string[]): number {
  * Assign Grade from Percentage using Grade Configuration
  */
 export function assignGrade(percentage: number, gradeConfig: GradeConfig): string {
-  if (isNaN(percentage) || percentage === null) return 'E';
+  if (isNaN(percentage) || percentage === null) return 'E2';
 
   for (const cat of gradeConfig.categories) {
     if (percentage >= cat.minPercent && percentage <= cat.maxPercent) {
@@ -201,7 +201,7 @@ export function assignGrade(percentage: number, gradeConfig: GradeConfig): strin
     }
   }
 
-  return 'E';
+  return 'E2';
 }
 
 /**
@@ -239,7 +239,7 @@ export function calculateStudentResult(
     const isBlank = rawVal === undefined || rawVal === null;
     let numericObtained: number | 'AB' | null = null;
     let subjPercent: number | null = null;
-    let subjGrade = 'E';
+    let subjGrade = 'E2';
     let status: 'PASS' | 'FAIL' | 'ABSENT' | 'INCOMPLETE' = 'PASS';
 
     if (isAbsent) {

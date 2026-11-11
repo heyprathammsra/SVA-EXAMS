@@ -46,5 +46,7 @@ test('Grade assignment maps percentage to correct grade category', () => {
   assert.equal(assignGrade(55, DEFAULT_GRADE_CONFIG), 'C1');
   assert.equal(assignGrade(45, DEFAULT_GRADE_CONFIG), 'C2');
   assert.equal(assignGrade(35, DEFAULT_GRADE_CONFIG), 'D');
-  assert.equal(assignGrade(20, DEFAULT_GRADE_CONFIG), 'E');
+  assert.equal(assignGrade(32, DEFAULT_GRADE_CONFIG), 'D');
+  assert.equal(assignGrade(25, DEFAULT_GRADE_CONFIG), 'E1');
+  assert.equal(assignGrade(15, DEFAULT_GRADE_CONFIG), 'E2');
 });
