@@ -3562,7 +3562,7 @@ export default function SchoolErpPage() {
               priority
             />
             <span className="text-sm sm:text-base font-semibold text-slate-900 tracking-tight whitespace-nowrap">
-              <span className="text-pink-600 font-bold">Saraswati</span> Vidya Academy
+              Saraswati Vidya Academy
             </span>
           </div>
 
