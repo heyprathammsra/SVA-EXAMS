@@ -13,6 +13,7 @@ import {
   StudentReportRow,
   getEffectiveExamConfigForClass,
   evaluateCustomFormula,
+  computeStudentResult,
   getClassGradeFromSection,
 } from '@/lib/report-card-types';
 
@@ -106,8 +107,7 @@ export default function TotalCalculationFormulaCard({
     [baseExamConfig, activeClassScope]
   );
 
-  const currentTotalFormula: TotalFormulaType =
-    currentConfig.totalFormula === 'CUSTOM' ? 'CUSTOM' : 'SUM';
+  const currentTotalFormula: TotalFormulaType = currentConfig.totalFormula || 'SUM';
   const currentCustomFormula = currentConfig.customFormula || 'SUM_MAIN + SUM_INTERNAL';
 
   const activePreset = useMemo(
@@ -137,36 +137,63 @@ export default function TotalCalculationFormulaCard({
 
   const previewEvaluation = useMemo(() => {
     if (!currentConfig.subjects || currentConfig.subjects.length === 0) return null;
-    const formulaToTest =
-      currentTotalFormula === 'CUSTOM' ? currentCustomFormula : currentTotalFormula;
     if (sampleStudent) {
-      return evaluateCustomFormula(
-        formulaToTest,
-        sampleStudent.marks,
-        currentConfig.subjects,
-        sampleStudent.breakdowns
+      const effectiveSubjects =
+        activeClassScope === 'ALL'
+          ? getEffectiveExamConfigForClass(baseExamConfig, sampleStudent.section).subjects
+          : currentConfig.subjects;
+      const res = computeStudentResult(
+        sampleStudent,
+        effectiveSubjects,
+        currentTotalFormula,
+        currentCustomFormula,
+        currentConfig.resultCriteria
       );
+      return { obtained: res.totalObtained, max: res.totalMax };
     }
     const sampleMarks: Record<string, number> = {};
     currentConfig.subjects.forEach((s) => {
       sampleMarks[s.name] = Math.round(s.maxMarks * 0.82);
     });
+    const formulaToTest =
+      currentTotalFormula === 'CUSTOM' ? currentCustomFormula : currentTotalFormula;
     return evaluateCustomFormula(formulaToTest, sampleMarks, currentConfig.subjects);
-  }, [currentTotalFormula, currentCustomFormula, sampleStudent, currentConfig.subjects]);
+  }, [
+    currentTotalFormula,
+    currentCustomFormula,
+    sampleStudent,
+    currentConfig.subjects,
+    currentConfig.resultCriteria,
+    activeClassScope,
+    baseExamConfig,
+  ]);
 
   const updateFormulaConfig = (
     formulaType: TotalFormulaType,
     customStr?: string,
     toastLabel?: string
   ) => {
+    const resolvedCustom = customStr ?? baseExamConfig.customFormula ?? 'SUM_MAIN + SUM_INTERNAL';
     if (activeClassScope === 'ALL') {
+      let syncedOverrides = baseExamConfig.classOverrides;
+      if (syncedOverrides && Object.keys(syncedOverrides).length > 0) {
+        const nextOverrides: NonNullable<ExamConfig['classOverrides']> = {};
+        Object.entries(syncedOverrides).forEach(([clsKey, ov]) => {
+          nextOverrides[clsKey] = {
+            ...ov,
+            totalFormula: formulaType,
+            customFormula: resolvedCustom,
+          };
+        });
+        syncedOverrides = nextOverrides;
+      }
       onUpdateExamConfig(
         baseExamConfig.id,
         {
           ...baseExamConfig,
           totalFormula: formulaType,
-          customFormula: customStr ?? baseExamConfig.customFormula ?? 'SUM_MAIN + SUM_INTERNAL',
-          classOverrides: baseExamConfig.classOverrides,
+          customFormula: resolvedCustom,
+          classOverrides: syncedOverrides,
         },
         'ALL'
       );

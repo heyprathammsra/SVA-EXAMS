@@ -9,6 +9,9 @@ import {
   getDefaultSubjectComponents,
   generateDefaultBreakdown,
   getEffectiveExamConfigForClass,
+  computeStudentResult,
+  computeSubjectTotalFromBreakdown,
+  syncBreakdownWithTotal,
 } from '@/lib/report-card-types';
 
 /**
@@ -260,13 +263,41 @@ export function getStudentComponentMark(
     return 0;
   }
 
-  const bd: SubjectBreakdown =
-    student.breakdowns?.[subjectName] ||
-    generateDefaultBreakdown(
-      typeof totalMark === 'number' ? totalMark : null,
+  const rawBd = student.breakdowns?.[subjectName];
+  let bd: SubjectBreakdown;
+  if (rawBd) {
+    const bdTotal = computeSubjectTotalFromBreakdown(
       subjectName,
-      student.section
+      student.section,
+      rawBd,
+      allComps
     );
+    if (typeof totalMark === 'number' && bdTotal !== null && bdTotal !== totalMark) {
+      bd =
+        syncBreakdownWithTotal(
+          totalMark,
+          subjectName,
+          student.section,
+          allComps,
+          rawBd
+        ) || rawBd;
+    } else {
+      bd = rawBd;
+    }
+  } else {
+    bd =
+      syncBreakdownWithTotal(
+        typeof totalMark === 'number' ? totalMark : null,
+        subjectName,
+        student.section,
+        allComps
+      ) ||
+      generateDefaultBreakdown(
+        typeof totalMark === 'number' ? totalMark : null,
+        subjectName,
+        student.section
+      );
+  }
 
   const directVal = bd[comp.key];
   if (directVal !== undefined && directVal !== null) {
@@ -841,7 +872,18 @@ export function buildConsolidatedWorksheet(
   });
 
   const overallStart = curCol;
-  const grandMaxMarks = subjects.reduce((sum, s) => sum + (s.maxMarks || (isPtExam ? 20 : 100)), 0);
+  const sampleFormulaResult = students[0]
+    ? computeStudentResult(
+        students[0],
+        subjects,
+        examConfig.totalFormula,
+        examConfig.customFormula,
+        examConfig.resultCriteria
+      )
+    : null;
+  const grandMaxMarks =
+    sampleFormulaResult?.totalMax ||
+    subjects.reduce((sum, s) => sum + (s.maxMarks || (isPtExam ? 20 : 100)), 0);
 
   const grandTotalIdx = curCol++;
   colDefs.push({
@@ -959,8 +1001,15 @@ export function buildConsolidatedWorksheet(
   const ws = XLSX.utils.aoa_to_sheet(aoa);
   ws['!merges'] = merges;
 
-  sortedStudents.forEach((_student, idx) => {
+  sortedStudents.forEach((student, idx) => {
     const r = idx + 6; // Row 6 is student 1
+    const studentFormulaRes = computeStudentResult(
+      student,
+      subjects,
+      examConfig.totalFormula,
+      examConfig.customFormula,
+      examConfig.resultCriteria
+    );
 
     let subCompStartLetter = '';
     let subCompEndLetter = '';
@@ -1004,9 +1053,7 @@ export function buildConsolidatedWorksheet(
 
     const grandTotalRef = `${XLSX.utils.encode_col(grandTotalIdx)}${r}`;
     const subjectTotalRefs = subjectTotalCellColLetters.map((l) => `${l}${r}`);
-    const grandTotalVal = subjectTotalCellColLetters.reduce((sum, l) => {
-      return sum + (Number(ws[`${l}${r}`]?.v) || 0);
-    }, 0);
+    const grandTotalVal = studentFormulaRes.totalObtained;
 
     ws[grandTotalRef] = {
       t: 'n',
@@ -1015,7 +1062,7 @@ export function buildConsolidatedWorksheet(
     };
 
     const percentageRef = `${XLSX.utils.encode_col(percentageIdx)}${r}`;
-    const pctVal = Math.round(((grandTotalVal / grandMaxMarks) * 100) * 100) / 100;
+    const pctVal = studentFormulaRes.percentage;
     const divider = grandMaxMarks === 700 ? '7' : `${grandMaxMarks / 100}`;
     ws[percentageRef] = {
       t: 'n',
@@ -1026,7 +1073,7 @@ export function buildConsolidatedWorksheet(
     const overallGradeRef = `${XLSX.utils.encode_col(overallGradeIdx)}${r}`;
     ws[overallGradeRef] = {
       t: 's',
-      v: computeCbseGrade(pctVal),
+      v: studentFormulaRes.grade,
       f: getCbseGradeFormula(percentageRef),
     };
   });
@@ -1078,7 +1125,17 @@ export function buildResultAnalysisWorksheet(
     return rA - rB;
   });
 
-  const grandMaxMarks = subjects.reduce((sum, s) => sum + (s.maxMarks || 100), 0);
+  const sampleRes = sortedStudents[0]
+    ? computeStudentResult(
+        sortedStudents[0],
+        subjects,
+        examConfig.totalFormula,
+        examConfig.customFormula,
+        examConfig.resultCriteria
+      )
+    : null;
+  const grandMaxMarks =
+    sampleRes?.totalMax || subjects.reduce((sum, s) => sum + (s.maxMarks || 100), 0);
   const totalCols = headers.length;
   const firstSubColLetter = 'C';
   const lastSubColLetter = XLSX.utils.encode_col(1 + subjects.length);
@@ -1087,12 +1144,19 @@ export function buildResultAnalysisWorksheet(
 
   sortedStudents.forEach((student, idx) => {
     const numericRoll = parseInt(String(student.rollNo), 10) || idx + 1;
+    const studentRes = computeStudentResult(
+      student,
+      subjects,
+      examConfig.totalFormula,
+      examConfig.customFormula,
+      examConfig.resultCriteria
+    );
     const subMarks = subjects.map((s) => {
       const m = student.marks[s.name];
       return typeof m === 'number' ? m : 0;
     });
-    const sumMarks = subMarks.reduce((a, b) => a + b, 0);
-    const pct = Math.round(((sumMarks / grandMaxMarks) * 100) * 100) / 100;
+    const sumMarks = studentRes.totalObtained;
+    const pct = studentRes.percentage;
 
     aoa.push([numericRoll, student.name, ...subMarks, sumMarks, pct]);
   });

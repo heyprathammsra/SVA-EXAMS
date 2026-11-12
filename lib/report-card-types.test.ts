@@ -411,4 +411,165 @@ test('syncBreakdownWithTotal and mergePulledStudentsWithRoster keep marks and br
   assert.equal(computed.totalObtained, 96 + 88 + 91 + 99 + 94 + 90 + 98);
 });
 
+test('PT exam configured to 20m sets Computer Science to 20m for Class 9 (Total 140) and scales 100m pulled sheet marks into <= 20', () => {
+  const pt2Config20m = {
+    id: 'PT-2',
+    name: 'PT-2 (Periodic Test 2)',
+    code: 'PT-2',
+    totalFormula: 'SUM' as const,
+    subjects: PT_EXAM_SUBJECT_NAMES.map((name) => ({
+      name,
+      maxMarks: 20,
+      passMarks: 7,
+      components: [{ key: 'writtenExam', label: 'PT-2 Main Exam', maxMarks: 20, isMainExam: true }],
+    })),
+  };
+
+  // 1. Effective config for 9 Diamond has 7 subjects all with maxMarks = 20, passMarks = 7
+  const diamondCfg = getEffectiveExamConfigForClass(pt2Config20m, 'Diamond');
+  assert.equal(diamondCfg.subjects.length, 7);
+  diamondCfg.subjects.forEach((sub) => {
+    assert.equal(sub.maxMarks, 20, `${sub.name} should have maxMarks 20`);
+    assert.equal(sub.passMarks, 7, `${sub.name} should have passMarks 7`);
+  });
+
+  // 2. Merging 100-mark sheet scores (86, 96, 98, 96, 88, 89, 92) into PT-2 (20m) scales them to <= 20
+  const roster: StudentReportRow[] = [
+    {
+      id: 'STU-2026-0246',
+      rollNo: '01',
+      name: 'Anjali Sandip Chavan',
+      admissionNo: 'ADM-246',
+      class: 'Class 9',
+      section: 'Diamond',
+      marks: {
+        English: 17,
+        Hindi: 12,
+        Marathi: 20,
+        Maths: 19,
+        Science: 18,
+        'Social Science': 18,
+        'Computer Science': 18,
+      },
+    },
+  ];
+
+  const pulled100m = [
+    {
+      id: 'STU-2026-0246',
+      rollNo: '01',
+      name: 'Anjali Sandip Chavan',
+      section: 'Diamond',
+      marks: {
+        English: 86,
+        Hindi: 96,
+        Marathi: 98,
+        Maths: 96,
+        Science: 88,
+        'Social Science': 89,
+        'Computer Science': 92,
+      },
+    },
+  ];
+
+  const merged = mergePulledStudentsWithRoster(roster, pulled100m, pt2Config20m);
+  assert.equal(merged[0].marks.English, 17);
+  assert.equal(merged[0].marks.Hindi, 19);
+  assert.equal(merged[0].marks.Marathi, 20);
+  assert.equal(merged[0].marks.Maths, 19);
+  assert.equal(merged[0].marks.Science, 18);
+  assert.equal(merged[0].marks['Social Science'], 18);
+  assert.equal(merged[0].marks['Computer Science'], 18);
+
+  // 3. computeClassResults for 9 Diamond in PT-2 (20m) yields totalMax = 140 and percentage <= 100%
+  const classResults = computeClassResults(
+    merged,
+    pt2Config20m.subjects,
+    'SUM',
+    undefined,
+    undefined,
+    undefined,
+    'PT-2'
+  );
+  assert.equal(classResults[0].totalMax, 140);
+  assert.equal(classResults[0].totalObtained, 17 + 19 + 20 + 19 + 18 + 18 + 18);
+  assert.ok(classResults[0].percentage <= 100);
+});
+
+test('all formula presets (SUM, BEST_5, BEST(5), BEST(6), SUM_MAIN, excluded subject) stay 100% synchronized across computeStudentResult and evaluateCustomFormula', () => {
+  const subjects7: SubjectConfig[] = [
+    'English',
+    'Hindi',
+    'Marathi',
+    'Maths',
+    'Science',
+    'Social Science',
+    'Computer Science',
+  ].map((name) => ({
+    name,
+    maxMarks: 100,
+    passMarks: 33,
+    components: getDefaultSubjectComponents(name, 'SA-1'),
+  }));
+
+  const student: StudentReportRow = {
+    id: 'STU-SYNC-1',
+    rollNo: '01',
+    name: 'Anjali Sandip Chavan',
+    admissionNo: 'ADM-246',
+    class: 'Class 9',
+    section: 'Diamond',
+    marks: {
+      English: 86,
+      Hindi: 96,
+      Marathi: 98,
+      Maths: 96,
+      Science: 88,
+      'Social Science': 89,
+      'Computer Science': 92,
+    },
+  };
+
+  // 1. All 7 subjects (SUM) -> 645 / 700
+  const resSum = computeStudentResult(student, subjects7, 'SUM');
+  assert.equal(resSum.totalObtained, 645);
+  assert.equal(resSum.totalMax, 700);
+  assert.equal(resSum.grade, 'A1');
+
+  // 2. Best 5 subjects via BEST_5 or CUSTOM BEST(5) -> top 5 are 98, 96, 96, 92, 89 = 471 / 500
+  const resBest5Enum = computeStudentResult(student, subjects7, 'BEST_5');
+  const resBest5Custom = computeStudentResult(student, subjects7, 'CUSTOM', 'BEST(5)');
+  assert.equal(resBest5Enum.totalObtained, 471);
+  assert.equal(resBest5Enum.totalMax, 500);
+  assert.equal(resBest5Custom.totalObtained, 471);
+  assert.equal(resBest5Custom.totalMax, 500);
+  assert.equal(resBest5Enum.percentage, resBest5Custom.percentage);
+
+  // 3. Best 6 subjects via CUSTOM BEST(6) -> top 6 are 98, 96, 96, 92, 89, 88 = 559 / 600
+  const resBest6 = computeStudentResult(student, subjects7, 'CUSTOM', 'BEST(6)');
+  assert.equal(resBest6.totalObtained, 559);
+  assert.equal(resBest6.totalMax, 600);
+
+  // 4. Written Exam Only (SUM_MAIN) works even when student.breakdowns was initially undefined
+  const resWrittenOnly = computeStudentResult(student, subjects7, 'CUSTOM', 'SUM_MAIN');
+  const resInternalOnly = computeStudentResult(student, subjects7, 'CUSTOM', 'SUM_INTERNAL');
+  assert.ok(resWrittenOnly.totalObtained > 0);
+  assert.ok(resInternalOnly.totalObtained > 0);
+  // Written + Internal equals full 645 / 700
+  assert.equal(resWrittenOnly.totalObtained + resInternalOnly.totalObtained, 645);
+  assert.equal(resWrittenOnly.totalMax + resInternalOnly.totalMax, 700);
+
+  // 5. Excluding Computer Science via bracket formula [English] + [Hindi] + [Marathi] + [Maths] + [Science] + [Social Science]
+  const res6Sub = computeStudentResult(
+    student,
+    subjects7,
+    'CUSTOM',
+    '[English] + [Hindi] + [Marathi] + [Maths] + [Science] + [Social Science]'
+  );
+  assert.equal(res6Sub.totalObtained, 645 - 92);
+  assert.equal(res6Sub.totalMax, 600);
+});
+
+
+
 

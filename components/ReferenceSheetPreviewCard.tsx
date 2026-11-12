@@ -4,6 +4,8 @@ import React, { useMemo } from 'react';
 import {
   ExamConfig,
   StudentReportRow,
+  ComputedStudentResult,
+  computeStudentResult,
   getEffectiveExamConfigForClass,
 } from '@/lib/report-card-types';
 import {
@@ -100,6 +102,27 @@ export default function ReferenceSheetPreviewCard({
     return orderSubjectsForConsolidated(effectiveConfig.subjects);
   }, [effectiveConfig.subjects]);
 
+  const studentResultsMap = useMemo(() => {
+    const map = new Map<string, ComputedStudentResult>();
+    filteredStudents.forEach((student) => {
+      const res = computeStudentResult(
+        student,
+        effectiveConfig.subjects,
+        effectiveConfig.totalFormula,
+        effectiveConfig.customFormula,
+        effectiveConfig.resultCriteria
+      );
+      map.set(student.id, res);
+    });
+    return map;
+  }, [
+    filteredStudents,
+    effectiveConfig.subjects,
+    effectiveConfig.totalFormula,
+    effectiveConfig.customFormula,
+    effectiveConfig.resultCriteria,
+  ]);
+
   const consolidatedStructure = useMemo(() => {
     if (!isConsolidated) return null;
     const examCode = effectiveConfig.code || examId;
@@ -118,16 +141,29 @@ export default function ReferenceSheetPreviewCard({
       };
     });
     const totalCols = 2 + subjectSections.reduce((sum, sec) => sum + sec.colSpan, 0) + 3; // GRAND TOTAL, PERCENTAGE, GRADE
-    const grandMaxMarks = subjectSections.reduce(
-      (sum, sec) => sum + (sec.subject.maxMarks || (isPtExam ? 25 : 100)),
-      0
-    );
+    const firstStudentRes = filteredStudents[0]
+      ? studentResultsMap.get(filteredStudents[0].id)
+      : undefined;
+    const grandMaxMarks =
+      firstStudentRes?.totalMax ||
+      subjectSections.reduce(
+        (sum, sec) => sum + (sec.subject.maxMarks || (isPtExam ? 25 : 100)),
+        0
+      );
     return {
       totalCols,
       grandMaxMarks: grandMaxMarks || 700,
       subjectSections,
     };
-  }, [isConsolidated, consolidatedSubjects, filteredStudents, effectiveConfig.code, examId, isPtExam]);
+  }, [
+    isConsolidated,
+    consolidatedSubjects,
+    filteredStudents,
+    effectiveConfig.code,
+    examId,
+    isPtExam,
+    studentResultsMap,
+  ]);
 
   if (!currentSubject) return null;
 
@@ -297,6 +333,7 @@ export default function ReferenceSheetPreviewCard({
             <tbody>
               {filteredStudents.map((student, idx) => {
                 const rollNum = parseInt(String(student.rollNo), 10) || idx + 1;
+                const studentResult = studentResultsMap.get(student.id);
                 let grandTotal = 0;
 
                 return (
@@ -365,13 +402,20 @@ export default function ReferenceSheetPreviewCard({
                     })}
                     {/* Overall Performance */}
                     <td className="border border-slate-900 px-2 py-1.5 text-center font-bold bg-emerald-50/40 text-emerald-950">
-                      {grandTotal}
+                      {studentResult ? studentResult.totalObtained : grandTotal}
                     </td>
                     <td className="border border-slate-900 px-2 py-1.5 text-center font-bold bg-emerald-50/40 text-emerald-950">
-                      {((grandTotal / consolidatedStructure.grandMaxMarks) * 100).toFixed(2)}%
+                      {studentResult
+                        ? studentResult.percentage.toFixed(2)
+                        : ((grandTotal / consolidatedStructure.grandMaxMarks) * 100).toFixed(2)}
+                      %
                     </td>
                     <td className="border border-slate-900 px-2 py-1.5 text-center font-bold bg-emerald-50/40 text-emerald-950">
-                      {computeCbseGrade((grandTotal / consolidatedStructure.grandMaxMarks) * 100)}
+                      {studentResult
+                        ? studentResult.grade
+                        : computeCbseGrade(
+                            (grandTotal / consolidatedStructure.grandMaxMarks) * 100
+                          )}
                     </td>
                   </tr>
                 );

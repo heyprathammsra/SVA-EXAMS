@@ -335,14 +335,18 @@ export function hasCsInPtExam(sectionOrClass?: string): boolean {
   );
 }
 
-export function getPtSubjectsForClass(sectionOrClass?: string): SubjectConfig[] {
+export function getPtSubjectsForClass(
+  sectionOrClass?: string,
+  maxMarks: number = 25,
+  passMarks: number = Math.round(maxMarks * 0.33)
+): SubjectConfig[] {
   const names = hasCsInPtExam(sectionOrClass)
     ? PT_EXAM_CLASS9_SUBJECT_NAMES
     : PT_EXAM_SUBJECT_NAMES;
   return names.map((name) => ({
     name,
-    maxMarks: 25,
-    passMarks: 8,
+    maxMarks,
+    passMarks,
   }));
 }
 
@@ -370,9 +374,21 @@ export function getEffectiveExamConfigForClass(
         return lower === 'computer science' || lower === 'cs';
       });
       if (!hasCs) {
+        const refSub = resolvedSubjects[0];
+        const csMax = refSub?.maxMarks || 25;
+        const csPass = refSub?.passMarks ?? Math.round(csMax * 0.33);
         resolvedSubjects = [
           ...resolvedSubjects,
-          { name: 'Computer Science', maxMarks: 25, passMarks: 8 },
+          {
+            name: 'Computer Science',
+            maxMarks: csMax,
+            passMarks: csPass,
+            includedInTotal: true,
+            components:
+              refSub?.components && refSub.components.length === 1
+                ? [{ ...refSub.components[0], maxMarks: csMax }]
+                : undefined,
+          },
         ];
       }
     } else {
@@ -486,10 +502,10 @@ export function evaluateCustomFormula(
 
   const trimmedUpper = expr.toUpperCase();
 
-  // Helper macro: BEST(N)
-  const bestMatch = trimmedUpper.match(/^BEST\((\d+)\)$/i);
+  // Helper macro: BEST(N) or BEST_N
+  const bestMatch = trimmedUpper.match(/^BEST(?:\((\d+)\)|_(\d+))$/i);
   if (bestMatch) {
-    const n = parseInt(bestMatch[1], 10) || 5;
+    const n = parseInt(bestMatch[1] || bestMatch[2], 10) || 5;
     const sorted = [...eligible].sort((a, b) => {
       const scoreA = typeof subjectMarks[a.name] === 'number' && a.maxMarks > 0 ? (subjectMarks[a.name] as number) / a.maxMarks : -1;
       const scoreB = typeof subjectMarks[b.name] === 'number' && b.maxMarks > 0 ? (subjectMarks[b.name] as number) / b.maxMarks : -1;
@@ -536,13 +552,13 @@ export function evaluateCustomFormula(
       const totObt = typeof rawTot === 'number' ? rawTot : 0;
       const totMax = sub.maxMarks || 100;
 
-      const bd = breakdowns?.[sub.name];
+      const rawBd = breakdowns?.[sub.name];
       const hasHindiSpecialBd =
-        bd &&
-        (bd.listening !== undefined ||
-          bd.speaking !== undefined ||
-          bd.project !== undefined ||
-          bd.saExam !== undefined);
+        rawBd &&
+        (rawBd.listening !== undefined ||
+          rawBd.speaking !== undefined ||
+          rawBd.project !== undefined ||
+          rawBd.saExam !== undefined);
 
       let comps: InternalComponentConfig[];
       if (sub.components && sub.components.length > 0) {
@@ -550,7 +566,7 @@ export function evaluateCustomFormula(
       } else if (sub.maxMarks === 100) {
         if (sub.name.toLowerCase() === 'hindi' && hasHindiSpecialBd) {
           comps = getDefaultSubjectComponents('Hindi', 'SA-1');
-        } else if (sub.name.toLowerCase() === 'computer science' && bd?.internalMarks !== undefined) {
+        } else if (sub.name.toLowerCase() === 'computer science' && rawBd?.internalMarks !== undefined) {
           comps = getDefaultSubjectComponents('Computer Science', 'SA-1');
         } else {
           comps = [
@@ -566,6 +582,12 @@ export function evaluateCustomFormula(
           { key: 'writtenExam', label: 'Main Exam', maxMarks: sub.maxMarks || 100, isMainExam: true },
         ];
       }
+
+      const bd =
+        rawBd ||
+        (totObt > 0 && comps.length > 1
+          ? syncBreakdownWithTotal(totObt, sub.name, '', comps)
+          : undefined);
 
       const mainComps = comps.filter((c) => c.isMainExam);
       const intComps = comps.filter((c) => !c.isMainExam);
@@ -709,7 +731,11 @@ export function evaluateCustomFormula(
     });
 
     // 3. Replace Subject specific tokens: [Subject:Component], [Subject:Internal], [Subject:Main], [Subject]
-    subjectScoresList.forEach((scores) => {
+    // Sort by name length descending so "Computer Science" and "Social Science" are replaced before "Science"
+    const sortedByLength = [...subjectScoresList].sort((a, b) => b.name.length - a.name.length);
+
+    // 3a. Replace all bracketed tokens first
+    sortedByLength.forEach((scores) => {
       const escapedSub = scores.name.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
 
       // Individual sub-components: [English:Pen Paper] or [English:penPaper]
@@ -740,8 +766,11 @@ export function evaluateCustomFormula(
       const subBracketRegex = new RegExp(`\\[${escapedSub}\\]`, 'gi');
       exprObt = exprObt.replace(subBracketRegex, String(scores.totalObt));
       exprMx = exprMx.replace(subBracketRegex, String(scores.totalMax));
+    });
 
-      // Bare word: Subject
+    // 3b. Replace bare-word subject names (longest first so "Social Science" matches before "Science")
+    sortedByLength.forEach((scores) => {
+      const escapedSub = scores.name.replace(/[-[\]{}()*+?.,\\^$|#\s]/g, '\\$&');
       const subWordRegex = new RegExp(`\\b${escapedSub}\\b`, 'gi');
       exprObt = exprObt.replace(subWordRegex, String(scores.totalObt));
       exprMx = exprMx.replace(subWordRegex, String(scores.totalMax));
@@ -863,6 +892,13 @@ export function computeStudentResult(
       }
     }
 
+    const resolvedBreakdown =
+      student.breakdowns?.[sub.name] ||
+      (typeof obtained === 'number' &&
+      (sub.maxMarks === 100 || (sub.components && sub.components.length > 1))
+        ? syncBreakdownWithTotal(obtained, sub.name, student.section, sub.components)
+        : undefined);
+
     return {
       name: sub.name,
       maxMarks: sub.maxMarks,
@@ -873,7 +909,7 @@ export function computeStudentResult(
       weight: sub.weight ?? 1,
       includedInTotal: sub.includedInTotal !== false,
       appliedGraceMarks,
-      breakdown: student.breakdowns?.[sub.name],
+      breakdown: resolvedBreakdown,
       remark: student.subjectRemarks?.[sub.name],
     };
   });
@@ -883,8 +919,22 @@ export function computeStudentResult(
   let totalMax = 0;
   const eligibleSubjects = subjectDetails.filter((s) => s.includedInTotal !== false);
 
+  const reconciledMarks: Record<string, number | 'AB' | null> = { ...student.marks };
+  const reconciledBreakdowns: Record<string, SubjectBreakdown> = { ...(student.breakdowns || {}) };
+  subjectDetails.forEach((d) => {
+    reconciledMarks[d.name] = d.obtained;
+    if (d.breakdown) {
+      reconciledBreakdowns[d.name] = d.breakdown;
+    }
+  });
+
   if (totalFormula === 'CUSTOM') {
-    const res = evaluateCustomFormula(customFormula || '', student.marks, subjects, student.breakdowns);
+    const res = evaluateCustomFormula(
+      customFormula || '',
+      reconciledMarks,
+      subjects,
+      reconciledBreakdowns
+    );
     totalObtained = res.obtained;
     totalMax = res.max;
   } else if (totalFormula === 'BEST_5') {
@@ -966,11 +1016,15 @@ export function computeClassResults(
   totalFormula: TotalFormulaType = 'SUM',
   customFormula?: string,
   resultCriteria?: ResultCriteriaConfig,
-  classOverrides?: Record<string, ClassExamOverride>
+  classOverrides?: Record<string, ClassExamOverride>,
+  examCode?: string
 ): ComputedStudentResult[] {
-  const isPtSubjectSet =
-    subjects.length >= 6 &&
-    subjects.every((sub) => sub.maxMarks === 25);
+  const isPtSubjectSet = examCode
+    ? isPtExam(examCode)
+    : subjects.length >= 6 &&
+      subjects.every(
+        (sub) => (sub.maxMarks || 25) <= 50 && (!sub.components || sub.components.length <= 1)
+      );
 
   const list = students.map((s) => {
     const secOverride = classOverrides?.[s.section];
@@ -989,9 +1043,21 @@ export function computeClassResults(
           return lower === 'computer science' || lower === 'cs';
         });
         if (!hasCs) {
+          const refSub = studentSubjects[0];
+          const csMax = refSub?.maxMarks || 25;
+          const csPass = refSub?.passMarks ?? Math.round(csMax * 0.33);
           studentSubjects = [
             ...studentSubjects,
-            { name: 'Computer Science', maxMarks: 25, passMarks: 8 },
+            {
+              name: 'Computer Science',
+              maxMarks: csMax,
+              passMarks: csPass,
+              includedInTotal: true,
+              components:
+                refSub?.components && refSub.components.length === 1
+                  ? [{ ...refSub.components[0], maxMarks: csMax }]
+                  : undefined,
+            },
           ];
         }
       } else {
@@ -1504,6 +1570,16 @@ export function mergePulledStudentsWithRoster(
     }
   });
 
+  let maxObservedMark = 0;
+  pulledStudents.forEach((p) => {
+    if (p?.marks && typeof p.marks === 'object') {
+      Object.values(p.marks).forEach((v) => {
+        const n = typeof v === 'number' ? v : parseFloat(String(v));
+        if (!isNaN(n) && n > maxObservedMark) maxObservedMark = n;
+      });
+    }
+  });
+
   const matchedPulledSet = new Set<any>();
 
   const parseSheetMark = (v: any): number | 'AB' | null | undefined => {
@@ -1512,6 +1588,21 @@ export function mergePulledStudentsWithRoster(
     if (String(v).trim().toUpperCase() === 'AB') return 'AB';
     const num = typeof v === 'number' ? v : parseFloat(String(v));
     return isNaN(num) ? null : num;
+  };
+
+  const scaleMarkToSubjectMax = (
+    val: number | 'AB' | null | undefined,
+    subMax: number
+  ): number | 'AB' | null | undefined => {
+    if (typeof val !== 'number' || subMax <= 0) return val;
+    if (val > subMax || (subMax < 100 && maxObservedMark > subMax)) {
+      const sourceScale =
+        maxObservedMark > 50 || val > 50 ? 100 : maxObservedMark > 25 || val > 25 ? 50 : 25;
+      if (sourceScale > subMax) {
+        return Math.min(subMax, Math.max(0, Math.round((val / sourceScale) * subMax)));
+      }
+    }
+    return val;
   };
 
   const mergedRoster = currentRoster.map((st) => {
@@ -1555,9 +1646,18 @@ export function mergePulledStudentsWithRoster(
 
     // Reconcile breakdowns with pulled marks so computeStudentResult reflects fresh sheet marks
     effectiveCfg.subjects.forEach((sub) => {
+      const scaledVal = scaleMarkToSubjectMax(nextMarks[sub.name], sub.maxMarks);
+      if (scaledVal !== undefined) {
+        nextMarks[sub.name] = scaledVal;
+      }
       const mVal = nextMarks[sub.name];
       const explicitPulledBd = p.breakdowns?.[sub.name];
-      if (explicitPulledBd && typeof explicitPulledBd === 'object' && Object.keys(explicitPulledBd).length > 0) {
+      if (
+        sub.maxMarks === 100 &&
+        explicitPulledBd &&
+        typeof explicitPulledBd === 'object' &&
+        Object.keys(explicitPulledBd).length > 0
+      ) {
         const fromBd = computeSubjectTotalFromBreakdown(
           sub.name,
           p.section || st.section,
@@ -1638,6 +1738,8 @@ export function mergePulledStudentsWithRoster(
     effectiveCfg.subjects.forEach((sub) => {
       if (marks[sub.name] === undefined) {
         marks[sub.name] = null;
+      } else {
+        marks[sub.name] = scaleMarkToSubjectMax(marks[sub.name], sub.maxMarks) ?? null;
       }
       const synced = syncBreakdownWithTotal(
         marks[sub.name],

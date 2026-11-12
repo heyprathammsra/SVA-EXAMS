@@ -2,17 +2,20 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
-  title: 'Saraswati Vidya Academy Management System',
-  description: 'Streamlined student data management, grade tracking, and report card generation for teachers.',
+  title: 'School ERP - Student Records & Report Cards',
+  description:
+    'Comprehensive School ERP for Student Information, Examinations, Excel Marks Entry, Custom Grade Calculation Engine, and Report Card Generation.',
   openGraph: {
-    title: 'Saraswati Vidya Academy Management System',
-    description: 'Streamlined student data management, grade tracking, and report card generation for teachers.',
+    title: 'School ERP - Student Records & Report Cards',
+    description:
+      'Comprehensive School ERP for Student Information, Examinations, Excel Marks Entry, Custom Grade Calculation Engine, and Report Card Generation.',
     type: 'website',
   },
   twitter: {
     card: 'summary_large_image',
-    title: 'Saraswati Vidya Academy Management System',
-    description: 'Streamlined student data management, grade tracking, and report card generation for teachers.',
+    title: 'School ERP - Student Records & Report Cards',
+    description:
+      'Comprehensive School ERP for Student Information, Examinations, Excel Marks Entry, Custom Grade Calculation Engine, and Report Card Generation.',
   },
 };
 

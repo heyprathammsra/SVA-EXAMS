@@ -1,4 +1,4 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Carlito:wght@400&family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&family=Montserrat:wght@700&display=swap');
 @import "tailwindcss";
 
 @layer base {
@@ -28,16 +28,58 @@
   font-variant-numeric: tabular-nums;
 }
 
-/* Aptos font styling specifically for report cards */
+/* Exact Rockwell Extra Bold font extracted from reference report card PDF */
+@font-face {
+  font-family: 'Rockwell Extra Bold';
+  src: url('/fonts/rockwell-extrabold.ttf') format('truetype'),
+       local('Rockwell Extra Bold'),
+       local('Rockwell-ExtraBold');
+  font-weight: 100 900;
+  font-style: normal;
+  font-display: block;
+}
+
+.font-rockwell-eb {
+  font-family: 'Rockwell Extra Bold', 'Rockwell', Georgia, serif !important;
+  font-weight: 800 !important;
+  font-synthesis: none;
+}
+
+/* Exact Calibri font subset extracted from reference report card PDF header */
+@font-face {
+  font-family: 'Calibri';
+  src: local('Calibri'),
+       url('/fonts/calibri-subset.ttf') format('truetype');
+  font-weight: 400;
+  font-style: normal;
+  font-display: block;
+}
+
+/* Exact Aptos font extracted from reference report card PDF */
 @font-face {
   font-family: 'Aptos';
-  src: local('Aptos'), local('Aptos Display'), local('Calibri'), local('Segoe UI'), system-ui, sans-serif;
-  font-weight: 400 700;
+  src: local('Aptos'),
+       local('Aptos Regular'),
+       local('Aptos Display'),
+       url('/fonts/aptos-subset.ttf') format('truetype');
+  font-weight: 100 900;
   font-style: normal;
+  font-display: block;
 }
 
 .font-aptos {
-  font-family: 'Aptos', 'Calibri', 'Segoe UI', -apple-system, sans-serif !important;
+  font-family: 'Aptos', 'Carlito', 'Calibri', 'Segoe UI', -apple-system, sans-serif !important;
+  font-synthesis: none;
+}
+
+.font-aptos.font-bold,
+.font-aptos .font-bold,
+.font-aptos.font-semibold,
+.font-aptos .font-semibold,
+.font-aptos th,
+.font-aptos strong {
+  font-weight: 400 !important;
+  -webkit-text-stroke: 0.35px currentColor;
 }
 
 /* Print specific styles */

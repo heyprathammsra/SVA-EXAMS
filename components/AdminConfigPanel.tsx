@@ -155,11 +155,23 @@ export default function AdminConfigPanel({
   const handleConfigChange = (updater: (prev: ExamConfig) => ExamConfig) => {
     if (activeClassScope === 'ALL') {
       const updatedBase = updater(baseConfig);
+      const subjectsChanged = updatedBase.subjects !== baseConfig.subjects;
+      let nextOverrides = baseConfig.classOverrides;
+      if (subjectsChanged && nextOverrides) {
+        const cleaned: Record<string, any> = {};
+        Object.entries(nextOverrides).forEach(([k, ov]) => {
+          const { subjects: _ignored, ...rest } = ov || {};
+          if (Object.keys(rest).length > 0) {
+            cleaned[k] = rest;
+          }
+        });
+        nextOverrides = Object.keys(cleaned).length > 0 ? cleaned : undefined;
+      }
       onUpdateExamConfig(
         baseConfig.id,
         {
           ...updatedBase,
-          classOverrides: baseConfig.classOverrides,
+          classOverrides: nextOverrides,
         },
         'ALL'
       );

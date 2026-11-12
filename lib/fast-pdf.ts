@@ -12,6 +12,19 @@ import {
   hasCsInPtExam,
   isPtExam,
 } from './report-card-types';
+import { ROCKWELL_EXTRABOLD_BASE64 } from './rockwell-font';
+
+function ensureRockwellFont(doc: jsPDF) {
+  try {
+    const fontList = doc.getFontList();
+    if (!fontList || !fontList['RockwellExtraBold']) {
+      doc.addFileToVFS('Rockwell-ExtraBold.ttf', ROCKWELL_EXTRABOLD_BASE64);
+      doc.addFont('Rockwell-ExtraBold.ttf', 'RockwellExtraBold', 'normal');
+    }
+  } catch {
+    // Fallback to helvetica if font registration fails
+  }
+}
 
 /**
  * Renders the exact 2-page PT Report Card matching PT_report_card_sample_5cddbf65.pdf
@@ -45,9 +58,14 @@ export function renderPtReportCardPages(
   doc.setTextColor(39, 69, 123);
   doc.text('SVA', 26, 21.8, { align: 'center' });
 
-  // School Name in #27457B
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(22);
+  // School Name in #27457B using exact Rockwell Extra Bold font
+  ensureRockwellFont(doc);
+  try {
+    doc.setFont('RockwellExtraBold', 'normal');
+  } catch {
+    doc.setFont('helvetica', 'bold');
+  }
+  doc.setFontSize(25.3);
   doc.setTextColor(39, 69, 123); // #27457B
   doc.text('Saraswati Vidya Academy', pageWidth / 2 + 4, 18.5, { align: 'center' });
 
@@ -97,45 +115,45 @@ export function renderPtReportCardPages(
   doc.setLineWidth(0.5);
   doc.line(16, 40, pageWidth - 19, 40);
 
-  // REPORT CARD & PERIODIC TEST - X Headings
+  // REPORT CARD & PERIODIC TEST - X Headings (Font Size 12)
   doc.setTextColor(0, 0, 0);
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(11.5);
+  doc.setFontSize(12);
   doc.text('REPORT CARD', pageWidth / 2, 47, { align: 'center' });
 
-  doc.setFontSize(15);
+  doc.setFontSize(12);
   const ptHeading = getPtExamHeading(exam.examCode || exam.examName);
-  doc.text(ptHeading, pageWidth / 2, 54, { align: 'center' });
+  doc.text(ptHeading, pageWidth / 2, 53.5, { align: 'center' });
 
-  const tableMarginX = 21;
-  const tableWidth = pageWidth - tableMarginX * 2; // 168mm
+  const tableMarginX = 18;
+  const tableWidth = pageWidth - tableMarginX * 2; // 174mm
 
-  // Table 1: Student Particulars Box (6 rows, 10-column framed black grid)
+  // Table 1: Student Particulars Box (6 rows, 10-column framed black grid, Font Size 12)
   autoTable(doc, {
-    startY: 57.5,
+    startY: 57,
     margin: { left: tableMarginX, right: tableMarginX },
     tableWidth,
     theme: 'grid',
     styles: {
       font: 'helvetica',
       fontStyle: 'bold',
-      fontSize: 9.5,
+      fontSize: 12,
       textColor: [0, 0, 0],
       lineColor: [0, 0, 0],
       lineWidth: 0.35,
-      cellPadding: { top: 2.1, bottom: 2.1, left: 2.2, right: 2.2 },
+      cellPadding: { top: 2.0, bottom: 2.0, left: 2.0, right: 2.0 },
       valign: 'middle',
     },
     columnStyles: {
-      0: { cellWidth: 19 },
-      1: { cellWidth: 24 },
-      2: { cellWidth: 25 },
-      3: { cellWidth: 5 },
-      4: { cellWidth: 19 },
-      5: { cellWidth: 13 },
+      0: { cellWidth: 23 },
+      1: { cellWidth: 25 },
+      2: { cellWidth: 31 },
+      3: { cellWidth: 7 },
+      4: { cellWidth: 15 },
+      5: { cellWidth: 12 },
       6: { cellWidth: 12 },
-      7: { cellWidth: 10 },
-      8: { cellWidth: 13 },
+      7: { cellWidth: 9 },
+      8: { cellWidth: 12 },
       9: { cellWidth: 28 },
     },
     body: [
@@ -178,9 +196,9 @@ export function renderPtReportCardPages(
   doc.setLineWidth(0.45);
   doc.rect(
     tableMarginX - 0.6,
-    57.5 - 0.6,
+    57 - 0.6,
     tableWidth + 1.2,
-    studentTableEndY - 57.5 + 1.2
+    studentTableEndY - 57 + 1.2
   );
 
   const afterStudentTableY = studentTableEndY + 6.5;
@@ -217,36 +235,37 @@ export function renderPtReportCardPages(
       ];
     });
 
-  // Table 2: Subject Marks Table (6 subjects)
+  // Table 2: Subject Marks Table (Font Size 12)
   autoTable(doc, {
     startY: afterStudentTableY,
     margin: { left: tableMarginX, right: tableMarginX },
     tableWidth,
     theme: 'grid',
-    head: [['SL. NO.', 'NAME OF THE SUBJECT', 'MARKS\nOBTAINED', 'REMARKS']],
+    head: [['SL.\nNO.', 'NAME OF THE SUBJECT', 'MARKS\nOBTAINED', 'REMARKS']],
     body: ptSubjectRows,
     styles: {
       font: 'helvetica',
       fontStyle: 'bold',
-      fontSize: 9.5,
+      fontSize: 12,
       textColor: [0, 0, 0],
       lineColor: [0, 0, 0],
       lineWidth: 0.35,
-      cellPadding: { top: 2.3, bottom: 2.3, left: 2.2, right: 2.2 },
+      cellPadding: { top: 2.0, bottom: 2.0, left: 2.0, right: 2.0 },
       valign: 'middle',
     },
     headStyles: {
       fillColor: [255, 255, 255],
       textColor: [0, 0, 0],
       fontStyle: 'bold',
+      fontSize: 12,
       halign: 'center',
       valign: 'middle',
     },
     columnStyles: {
-      0: { cellWidth: 16, halign: 'center' },
-      1: { cellWidth: 44, halign: 'center' },
-      2: { cellWidth: 25, halign: 'center' },
-      3: { cellWidth: 83, halign: 'left' },
+      0: { cellWidth: 18, halign: 'center' },
+      1: { cellWidth: 48, halign: 'center' },
+      2: { cellWidth: 28, halign: 'center' },
+      3: { cellWidth: 80, halign: 'left' },
     },
   });
   const marksTableEndY = (doc as any).lastAutoTable?.finalY || 165;
@@ -261,7 +280,7 @@ export function renderPtReportCardPages(
 
   const afterMarksTableY = marksTableEndY + 6.5;
 
-  // Table 3: Summary Strip (TOTAL / PERCENTAGE / GRADE)
+  // Table 3: Summary Strip (TOTAL / PERCENTAGE / GRADE, Font Size 12)
   const pctFormatted = formatPtPercentage(result.totalObtained, result.totalMax);
   autoTable(doc, {
     startY: afterMarksTableY,
@@ -271,20 +290,20 @@ export function renderPtReportCardPages(
     styles: {
       font: 'helvetica',
       fontStyle: 'bold',
-      fontSize: 9.5,
+      fontSize: 12,
       textColor: [0, 0, 0],
       lineColor: [0, 0, 0],
       lineWidth: 0.35,
-      cellPadding: { top: 2.1, bottom: 2.1, left: 2.2, right: 2.2 },
+      cellPadding: { top: 2.0, bottom: 2.0, left: 2.0, right: 2.0 },
       valign: 'middle',
     },
     columnStyles: {
       0: { cellWidth: 24, halign: 'left' },
-      1: { cellWidth: 21, halign: 'center' },
-      2: { cellWidth: 32, halign: 'center' },
-      3: { cellWidth: 41, halign: 'center' },
-      4: { cellWidth: 27, halign: 'left' },
-      5: { cellWidth: 23, halign: 'center' },
+      1: { cellWidth: 24, halign: 'center' },
+      2: { cellWidth: 36, halign: 'center' },
+      3: { cellWidth: 40, halign: 'center' },
+      4: { cellWidth: 26, halign: 'left' },
+      5: { cellWidth: 24, halign: 'center' },
     },
     body: [
       [
@@ -309,7 +328,7 @@ export function renderPtReportCardPages(
 
   const afterSummaryY = summaryTableEndY + 6.5;
 
-  // Table 4: Class Teacher's Remarks Box
+  // Table 4: Class Teacher's Remarks Box (Font Size 12)
   const defaultPtRemark =
     'Excellent and consistent performance with strong understanding and commendable effort.';
   const teacherRemarkText =
@@ -325,16 +344,16 @@ export function renderPtReportCardPages(
     styles: {
       font: 'helvetica',
       fontStyle: 'bold',
-      fontSize: 9.5,
+      fontSize: 12,
       textColor: [0, 0, 0],
       lineColor: [0, 0, 0],
       lineWidth: 0.35,
-      cellPadding: { top: 2.1, bottom: 2.1, left: 2.2, right: 2.2 },
+      cellPadding: { top: 2.0, bottom: 2.0, left: 2.0, right: 2.0 },
       valign: 'middle',
     },
     columnStyles: {
-      0: { cellWidth: 57, halign: 'left' },
-      1: { cellWidth: 111, halign: 'left' },
+      0: { cellWidth: 64, halign: 'left' },
+      1: { cellWidth: 110, halign: 'left' },
     },
     body: [['CLASS TEACHER’S REMARKS:', teacherRemarkText]],
   });
@@ -349,11 +368,11 @@ export function renderPtReportCardPages(
   );
 
   // =========================================================================
-  // PAGE 2: GRADING SYSTEM & SIGNATURES
+  // PAGE 2: GRADING SYSTEM & SIGNATURES (Font Size 12)
   // =========================================================================
   doc.addPage();
 
-  const gradingTableWidth = 84;
+  const gradingTableWidth = 92;
   const gradingMarginLeft = (pageWidth - gradingTableWidth) / 2;
 
   autoTable(doc, {
@@ -364,17 +383,17 @@ export function renderPtReportCardPages(
     styles: {
       font: 'helvetica',
       fontStyle: 'bold',
-      fontSize: 9.5,
+      fontSize: 12,
       textColor: [0, 0, 0],
       lineColor: [0, 0, 0],
       lineWidth: 0.35,
-      cellPadding: { top: 1.4, bottom: 1.4, left: 2, right: 2 },
+      cellPadding: { top: 1.5, bottom: 1.5, left: 2, right: 2 },
       halign: 'center',
       valign: 'middle',
     },
     columnStyles: {
-      0: { cellWidth: 49, halign: 'center' },
-      1: { cellWidth: 35, halign: 'center' },
+      0: { cellWidth: 54, halign: 'center' },
+      1: { cellWidth: 38, halign: 'center' },
     },
     body: [
       [{ content: 'Grading System', colSpan: 2 }],
@@ -392,23 +411,23 @@ export function renderPtReportCardPages(
     gradingTableEndY - 18 + 1
   );
 
-  // 3 Signature labels matching Page 2 of PT_report_card_sample_5cddbf65.pdf
-  const sigTopY = 110;
+  // 3 Signature labels evenly spaced across Left, Center, and Right (Font Size 12)
+  const sigTopY = 122;
   doc.setFont('helvetica', 'bold');
-  doc.setFontSize(10);
+  doc.setFontSize(12);
   doc.setTextColor(0, 0, 0);
 
   // Left: Signature of Class Teacher
-  doc.text('Signature of', 30, sigTopY, { align: 'center' });
-  doc.text('Class Teacher', 30, sigTopY + 5, { align: 'center' });
+  doc.text('Signature of', 34, sigTopY, { align: 'center' });
+  doc.text('Class Teacher', 34, sigTopY + 5.5, { align: 'center' });
 
   // Center: Signature of Principal with Seal
   doc.text('Signature of', pageWidth / 2, sigTopY, { align: 'center' });
-  doc.text('Principal with Seal', pageWidth / 2, sigTopY + 5, { align: 'center' });
+  doc.text('Principal with Seal', pageWidth / 2, sigTopY + 5.5, { align: 'center' });
 
   // Right: Signature of Parent / Guardian
-  doc.text('Signature of', pageWidth - 30, sigTopY, { align: 'center' });
-  doc.text('Parent / Guardian', pageWidth - 30, sigTopY + 5, { align: 'center' });
+  doc.text('Signature of', pageWidth - 34, sigTopY, { align: 'center' });
+  doc.text('Parent / Guardian', pageWidth - 34, sigTopY + 5.5, { align: 'center' });
 }
 
 export function renderReportCardPage(
@@ -680,27 +699,28 @@ export function renderReportCardPage(
       : 'Satisfactory effort. Needs focused attention on core subjects.';
   doc.text(student.customRemarks || defaultRemark, 52, remarkY);
 
-  // Signatures
+  // Signatures - Evenly spaced across Left, Center, and Right (Font Size 12)
   const sigY = pageHeight - 28;
   doc.setLineWidth(0.4);
   doc.setDrawColor(100, 116, 139);
-
-  // Teacher
-  doc.line(16, sigY, 56, sigY);
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8);
-  doc.text(exam.classTeacherName || 'Class Teacher', 36, sigY + 4, { align: 'center' });
-
-  // Parent
-  doc.line(pageWidth / 2 - 20, sigY, pageWidth / 2 + 20, sigY);
-  doc.text('Parent / Guardian', pageWidth / 2, sigY + 4, { align: 'center' });
-
-  // Principal
-  doc.line(pageWidth - 56, sigY, pageWidth - 16, sigY);
   doc.setFont('helvetica', 'bold');
-  doc.text(exam.principalName, pageWidth - 36, sigY + 4, { align: 'center' });
-  doc.setFont('helvetica', 'normal');
-  doc.text('Principal', pageWidth - 36, sigY + 8, { align: 'center' });
+  doc.setFontSize(12);
+  doc.setTextColor(15, 23, 42);
+
+  // Left: Signature of Class Teacher
+  doc.line(16, sigY, 60, sigY);
+  doc.text('Signature of', 38, sigY + 5, { align: 'center' });
+  doc.text('Class Teacher', 38, sigY + 10, { align: 'center' });
+
+  // Center: Signature of Principal with Seal
+  doc.line(pageWidth / 2 - 24, sigY, pageWidth / 2 + 24, sigY);
+  doc.text('Signature of', pageWidth / 2, sigY + 5, { align: 'center' });
+  doc.text('Principal with Seal', pageWidth / 2, sigY + 10, { align: 'center' });
+
+  // Right: Signature of Parent / Guardian
+  doc.line(pageWidth - 60, sigY, pageWidth - 16, sigY);
+  doc.text('Signature of', pageWidth - 38, sigY + 5, { align: 'center' });
+  doc.text('Parent / Guardian', pageWidth - 38, sigY + 10, { align: 'center' });
 }
 
 export function generateSingleReportCardPDF(

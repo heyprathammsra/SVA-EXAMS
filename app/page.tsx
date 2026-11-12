@@ -156,30 +156,6 @@ const SVA_PT_SUBJECTS: SubjectConfig[] = PT_EXAM_SUBJECT_NAMES.map((name) => ({
   passMarks: 8,
 }));
 
-// Exact 7 subjects for PT exams in Class 9 (includes CS paper)
-const SVA_PT_CLASS9_SUBJECTS: SubjectConfig[] = PT_EXAM_CLASS9_SUBJECT_NAMES.map((name) => ({
-  name,
-  maxMarks: 25,
-  passMarks: 8,
-}));
-
-const PT_CLASS9_OVERRIDES = {
-  'Class 9': { subjects: SVA_PT_CLASS9_SUBJECTS.map((s) => ({ ...s })) },
-  Ruby: { subjects: SVA_PT_CLASS9_SUBJECTS.map((s) => ({ ...s })) },
-  Diamond: { subjects: SVA_PT_CLASS9_SUBJECTS.map((s) => ({ ...s })) },
-};
-
-type ExamType = string;
-
-const DEFAULT_EXAM_OPTIONS: { id: string; label: string; fullTitle: string }[] = [
-  { id: 'PT-1', label: 'PT-1', fullTitle: 'PT-1 (Periodic Test 1)' },
-  { id: 'PT-2', label: 'PT-2', fullTitle: 'PT-2 (Periodic Test 2)' },
-  { id: 'PT-3', label: 'PT-3', fullTitle: 'PT-3 (Periodic Test 3)' },
-  { id: 'PT-4', label: 'PT-4', fullTitle: 'PT-4 (Periodic Test 4)' },
-  { id: 'SA-1', label: 'SA-1', fullTitle: 'SA-1 (Summative Assessment 1)' },
-  { id: 'SA-2', label: 'SA-2', fullTitle: 'SA-2 (Summative Assessment 2)' },
-];
-
 const INITIAL_EXAM_CONFIGS: Record<string, ExamConfig> = {
   'PT-1': {
     id: 'PT-1',
@@ -187,7 +163,6 @@ const INITIAL_EXAM_CONFIGS: Record<string, ExamConfig> = {
     code: 'PT-1',
     totalFormula: 'SUM',
     subjects: SVA_PT_SUBJECTS.map((s) => ({ ...s })),
-    classOverrides: PT_CLASS9_OVERRIDES,
   },
   'PT-2': {
     id: 'PT-2',
@@ -195,7 +170,6 @@ const INITIAL_EXAM_CONFIGS: Record<string, ExamConfig> = {
     code: 'PT-2',
     totalFormula: 'SUM',
     subjects: SVA_PT_SUBJECTS.map((s) => ({ ...s })),
-    classOverrides: PT_CLASS9_OVERRIDES,
   },
   'PT-3': {
     id: 'PT-3',
@@ -203,7 +177,6 @@ const INITIAL_EXAM_CONFIGS: Record<string, ExamConfig> = {
     code: 'PT-3',
     totalFormula: 'SUM',
     subjects: SVA_PT_SUBJECTS.map((s) => ({ ...s })),
-    classOverrides: PT_CLASS9_OVERRIDES,
   },
   'PT-4': {
     id: 'PT-4',
@@ -211,7 +184,6 @@ const INITIAL_EXAM_CONFIGS: Record<string, ExamConfig> = {
     code: 'PT-4',
     totalFormula: 'SUM',
     subjects: SVA_PT_SUBJECTS.map((s) => ({ ...s })),
-    classOverrides: PT_CLASS9_OVERRIDES,
   },
   'SA-1': {
     id: 'SA-1',
@@ -248,18 +220,42 @@ function sanitizePtExamConfigs(configs: Record<string, ExamConfig>): Record<stri
           const lower = s.name.trim().toLowerCase();
           return lower !== 'computer science' && lower !== 'cs';
         })
-        .map((s) => ({
-          ...s,
-          maxMarks: s.maxMarks === 20 ? 25 : s.maxMarks || 25,
-          passMarks: s.passMarks === 7 ? 8 : s.passMarks || 8,
-        }));
+        .map((s) => {
+          const max = s.maxMarks || 25;
+          const pass = s.passMarks || Math.round(max * 0.33);
+          return {
+            ...s,
+            maxMarks: max,
+            passMarks: pass,
+          };
+        });
+      const baseMax = filteredSubjects[0]?.maxMarks || 25;
+      let nextOverrides = cfg.classOverrides ? { ...cfg.classOverrides } : undefined;
+      if (nextOverrides) {
+        // Remove legacy hardcoded Class 9 / Ruby / Diamond 25m overrides that conflict with base subjects
+        ['Class 9', 'Ruby', 'Diamond'].forEach((clsKey) => {
+          const ov = nextOverrides?.[clsKey];
+          if (ov?.subjects && ov.subjects.every((s) => s.maxMarks === 25) && baseMax !== 25) {
+            delete nextOverrides![clsKey];
+          } else if (
+            ov &&
+            Object.keys(ov).length === 1 &&
+            ov.subjects &&
+            ov.subjects.length === 7 &&
+            ov.subjects.every((s) => s.maxMarks === baseMax)
+          ) {
+            delete nextOverrides![clsKey];
+          }
+        });
+        if (Object.keys(nextOverrides).length === 0) {
+          nextOverrides = undefined;
+        }
+      }
       cleaned[key] = {
         ...cfg,
-        subjects: filteredSubjects.length > 0 ? filteredSubjects : SVA_PT_SUBJECTS.map((s) => ({ ...s })),
-        classOverrides: {
-          ...(cfg.classOverrides || {}),
-          ...PT_CLASS9_OVERRIDES,
-        },
+        subjects:
+          filteredSubjects.length > 0 ? filteredSubjects : SVA_PT_SUBJECTS.map((s) => ({ ...s })),
+        classOverrides: nextOverrides,
       };
     } else {
       cleaned[key] = cfg;
@@ -490,7 +486,6 @@ export default function SchoolErpPage() {
         subjects: isPtExam(selectedExam)
           ? SVA_PT_SUBJECTS.map((s) => ({ ...s }))
           : SVA_SUBJECTS.map((s) => ({ ...s, maxMarks: 80, passMarks: 26 })),
-        classOverrides: isPtExam(selectedExam) ? PT_CLASS9_OVERRIDES : undefined,
       };
     if (isPtExam(raw.code || selectedExam)) {
       return {
@@ -499,10 +494,6 @@ export default function SchoolErpPage() {
           const lower = s.name.trim().toLowerCase();
           return lower !== 'computer science' && lower !== 'cs';
         }),
-        classOverrides: {
-          ...(raw.classOverrides || {}),
-          ...PT_CLASS9_OVERRIDES,
-        },
       };
     }
     return raw;
@@ -638,14 +629,16 @@ export default function SchoolErpPage() {
     };
     const exams: string[] = ['PT-1', 'PT-2', 'PT-3', 'PT-4', 'SA-1', 'SA-2'];
     exams.forEach((ex) => {
-      const isPt = ex.startsWith('PT');
-      const max = isPt ? 25 : 100;
+      const isPt = isPtExam(ex);
+      const cfgForEx = examConfigs[ex] || INITIAL_EXAM_CONFIGS[ex];
       ALL_SVA_STUDENTS.forEach((st) => {
+        const effCfg = cfgForEx ? getEffectiveExamConfigForClass(cfgForEx, st.section) : undefined;
+        const defaultMax = effCfg?.subjects[0]?.maxMarks || (isPt ? 25 : 100);
         const isAayushSample =
           st.id === 'STU-2026-0031' ||
           st.name.trim().toLowerCase() === 'aayush satish nalawade';
 
-        if (ex === 'PT-1' && isAayushSample) {
+        if (ex === 'PT-1' && isAayushSample && defaultMax === 25) {
           store[ex][st.id] = {
             English: 25,
             Hindi: 25,
@@ -667,7 +660,13 @@ export default function SchoolErpPage() {
           ) {
             return;
           }
-          scaled[normSub] = typeof val === 'number' ? Math.round((val / 100) * max) : val;
+          const subMax =
+            effCfg?.subjects.find((s) => s.name.toLowerCase() === normSub.toLowerCase())?.maxMarks ||
+            defaultMax;
+          scaled[normSub] =
+            typeof val === 'number'
+              ? Math.min(subMax, Math.max(0, Math.round((val / 100) * subMax)))
+              : val;
         });
         store[ex][st.id] = scaled;
       });
@@ -1026,7 +1025,7 @@ export default function SchoolErpPage() {
     });
     setExamMarksStore((prev) => ({ ...prev, [examId]: marksMap }));
     setExamBreakdownsStore((prev) => ({ ...prev, [examId]: bdMap }));
-  }, []);
+  }, [setExamMarksStore, setExamBreakdownsStore]);
 
   // Push latest data to Google Sheet via Google Apps Script Web App
   const pushToLockedSheet = useCallback(async (isSilent = true) => {
@@ -1057,6 +1056,20 @@ export default function SchoolErpPage() {
         setSheetsSyncStatus('syncing');
         const res = await GasSyncService.pullData(undefined, examName);
         if (res.success) {
+          // If `examName` is not 'SA-1', do not let silent background pulls overwrite PT/other exams
+          // with the default SA-1 100-mark sheet data.
+          if (isSilent && examName !== 'SA-1') {
+            setSheetsSyncStatus('synced');
+            setLastSyncTime(
+              new Date().toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              })
+            );
+            return;
+          }
+
           if (Array.isArray(res.students) && res.students.length > 0) {
             const targetCfg =
               examConfigsRef.current[examName] ||
@@ -1070,10 +1083,12 @@ export default function SchoolErpPage() {
                 targetCfg
               );
               const merged = rawMerged.map((s) => {
+                const effCfg = getEffectiveExamConfigForClass(targetCfg, s.section);
+                const defaultMax = effCfg.subjects[0]?.maxMarks || (isPtExam(examName) ? 25 : 100);
                 const isAayushSample =
                   s.id === 'STU-2026-0031' ||
                   s.name.trim().toLowerCase() === 'aayush satish nalawade';
-                if (examName === 'PT-1' && isAayushSample) {
+                if (examName === 'PT-1' && isAayushSample && defaultMax === 25) {
                   return {
                     ...s,
                     marks: {
@@ -1098,12 +1113,22 @@ export default function SchoolErpPage() {
                   };
                 }
                 if (isPtExam(examName) && hasCsInPtExam(s.section)) {
+                  const csSub = effCfg.subjects.find(
+                    (sub) =>
+                      sub.name.toLowerCase() === 'computer science' ||
+                      sub.name.toLowerCase() === 'cs'
+                  );
+                  const csMax = csSub?.maxMarks || defaultMax;
                   const currentCs = s.marks['Computer Science'];
-                  if (currentCs === null || currentCs === undefined) {
+                  if (currentCs === null || currentCs === undefined || (typeof currentCs === 'number' && currentCs > csMax)) {
                     const baseSt = ALL_SVA_STUDENTS.find((b) => b.id === s.id);
                     const baseCs = baseSt?.marks['Computer Science'];
                     const fallbackCs =
-                      typeof baseCs === 'number' ? Math.round((baseCs / 100) * 25) : 22;
+                      typeof currentCs === 'number' && currentCs > csMax
+                        ? Math.min(csMax, Math.max(0, Math.round((currentCs / (currentCs > 25 ? 100 : 25)) * csMax)))
+                        : typeof baseCs === 'number'
+                        ? Math.min(csMax, Math.max(0, Math.round((baseCs / 100) * csMax)))
+                        : Math.round(csMax * 0.88);
                     return {
                       ...s,
                       marks: {
@@ -1159,7 +1184,7 @@ export default function SchoolErpPage() {
         setSheetsSyncStatus('error');
       }
     },
-    [showToast]
+    [showToast, setExamMarksStore, setExamBreakdownsStore]
   );
 
   // Debounced push to Google Sheet via Google Apps Script Web App (only triggered when user edits data)
@@ -1235,42 +1260,67 @@ export default function SchoolErpPage() {
       // 1. Save current exam's marks and breakdowns
       syncStoresForExam(selectedExam, students);
 
-      // 2. Load cached marks and breakdowns for newExam immediately
+      // 2. Load cached marks and breakdowns for newExam immediately, clamping/scaling to targetCfg maxMarks
       const targetMarks = examMarksStore[newExam];
       const targetBds = examBreakdownsStore[newExam];
       const targetCfg =
         examConfigs[newExam] || INITIAL_EXAM_CONFIGS[newExam] || INITIAL_EXAM_CONFIGS['SA-1'];
 
-      setStudents((prev) =>
-        prev.map((s) => {
-          const m = targetMarks?.[s.id] ? { ...targetMarks[s.id] } : { ...s.marks };
-          const bds: Record<string, SubjectBreakdown> = targetBds?.[s.id]
-            ? { ...targetBds[s.id] }
-            : {};
-          const effCfg = getEffectiveExamConfigForClass(targetCfg, s.section);
-          effCfg.subjects.forEach((sub) => {
-            if (!bds[sub.name]) {
-              const synced = syncBreakdownWithTotal(
-                m[sub.name] ?? null,
-                sub.name,
-                s.section,
-                sub.components
+      const nextRoster = students.map((s) => {
+        const m: Record<string, number | 'AB' | null> = targetMarks?.[s.id]
+          ? { ...targetMarks[s.id] }
+          : { ...s.marks };
+        const bds: Record<string, SubjectBreakdown> = targetBds?.[s.id]
+          ? { ...targetBds[s.id] }
+          : {};
+        const effCfg = getEffectiveExamConfigForClass(targetCfg, s.section);
+        effCfg.subjects.forEach((sub) => {
+          const curVal = m[sub.name];
+          if (typeof curVal === 'number' && sub.maxMarks > 0 && curVal > sub.maxMarks) {
+            const srcScale = curVal > 50 ? 100 : curVal > 25 ? 50 : 25;
+            m[sub.name] = Math.min(
+              sub.maxMarks,
+              Math.max(0, Math.round((curVal / srcScale) * sub.maxMarks))
+            );
+          } else if (
+            (curVal === undefined || curVal === null) &&
+            isPtExam(newExam) &&
+            hasCsInPtExam(s.section)
+          ) {
+            const baseSt = ALL_SVA_STUDENTS.find((b) => b.id === s.id);
+            const baseVal = baseSt?.marks[sub.name];
+            if (typeof baseVal === 'number') {
+              m[sub.name] = Math.min(
+                sub.maxMarks,
+                Math.max(0, Math.round((baseVal / 100) * sub.maxMarks))
               );
-              if (synced) {
-                bds[sub.name] = synced;
-              }
             }
-          });
-          return {
-            ...s,
-            marks: m,
-            breakdowns: bds,
-          };
-        })
-      );
+          }
+          if (!bds[sub.name]) {
+            const synced = syncBreakdownWithTotal(
+              m[sub.name] ?? null,
+              sub.name,
+              s.section,
+              sub.components
+            );
+            if (synced) {
+              bds[sub.name] = synced;
+            }
+          }
+        });
+        return {
+          ...s,
+          marks: m,
+          breakdowns: bds,
+        };
+      });
+
+      setStudents(nextRoster);
+      syncStoresForExam(newExam, nextRoster);
 
       selectedExamRef.current = newExam;
       setSelectedExam(newExam);
+      setExportExam(newExam);
       if (isPtExam(newExam) && !hasCsInPtExam(selectedClass)) {
         if (selectedSubject.toLowerCase() === 'computer science' || selectedSubject.toLowerCase() === 'cs') {
           setSelectedSubject('all');
@@ -1296,6 +1346,7 @@ export default function SchoolErpPage() {
       examBreakdownsStore,
       examConfigs,
       syncStoresForExam,
+      setExportExam,
       showToast,
       pullFromLockedSheet,
     ]
@@ -1429,7 +1480,8 @@ export default function SchoolErpPage() {
         baseExamConfig.totalFormula,
         baseExamConfig.customFormula,
         baseExamConfig.resultCriteria,
-        baseExamConfig.classOverrides
+        baseExamConfig.classOverrides,
+        baseExamConfig.code || selectedExam
       ),
     [
       students,
@@ -1438,6 +1490,8 @@ export default function SchoolErpPage() {
       baseExamConfig.customFormula,
       baseExamConfig.resultCriteria,
       baseExamConfig.classOverrides,
+      baseExamConfig.code,
+      selectedExam,
     ]
   );
 
@@ -1823,7 +1877,6 @@ export default function SchoolErpPage() {
             passMarks: 32,
             components: getDefaultSubjectComponents(s.name, exportExam),
           })),
-      classOverrides: isPtExam(exportExam) ? PT_CLASS9_OVERRIDES : undefined,
     };
     const targetExamConfig: ExamConfig = getEffectiveExamConfigForClass(
       rawTargetConfig,
@@ -1874,7 +1927,6 @@ export default function SchoolErpPage() {
               passMarks: 32,
               components: getDefaultSubjectComponents(s.name, exportExam),
             })),
-        classOverrides: isPtExam(exportExam) ? PT_CLASS9_OVERRIDES : undefined,
       };
       const targetExamConfig: ExamConfig = getEffectiveExamConfigForClass(
         rawTargetConfig,
@@ -3679,6 +3731,7 @@ export default function SchoolErpPage() {
                   value={selectedClass}
                   onChange={(val) => {
                     setSelectedClass(val);
+                    setExportClass(val);
                     setCurrentPage(1);
                     if (isPtExam(selectedExam) && !hasCsInPtExam(val)) {
                       if (
@@ -4248,10 +4301,13 @@ export default function SchoolErpPage() {
                         >
                           <div className="font-bold">GRAND TOTAL</div>
                           <div className="text-[10px] font-normal text-emerald-700 mt-0.5">
-                            {consolidatedMarksStructure.sections.reduce(
-                              (acc, s) => acc + (s.subject.maxMarks || 100),
-                              0
-                            )}
+                            {(processedStudents[0]
+                              ? computedResultsMap.get(processedStudents[0].id)?.totalMax
+                              : computedResults[0]?.totalMax) ??
+                              consolidatedMarksStructure.sections.reduce(
+                                (acc, s) => acc + (s.subject.maxMarks || 100),
+                                0
+                              )}
                           </div>
                         </th>
                         <th
@@ -4281,35 +4337,40 @@ export default function SchoolErpPage() {
                         paginatedStudents.map((student, rowIdx) => {
                           const isSelectedForReport = student.id === selectedStudentId;
                           const isRowActive = focusedCell?.rowIdx === rowIdx || isSelectedForReport;
-                          const totalMaxAll = consolidatedMarksStructure.sections.reduce(
-                            (acc, s) => acc + (s.subject.maxMarks || 100),
-                            0
-                          );
-                          const grandTotal = consolidatedMarksStructure.sections.reduce(
-                            (sum, sec) => {
-                              const subName = sec.subject.name;
-                              const bd =
-                                student.breakdowns?.[subName] ||
-                                generateDefaultBreakdown(
-                                  student.marks[subName],
+                          const computedRes = computedResultsMap.get(student.id);
+                          const totalMaxAll =
+                            computedRes?.totalMax ??
+                            consolidatedMarksStructure.sections.reduce(
+                              (acc, s) => acc + (s.subject.maxMarks || 100),
+                              0
+                            );
+                          const grandTotal =
+                            computedRes?.totalObtained ??
+                            consolidatedMarksStructure.sections.reduce(
+                              (sum, sec) => {
+                                const subName = sec.subject.name;
+                                const bd =
+                                  student.breakdowns?.[subName] ||
+                                  generateDefaultBreakdown(
+                                    student.marks[subName],
+                                    subName,
+                                    student.section
+                                  );
+                                const liveTotal = computeSubjectTotalFromBreakdown(
                                   subName,
-                                  student.section
+                                  student.section,
+                                  bd,
+                                  sec.subject.components
                                 );
-                              const liveTotal = computeSubjectTotalFromBreakdown(
-                                subName,
-                                student.section,
-                                bd,
-                                sec.subject.components
-                              );
-                              const mark = sec.isMulti
-                                ? liveTotal !== null
-                                  ? liveTotal
-                                  : student.marks[subName]
-                                : student.marks[subName];
-                              return sum + (typeof mark === 'number' ? mark : 0);
-                            },
-                            0
-                          );
+                                const mark = sec.isMulti
+                                  ? liveTotal !== null
+                                    ? liveTotal
+                                    : student.marks[subName]
+                                  : student.marks[subName];
+                                return sum + (typeof mark === 'number' ? mark : 0);
+                              },
+                              0
+                            );
 
                           return (
                             <tr
@@ -4442,10 +4503,17 @@ export default function SchoolErpPage() {
                                 {grandTotal}
                               </td>
                               <td className="min-w-[82px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-emerald-50/40 text-emerald-950 select-none">
-                                {totalMaxAll > 0 ? ((grandTotal / totalMaxAll) * 100).toFixed(2) : '0.00'}%
+                                {computedRes
+                                  ? computedRes.percentage.toFixed(2)
+                                  : totalMaxAll > 0
+                                  ? ((grandTotal / totalMaxAll) * 100).toFixed(2)
+                                  : '0.00'}
+                                %
                               </td>
                               <td className="min-w-[64px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-emerald-50/40 text-emerald-950 select-none">
-                                {computeCbseGrade(totalMaxAll > 0 ? (grandTotal / totalMaxAll) * 100 : 0)}
+                                {computedRes
+                                  ? computedRes.grade
+                                  : computeCbseGrade(totalMaxAll > 0 ? (grandTotal / totalMaxAll) * 100 : 0)}
                               </td>
                             </tr>
                           );
@@ -5131,6 +5199,7 @@ export default function SchoolErpPage() {
                   value={selectedClass}
                   onChange={(val) => {
                     setSelectedClass(val);
+                    setExportClass(val);
                     setCurrentPage(1);
                   }}
                   options={[
@@ -5950,7 +6019,10 @@ export default function SchoolErpPage() {
                       icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
                       prefixLabel="Class:"
                       value={selectedClass}
-                      onChange={(val) => setSelectedClass(val)}
+                      onChange={(val) => {
+                        setSelectedClass(val);
+                        setExportClass(val);
+                      }}
                       options={[
                         { value: 'all', label: `All Classes (${students.length} Students)` },
                         ...SVA_ALL_CLASSES.map((cls) => ({
@@ -6111,49 +6183,66 @@ export default function SchoolErpPage() {
                             : 'scale(1)',
                         transformOrigin: 'top center',
                         transition: 'transform 0.2s ease',
-                        fontFamily: "'Calibri', 'Segoe UI', sans-serif",
+                        fontFamily: "'Aptos', 'Calibri', 'Segoe UI', sans-serif",
                       }}
                       id="report-card-print-area"
-                      className="printable-report-card w-full max-w-[794px] flex flex-col gap-6 text-black"
+                      className="printable-report-card w-full max-w-[794px] flex flex-col gap-6 font-aptos text-black"
                     >
                       {/* =========================================================
                           PAGE 1: EXACT PT REPORT CARD (MATCHING SAMPLE PDF)
                          ========================================================= */}
                       <div
                         data-testid="pt-report-card-page-1"
-                        className="w-full bg-white border border-slate-300 shadow-xl px-12 pt-8 pb-14 text-black"
+                        className="w-full bg-white border border-slate-300 shadow-xl px-12 pt-8 pb-14 text-black font-aptos"
                         style={{ minHeight: '1040px' }}
                       >
                         {/* Header with Crest on Left and School Identity Centered */}
                         <div className="relative pb-2.5 border-b-[1.5px] border-black text-center">
-                          <div className="absolute left-0 top-0.5">
+                          <div className="absolute left-4 top-0.5">
                             <Image
                               src={SCHOOL_LOGO_SRC}
                               alt="Saraswati Vidya Academy Crest"
                               width={68}
                               height={68}
-                              className="w-[62px] h-[62px] object-contain"
+                              className="w-[54px] h-[54px] object-contain"
                               priority
                             />
                           </div>
-                          <div>
+                          <div className="pl-10">
                             <h2
-                              className="text-[30px] sm:text-[33px] font-black leading-tight tracking-normal text-[#27457B]"
+                              data-testid="pt-school-name-heading"
+                              className="font-rockwell-eb text-[33.5px] leading-[1.12] tracking-normal text-[#27457B] whitespace-nowrap"
                               style={{
-                                fontFamily: "'Rockwell Extra Bold', 'Rockwell', 'Courier New', Georgia, serif",
-                                fontWeight: 900,
-                                WebkitTextStroke: '0.6px #27457B',
+                                fontFamily: "'Rockwell Extra Bold', 'Rockwell', Georgia, serif",
+                                fontWeight: 800,
+                                fontSynthesis: 'none',
                               }}
                             >
                               {SVA_EXAM_INFO.schoolName}
                             </h2>
-                            <p className="text-[11px] font-bold text-black mt-0.5 leading-snug">
+                            <p
+                              className="text-[11.25px] font-bold text-black mt-0.5 leading-snug"
+                              style={{
+                                fontFamily: "'Montserrat', 'Aptos', 'Calibri', sans-serif",
+                                fontWeight: 700,
+                              }}
+                            >
                               CBSE Affiliation No. {SVA_EXAM_INFO.affiliationNo}, School Code. {SVA_EXAM_INFO.schoolCode}, UDISE No. {SVA_EXAM_INFO.udiseNo}
                             </p>
-                            <p className="text-[13px] font-normal text-black leading-snug">
+                            <p
+                              className="text-[14.5px] font-normal text-black leading-snug"
+                              style={{
+                                fontFamily: "'Calibri', 'Aptos', sans-serif",
+                              }}
+                            >
                               Address: {SVA_EXAM_INFO.schoolAddress}
                             </p>
-                            <p className="text-[13px] font-normal text-black leading-snug">
+                            <p
+                              className="text-[14.5px] font-normal text-black leading-snug"
+                              style={{
+                                fontFamily: "'Calibri', 'Aptos', sans-serif",
+                              }}
+                            >
                               Email Id:{' '}
                               <a
                                 href={`mailto:${SVA_EXAM_INFO.schoolEmail}`}
@@ -6165,266 +6254,299 @@ export default function SchoolErpPage() {
                           </div>
                         </div>
 
-                        {/* REPORT CARD & PERIODIC TEST - X Titles */}
-                        <div className="text-center mt-2.5 mb-2.5">
-                          <div className="text-[14.5px] font-bold uppercase tracking-normal text-black leading-snug">
-                            REPORT CARD
+                        {/* REPORT CARD BODY BELOW HEADER: APTOS FONT SIZE 12 */}
+                        <div
+                          data-testid="pt-report-card-body"
+                          className="font-aptos text-[12px] text-black"
+                          style={{
+                            fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                            fontSize: '12px',
+                            fontWeight: 400,
+                            WebkitTextStroke: '0.35px currentColor',
+                          }}
+                        >
+                          {/* REPORT CARD & PERIODIC TEST - X Titles */}
+                          <div className="text-center mt-2.5 mb-2.5">
+                            <div className="text-[12px] font-bold font-aptos uppercase tracking-normal text-black leading-snug">
+                              REPORT CARD
+                            </div>
+                            <div
+                              data-testid="pt-report-card-heading"
+                              className="text-[12px] font-bold font-aptos uppercase tracking-normal text-black leading-snug mt-0.5"
+                            >
+                              {ptHeading}
+                            </div>
                           </div>
-                          <div
-                            data-testid="pt-report-card-heading"
-                            className="text-[19px] font-bold uppercase tracking-normal text-black leading-snug mt-0.5"
+
+                          {/* Table 1: Student Particulars Box (10-column double-bordered framed table) */}
+                          <table
+                            data-testid="pt-student-particulars-table"
+                            className="w-full text-[12px] font-bold font-aptos text-black border border-black mb-5"
+                            style={{
+                              borderCollapse: 'separate',
+                              borderSpacing: '1.5px',
+                              fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                              fontSize: '12px',
+                            }}
                           >
-                            {ptHeading}
-                          </div>
+                            <colgroup>
+                              <col style={{ width: '11.5%' }} />
+                              <col style={{ width: '14.0%' }} />
+                              <col style={{ width: '15.0%' }} />
+                              <col style={{ width: '3.0%' }} />
+                              <col style={{ width: '11.0%' }} />
+                              <col style={{ width: '8.0%' }} />
+                              <col style={{ width: '7.0%' }} />
+                              <col style={{ width: '6.0%' }} />
+                              <col style={{ width: '8.0%' }} />
+                              <col style={{ width: '16.5%' }} />
+                            </colgroup>
+                            <tbody>
+                              <tr>
+                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                  Roll No.
+                                </td>
+                                <td className="border border-black px-2 py-1 text-left">
+                                  {ptProfile.rollNoDisplay}
+                                </td>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  Class &amp; Section:
+                                </td>
+                                <td
+                                  colSpan={3}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  {ptProfile.classSectionDisplay}
+                                </td>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  DOB:
+                                </td>
+                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                  {ptProfile.dobDisplay}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  Name of the Student:
+                                </td>
+                                <td colSpan={8} className="border border-black px-2 py-1 text-left">
+                                  {activeStudentResult.student.name}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  Father’s Name:
+                                </td>
+                                <td colSpan={8} className="border border-black px-2 py-1 text-left">
+                                  {ptProfile.fatherNameDisplay}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  Mother’s Name:
+                                </td>
+                                <td colSpan={8} className="border border-black px-2 py-1 text-left">
+                                  {ptProfile.motherNameDisplay}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  House:
+                                </td>
+                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                  {ptProfile.house}
+                                </td>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  Height:
+                                </td>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  {ptProfile.height}
+                                </td>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  Weight:
+                                </td>
+                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                  {ptProfile.weight}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                >
+                                  Attendance:
+                                </td>
+                                <td colSpan={8} className="border border-black px-4 py-1 text-left">
+                                  {ptProfile.attendance}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+
+                          {/* Table 2: Subject Marks Table (6 subjects for Classes 6-8; 7 subjects with CS for Class 9) */}
+                          <table
+                            data-testid="pt-subjects-table"
+                            className="w-full text-[12px] font-bold font-aptos text-black border border-black mb-7"
+                            style={{
+                              borderCollapse: 'separate',
+                              borderSpacing: '1.5px',
+                              fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                              fontSize: '12px',
+                            }}
+                          >
+                            <colgroup>
+                              <col style={{ width: '10%' }} />
+                              <col style={{ width: '26%' }} />
+                              <col style={{ width: '14%' }} />
+                              <col style={{ width: '50%' }} />
+                            </colgroup>
+                            <thead>
+                              <tr>
+                                <th className="border border-black px-2 py-1 text-center align-middle leading-tight whitespace-nowrap">
+                                  <div>SL.</div>
+                                  <div>NO.</div>
+                                </th>
+                                <th className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap">
+                                  NAME OF THE SUBJECT
+                                </th>
+                                <th className="border border-black px-2 py-1 text-center align-middle leading-tight whitespace-nowrap">
+                                  <div>MARKS</div>
+                                  <div>OBTAINED</div>
+                                </th>
+                                <th className="border border-black px-2 py-1.5 text-center align-top whitespace-nowrap">
+                                  REMARKS
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {ptSubjects.map((detail, idx) => {
+                                const markStr =
+                                  detail.obtained === 'AB'
+                                    ? 'AB'
+                                    : detail.obtained !== null && detail.obtained !== undefined
+                                    ? String(detail.obtained)
+                                    : '-';
+                                const remarkText =
+                                  detail.remark ||
+                                  getDefaultSubjectRemark(detail.obtained, detail.maxMarks);
+
+                                return (
+                                  <tr key={detail.name}>
+                                    <td className="border border-black px-2 py-1.5 text-center align-middle font-bold">
+                                      {idx + 1}
+                                    </td>
+                                    <td className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap font-bold">
+                                      {getPtSubjectDisplayName(detail.name)}
+                                    </td>
+                                    <td className="border border-black px-2 py-1.5 text-center align-middle font-bold">
+                                      {markStr}
+                                    </td>
+                                    <td className="border border-black px-2.5 py-1.5 text-left align-middle font-bold">
+                                      {remarkText}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+
+                          {/* Table 3: Summary Strip (TOTAL, PERCENTAGE, GRADE) */}
+                          <table
+                            data-testid="pt-summary-table"
+                            className="w-full text-[12px] font-bold font-aptos text-black border border-black mb-6"
+                            style={{
+                              borderCollapse: 'separate',
+                              borderSpacing: '1.5px',
+                              fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                              fontSize: '12px',
+                            }}
+                          >
+                            <colgroup>
+                              <col style={{ width: '14%' }} />
+                              <col style={{ width: '13%' }} />
+                              <col style={{ width: '19%' }} />
+                              <col style={{ width: '24%' }} />
+                              <col style={{ width: '16%' }} />
+                              <col style={{ width: '14%' }} />
+                            </colgroup>
+                            <tbody>
+                              <tr>
+                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                  TOTAL:
+                                </td>
+                                <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                  {activeStudentResult.totalObtained}/{activeStudentResult.totalMax}
+                                </td>
+                                <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                  PERCENTAGE:
+                                </td>
+                                <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                  {ptPctStr}
+                                </td>
+                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                  GRADE:
+                                </td>
+                                <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                  {activeStudentResult.grade}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+
+                          {/* Table 4: Class Teacher's Remarks Box */}
+                          <table
+                            data-testid="pt-remarks-table"
+                            className="w-full text-[12px] font-bold font-aptos text-black border border-black"
+                            style={{
+                              borderCollapse: 'separate',
+                              borderSpacing: '1.5px',
+                              fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                              fontSize: '12px',
+                            }}
+                          >
+                            <colgroup>
+                              <col style={{ width: '33%' }} />
+                              <col style={{ width: '67%' }} />
+                            </colgroup>
+                            <tbody>
+                              <tr>
+                                <td className="border border-black px-2 py-2.5 text-left align-middle whitespace-nowrap">
+                                  CLASS TEACHER’S REMARKS:
+                                </td>
+                                <td className="border border-black px-2.5 py-1.5 text-left align-middle leading-snug">
+                                  {ctRemark}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
                         </div>
-
-                        {/* Table 1: Student Particulars Box (10-column double-bordered framed table) */}
-                        <table
-                          data-testid="pt-student-particulars-table"
-                          className="w-full text-[13px] font-bold text-black border border-black mb-5"
-                          style={{ borderCollapse: 'separate', borderSpacing: '1.5px' }}
-                        >
-                          <colgroup>
-                            <col style={{ width: '11.5%' }} />
-                            <col style={{ width: '14.0%' }} />
-                            <col style={{ width: '15.0%' }} />
-                            <col style={{ width: '3.0%' }} />
-                            <col style={{ width: '11.0%' }} />
-                            <col style={{ width: '8.0%' }} />
-                            <col style={{ width: '7.0%' }} />
-                            <col style={{ width: '6.0%' }} />
-                            <col style={{ width: '8.0%' }} />
-                            <col style={{ width: '16.5%' }} />
-                          </colgroup>
-                          <tbody>
-                            <tr>
-                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
-                                Roll No.
-                              </td>
-                              <td className="border border-black px-2 py-1 text-left">
-                                {ptProfile.rollNoDisplay}
-                              </td>
-                              <td
-                                colSpan={2}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                Class &amp; Section:
-                              </td>
-                              <td
-                                colSpan={3}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                {ptProfile.classSectionDisplay}
-                              </td>
-                              <td
-                                colSpan={2}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                DOB:
-                              </td>
-                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
-                                {ptProfile.dobDisplay}
-                              </td>
-                            </tr>
-                            <tr>
-                              <td
-                                colSpan={2}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                Name of the Student:
-                              </td>
-                              <td colSpan={8} className="border border-black px-2 py-1 text-left">
-                                {activeStudentResult.student.name}
-                              </td>
-                            </tr>
-                            <tr>
-                              <td
-                                colSpan={2}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                Father’s Name:
-                              </td>
-                              <td colSpan={8} className="border border-black px-2 py-1 text-left">
-                                {ptProfile.fatherNameDisplay}
-                              </td>
-                            </tr>
-                            <tr>
-                              <td
-                                colSpan={2}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                Mother’s Name:
-                              </td>
-                              <td colSpan={8} className="border border-black px-2 py-1 text-left">
-                                {ptProfile.motherNameDisplay}
-                              </td>
-                            </tr>
-                            <tr>
-                              <td
-                                colSpan={2}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                House:
-                              </td>
-                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
-                                {ptProfile.house}
-                              </td>
-                              <td
-                                colSpan={2}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                Height:
-                              </td>
-                              <td
-                                colSpan={2}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                {ptProfile.height}
-                              </td>
-                              <td
-                                colSpan={2}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                Weight:
-                              </td>
-                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
-                                {ptProfile.weight}
-                              </td>
-                            </tr>
-                            <tr>
-                              <td
-                                colSpan={2}
-                                className="border border-black px-2 py-1 text-left whitespace-nowrap"
-                              >
-                                Attendance:
-                              </td>
-                              <td colSpan={8} className="border border-black px-4 py-1 text-left">
-                                {ptProfile.attendance}
-                              </td>
-                            </tr>
-                          </tbody>
-                        </table>
-
-                        {/* Table 2: Subject Marks Table (6 subjects for Classes 6-8; 7 subjects with CS for Class 9) */}
-                        <table
-                          data-testid="pt-subjects-table"
-                          className="w-full text-[13px] font-bold text-black border border-black mb-7"
-                          style={{ borderCollapse: 'separate', borderSpacing: '1.5px' }}
-                        >
-                          <colgroup>
-                            <col style={{ width: '10%' }} />
-                            <col style={{ width: '26%' }} />
-                            <col style={{ width: '14%' }} />
-                            <col style={{ width: '50%' }} />
-                          </colgroup>
-                          <thead>
-                            <tr>
-                              <th className="border border-black px-2 py-1 text-center align-middle leading-tight whitespace-nowrap">
-                                <div>SL.</div>
-                                <div>NO.</div>
-                              </th>
-                              <th className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap">
-                                NAME OF THE SUBJECT
-                              </th>
-                              <th className="border border-black px-2 py-1 text-center align-middle leading-tight whitespace-nowrap">
-                                <div>MARKS</div>
-                                <div>OBTAINED</div>
-                              </th>
-                              <th className="border border-black px-2 py-1.5 text-center align-top whitespace-nowrap">
-                                REMARKS
-                              </th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {ptSubjects.map((detail, idx) => {
-                              const markStr =
-                                detail.obtained === 'AB'
-                                  ? 'AB'
-                                  : detail.obtained !== null && detail.obtained !== undefined
-                                  ? String(detail.obtained)
-                                  : '-';
-                              const remarkText =
-                                detail.remark ||
-                                getDefaultSubjectRemark(detail.obtained, detail.maxMarks);
-
-                              return (
-                                <tr key={detail.name}>
-                                  <td className="border border-black px-2 py-1.5 text-center align-middle font-bold">
-                                    {idx + 1}
-                                  </td>
-                                  <td className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap font-bold">
-                                    {getPtSubjectDisplayName(detail.name)}
-                                  </td>
-                                  <td className="border border-black px-2 py-1.5 text-center align-middle font-bold">
-                                    {markStr}
-                                  </td>
-                                  <td className="border border-black px-2.5 py-1.5 text-left align-middle font-bold">
-                                    {remarkText}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
-
-                        {/* Table 3: Summary Strip (TOTAL, PERCENTAGE, GRADE) */}
-                        <table
-                          data-testid="pt-summary-table"
-                          className="w-full text-[13px] font-bold text-black border border-black mb-6"
-                          style={{ borderCollapse: 'separate', borderSpacing: '1.5px' }}
-                        >
-                          <colgroup>
-                            <col style={{ width: '14%' }} />
-                            <col style={{ width: '13%' }} />
-                            <col style={{ width: '19%' }} />
-                            <col style={{ width: '24%' }} />
-                            <col style={{ width: '16%' }} />
-                            <col style={{ width: '14%' }} />
-                          </colgroup>
-                          <tbody>
-                            <tr>
-                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
-                                TOTAL:
-                              </td>
-                              <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
-                                {activeStudentResult.totalObtained}/{activeStudentResult.totalMax}
-                              </td>
-                              <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
-                                PERCENTAGE:
-                              </td>
-                              <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
-                                {ptPctStr}
-                              </td>
-                              <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
-                                GRADE:
-                              </td>
-                              <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
-                                {activeStudentResult.grade}
-                              </td>
-                            </tr>
-                          </tbody>
-                        </table>
-
-                        {/* Table 4: Class Teacher's Remarks Box */}
-                        <table
-                          className="w-full text-[13px] font-bold text-black border border-black"
-                          style={{ borderCollapse: 'separate', borderSpacing: '1.5px' }}
-                        >
-                          <colgroup>
-                            <col style={{ width: '33%' }} />
-                            <col style={{ width: '67%' }} />
-                          </colgroup>
-                          <tbody>
-                            <tr>
-                              <td className="border border-black px-2 py-2.5 text-left align-middle whitespace-nowrap">
-                                CLASS TEACHER’S REMARKS:
-                              </td>
-                              <td className="border border-black px-2.5 py-1.5 text-left align-middle leading-snug">
-                                {ctRemark}
-                              </td>
-                            </tr>
-                          </tbody>
-                        </table>
                       </div>
 
                       {/* =========================================================
@@ -6432,15 +6554,27 @@ export default function SchoolErpPage() {
                          ========================================================= */}
                       <div
                         data-testid="pt-report-card-page-2"
-                        className="w-full bg-white border border-slate-300 shadow-xl px-12 pt-11 pb-20 text-black"
-                        style={{ minHeight: '960px', pageBreakBefore: 'always' }}
+                        className="w-full bg-white border border-slate-300 shadow-xl px-12 pt-11 pb-20 text-black font-aptos text-[12px]"
+                        style={{
+                          minHeight: '960px',
+                          pageBreakBefore: 'always',
+                          fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                          fontSize: '12px',
+                          fontWeight: 400,
+                          WebkitTextStroke: '0.35px currentColor',
+                        }}
                       >
                         {/* Centered Grading System Table */}
                         <div className="flex justify-center">
                           <table
                             data-testid="pt-grading-system-table"
-                            className="w-[310px] text-[13px] font-bold text-black border border-black"
-                            style={{ borderCollapse: 'separate', borderSpacing: '1.5px' }}
+                            className="w-[310px] text-[12px] font-bold font-aptos text-black border border-black"
+                            style={{
+                              borderCollapse: 'separate',
+                              borderSpacing: '1.5px',
+                              fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                              fontSize: '12px',
+                            }}
                           >
                             <colgroup>
                               <col style={{ width: '58%' }} />
@@ -6476,17 +6610,24 @@ export default function SchoolErpPage() {
                           </table>
                         </div>
 
-                        {/* Signatures Row */}
-                        <div className="grid grid-cols-3 gap-6 mt-36 text-center text-[13.5px] font-bold text-black leading-snug">
-                          <div>
+                        {/* Signatures Row - Symmetrically spaced across left, exact center, and right margins */}
+                        <div
+                          data-testid="pt-signatures-row"
+                          className="grid grid-cols-3 items-start w-full px-5 mt-32 text-center text-[12px] font-bold font-aptos text-black leading-snug"
+                          style={{
+                            fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                            fontSize: '12px',
+                          }}
+                        >
+                          <div className="justify-self-start text-center">
                             <div>Signature of</div>
                             <div>Class Teacher</div>
                           </div>
-                          <div>
+                          <div className="justify-self-center text-center">
                             <div>Signature of</div>
                             <div>Principal with Seal</div>
                           </div>
-                          <div>
+                          <div className="justify-self-end text-center">
                             <div>Signature of</div>
                             <div>Parent / Guardian</div>
                           </div>
@@ -6500,10 +6641,10 @@ export default function SchoolErpPage() {
                       transform: reportZoom === '80%' ? 'scale(0.8)' : reportZoom === '90%' ? 'scale(0.9)' : 'scale(1)',
                       transformOrigin: 'top center',
                       transition: 'transform 0.2s ease',
-                      fontFamily: "'Calibri', 'Segoe UI', sans-serif",
+                      fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
                     }}
                     id="report-card-print-area"
-                    className="printable-report-card w-full max-w-[780px] bg-white border-2 border-slate-900 p-8 shadow-xl rounded-sm text-slate-900 relative"
+                    className="printable-report-card w-full max-w-[780px] bg-white border-2 border-slate-900 p-8 shadow-xl rounded-sm font-aptos text-slate-900 relative"
                   >
                     {/* Official SVA Header - Direct Image without enclosing div */}
                     <div className="flex flex-col items-center text-center pb-4 border-b border-slate-200">
@@ -6516,11 +6657,11 @@ export default function SchoolErpPage() {
                         priority
                       />
                       <h2
-                        className="text-[26px] font-black leading-tight tracking-normal text-[#27457B]"
+                        className="font-rockwell-eb text-[33.5px] leading-[1.12] tracking-normal text-[#27457B]"
                         style={{
-                          fontFamily: "'Rockwell Extra Bold', 'Rockwell', 'Courier New', Georgia, serif",
-                          fontWeight: 900,
-                          WebkitTextStroke: '0.6px #27457B',
+                          fontFamily: "'Rockwell Extra Bold', 'Rockwell', Georgia, serif",
+                          fontWeight: 800,
+                          fontSynthesis: 'none',
                         }}
                       >
                         {SVA_EXAM_INFO.schoolName}
@@ -6542,300 +6683,317 @@ export default function SchoolErpPage() {
                       </div>
                     </div>
 
-                    {/* Student Particulars Grid with Avatar Placeholder */}
-                    <div className="flex items-center gap-4 py-4 border-b border-slate-200 text-xs">
-                      {/* Avatar / Photo Box */}
-                      <div className="w-16 h-20 border border-slate-300 rounded bg-slate-50 flex flex-col items-center justify-center shrink-0 text-slate-400">
-                        <div className="text-[11px] font-bold text-slate-700">
-                          {activeStudentResult.student.rollNo}
-                        </div>
-                        <div className="text-[9px] text-slate-400">Photo</div>
-                      </div>
-
-                      {/* Information Columns */}
-                      <div className="grid grid-cols-2 gap-x-6 gap-y-2 flex-1">
-                        <div>
-                          <span className="text-slate-500 font-medium">Student Name:</span>{' '}
-                          <strong className="font-bold text-slate-900">
-                            {activeStudentResult.student.name}
-                          </strong>
-                        </div>
-                        <div>
-                          <span className="text-slate-500 font-medium">Class &amp; Section:</span>{' '}
-                          <strong className="font-semibold text-slate-900">
-                            {activeStudentResult.student.class} - {activeStudentResult.student.section}
-                          </strong>
-                        </div>
-                        <div>
-                          <span className="text-slate-500 font-medium">Roll Number:</span>{' '}
-                          <span className="font-bold text-slate-900">
+                    {/* SA Report Card Body Below Header: Aptos Font Size 12 */}
+                    <div
+                      data-testid="sa-report-card-body"
+                      className="font-aptos text-[12px]"
+                      style={{
+                        fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                        fontSize: '12px',
+                      }}
+                    >
+                      {/* Student Particulars Grid with Avatar Placeholder */}
+                      <div className="flex items-center gap-4 py-4 border-b border-slate-200 text-[12px]">
+                        {/* Avatar / Photo Box */}
+                        <div className="w-16 h-20 border border-slate-300 rounded bg-slate-50 flex flex-col items-center justify-center shrink-0 text-slate-400">
+                          <div className="text-[12px] font-bold text-slate-700">
                             {activeStudentResult.student.rollNo}
-                          </span>
+                          </div>
+                          <div className="text-[12px] text-slate-400">Photo</div>
                         </div>
-                        <div>
-                          <span className="text-slate-500 font-medium">Date of Birth:</span>{' '}
-                          <span className="text-slate-800">
-                            {activeStudentResult.student.dob || '2010-01-01'}
-                          </span>
-                        </div>
-                        <div>
-                          <span className="text-slate-500 font-medium">Parents:</span>{' '}
-                          <span className="text-slate-800">
-                            {activeStudentResult.student.fatherName} &amp; {activeStudentResult.student.motherName}
-                          </span>
+
+                        {/* Information Columns */}
+                        <div className="grid grid-cols-2 gap-x-6 gap-y-2 flex-1 text-[12px]">
+                          <div>
+                            <span className="text-slate-500 font-medium">Student Name:</span>{' '}
+                            <strong className="font-bold text-slate-900">
+                              {activeStudentResult.student.name}
+                            </strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 font-medium">Class &amp; Section:</span>{' '}
+                            <strong className="font-semibold text-slate-900">
+                              {activeStudentResult.student.class} - {activeStudentResult.student.section}
+                            </strong>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 font-medium">Roll Number:</span>{' '}
+                            <span className="font-bold text-slate-900">
+                              {activeStudentResult.student.rollNo}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 font-medium">Date of Birth:</span>{' '}
+                            <span className="text-slate-800">
+                              {activeStudentResult.student.dob || '2010-01-01'}
+                            </span>
+                          </div>
+                          <div>
+                            <span className="text-slate-500 font-medium">Parents:</span>{' '}
+                            <span className="text-slate-800">
+                              {activeStudentResult.student.fatherName} &amp; {activeStudentResult.student.motherName}
+                            </span>
+                          </div>
                         </div>
                       </div>
-                    </div>
 
-                    {/* Scholastic Marks Table */}
-                    <div className="pt-4">
-                      <div className="text-xs font-bold text-slate-900 uppercase tracking-wide mb-2 flex items-center justify-between">
-                        <span>Part 1: Scholastic Assessment</span>
-                        <span className="text-[10px] font-normal text-slate-500">
-                          Internal Assessment + Written Examination (Max 100)
-                        </span>
-                      </div>
-                      <table className="w-full text-xs border border-slate-300 border-collapse">
-                        <thead>
-                          <tr className="bg-slate-100 text-slate-800 font-semibold border-b border-slate-300">
-                            <th className="py-2 px-2.5 text-left">Subject</th>
-                            {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
-                              <>
-                                <th className="py-2 px-2 text-center w-24 bg-blue-50/50">Internal</th>
-                                <th className="py-2 px-2 text-center w-20">Exam</th>
-                              </>
-                            )}
-                            <th className="py-2 px-1.5 text-center w-14">Max</th>
-                            <th className="py-2 px-1.5 text-center w-14">Pass</th>
-                            <th className="py-2 px-2 text-center w-20">Obtained</th>
-                            <th className="py-2 px-1.5 text-center w-14">Grade</th>
-                            <th className="py-2 px-2.5 text-center">Remark</th>
-                          </tr>
-                        </thead>
-                        <tbody className="divide-y divide-slate-200">
-                          {activeStudentResult.subjectDetails.map((detail) => {
-                            const bd = detail.breakdown;
-                            const isClass9 = isClass9Section(activeStudentResult.student.section);
-                            const isHindi = detail.name.toLowerCase() === 'hindi';
+                      {/* Scholastic Marks Table */}
+                      <div className="pt-4">
+                        <div className="text-[12px] font-bold text-slate-900 uppercase tracking-wide mb-2 flex items-center justify-between">
+                          <span>Part 1: Scholastic Assessment</span>
+                          <span className="text-[12px] font-normal text-slate-500">
+                            Internal Assessment + Written Examination (Max 100)
+                          </span>
+                        </div>
+                        <table className="w-full text-[12px] border border-slate-300 border-collapse font-aptos">
+                          <thead>
+                            <tr className="bg-slate-100 text-slate-800 font-semibold border-b border-slate-300">
+                              <th className="py-2 px-2.5 text-left">Subject</th>
+                              {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
+                                <>
+                                  <th className="py-2 px-2 text-center w-24 bg-blue-50/50">Internal</th>
+                                  <th className="py-2 px-2 text-center w-20">Exam</th>
+                                </>
+                              )}
+                              <th className="py-2 px-1.5 text-center w-14">Max</th>
+                              <th className="py-2 px-1.5 text-center w-14">Pass</th>
+                              <th className="py-2 px-2 text-center w-20">Obtained</th>
+                              <th className="py-2 px-1.5 text-center w-14">Grade</th>
+                              <th className="py-2 px-2.5 text-center">Remark</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-200">
+                            {activeStudentResult.subjectDetails.map((detail) => {
+                              const bd = detail.breakdown;
+                              const isClass9 = isClass9Section(activeStudentResult.student.section);
+                              const isHindi = detail.name.toLowerCase() === 'hindi';
 
-                            let internalLabel = '-';
-                            let writtenLabel = '-';
+                              let internalLabel = '-';
+                              let writtenLabel = '-';
 
-                            if (bd) {
-                              if (isClass9 && isHindi) {
-                                const list = typeof bd.listening === 'number' ? bd.listening : 0;
-                                const spk = typeof bd.speaking === 'number' ? bd.speaking : 0;
-                                const prj = typeof bd.project === 'number' ? bd.project : 0;
-                                const intTot = list + spk + prj;
-                                internalLabel = `${intTot}/55`;
-                                writtenLabel = `${bd.saExam ?? '-'}/45`;
-                              } else {
-                                const pp = typeof bd.penPaper === 'number' ? bd.penPaper : 0;
-                                const ma = typeof bd.multipleAssessment === 'number' ? bd.multipleAssessment : 0;
-                                const se = typeof bd.subjectEnrichment === 'number' ? bd.subjectEnrichment : 0;
-                                const pf = typeof bd.portfolio === 'number' ? bd.portfolio : 0;
-                                const intTot =
-                                  bd.internalMarks !== undefined && bd.internalMarks !== null
-                                    ? bd.internalMarks
-                                    : pp + ma + se + pf;
-                                internalLabel = `${intTot}/20`;
-                                writtenLabel = `${bd.writtenExam ?? '-'}/80`;
+                              if (bd) {
+                                if (isClass9 && isHindi) {
+                                  const list = typeof bd.listening === 'number' ? bd.listening : 0;
+                                  const spk = typeof bd.speaking === 'number' ? bd.speaking : 0;
+                                  const prj = typeof bd.project === 'number' ? bd.project : 0;
+                                  const intTot = list + spk + prj;
+                                  internalLabel = `${intTot}/55`;
+                                  writtenLabel = `${bd.saExam ?? '-'}/45`;
+                                } else {
+                                  const pp = typeof bd.penPaper === 'number' ? bd.penPaper : 0;
+                                  const ma = typeof bd.multipleAssessment === 'number' ? bd.multipleAssessment : 0;
+                                  const se = typeof bd.subjectEnrichment === 'number' ? bd.subjectEnrichment : 0;
+                                  const pf = typeof bd.portfolio === 'number' ? bd.portfolio : 0;
+                                  const intTot =
+                                    bd.internalMarks !== undefined && bd.internalMarks !== null
+                                      ? bd.internalMarks
+                                      : pp + ma + se + pf;
+                                  internalLabel = `${intTot}/20`;
+                                  writtenLabel = `${bd.writtenExam ?? '-'}/80`;
+                                }
                               }
-                            }
 
-                            return (
-                              <tr key={detail.name} className="hover:bg-slate-50/50">
-                                <td className="py-1.5 px-2.5 font-medium text-slate-900">
-                                  {detail.name}
-                                  {isClass9 && isHindi && (
-                                    <span className="ml-1 text-[9px] text-blue-700 bg-blue-50 px-1 py-0.2 rounded font-normal">
-                                      L+S+P+SA
-                                    </span>
+                              return (
+                                <tr key={detail.name} className="hover:bg-slate-50/50">
+                                  <td className="py-1.5 px-2.5 font-medium text-slate-900">
+                                    {detail.name}
+                                    {isClass9 && isHindi && (
+                                      <span className="ml-1 text-[12px] text-blue-700 bg-blue-50 px-1 py-0.2 rounded font-normal">
+                                        L+S+P+SA
+                                      </span>
+                                    )}
+                                  </td>
+                                  {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
+                                    <>
+                                      <td className="py-1.5 px-2 text-center text-[12px] text-slate-700 bg-blue-50/30">
+                                        {internalLabel}
+                                      </td>
+                                      <td className="py-1.5 px-2 text-center text-[12px] text-slate-700">
+                                        {writtenLabel}
+                                      </td>
+                                    </>
                                   )}
-                                </td>
-                                {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
-                                  <>
-                                    <td className="py-1.5 px-2 text-center text-[11px] text-slate-700 bg-blue-50/30">
-                                      {internalLabel}
-                                    </td>
-                                    <td className="py-1.5 px-2 text-center text-[11px] text-slate-700">
-                                      {writtenLabel}
-                                    </td>
-                                  </>
-                                )}
-                                <td className="py-1.5 px-1.5 text-center text-slate-600">
-                                  {detail.maxMarks}
-                                </td>
-                                <td className="py-1.5 px-1.5 text-center text-slate-600">
-                                  {detail.passMarks}
-                                </td>
-                                <td className="py-1.5 px-2 text-center font-bold text-slate-900">
-                                  {detail.obtained === 'AB' ? (
-                                    <span className="text-rose-600">AB</span>
-                                  ) : detail.obtained !== null ? (
-                                    detail.obtained
-                                  ) : (
-                                    '-'
-                                  )}
-                                </td>
-                                <td className="py-1.5 px-1.5 text-center font-semibold text-slate-800">
-                                  {detail.grade}
-                                </td>
-                                <td className="py-1.5 px-2.5 text-left text-[11px] text-slate-600 italic">
-                                  {detail.remark || getDefaultSubjectRemark(detail.obtained, detail.maxMarks)}
-                                </td>
-                              </tr>
-                            );
-                          })}
+                                  <td className="py-1.5 px-1.5 text-center text-slate-600">
+                                    {detail.maxMarks}
+                                  </td>
+                                  <td className="py-1.5 px-1.5 text-center text-slate-600">
+                                    {detail.passMarks}
+                                  </td>
+                                  <td className="py-1.5 px-2 text-center font-bold text-slate-900">
+                                    {detail.obtained === 'AB' ? (
+                                      <span className="text-rose-600">AB</span>
+                                    ) : detail.obtained !== null ? (
+                                      detail.obtained
+                                    ) : (
+                                      '-'
+                                    )}
+                                  </td>
+                                  <td className="py-1.5 px-1.5 text-center font-semibold text-slate-800">
+                                    {detail.grade}
+                                  </td>
+                                  <td className="py-1.5 px-2.5 text-left text-[12px] text-slate-600 italic">
+                                    {detail.remark || getDefaultSubjectRemark(detail.obtained, detail.maxMarks)}
+                                  </td>
+                                </tr>
+                              );
+                            })}
 
-                          {/* Grand Total Row */}
-                          <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
-                            <td className="py-2 px-2.5 text-slate-900">Grand Total</td>
-                            {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
-                              <>
-                                <td className="py-2 px-2 text-center text-[11px] text-slate-600 bg-blue-50/50">
-                                  Internal
-                                </td>
-                                <td className="py-2 px-2 text-center text-[11px] text-slate-600">
-                                  Written
-                                </td>
-                              </>
-                            )}
-                            <td className="py-2 px-1.5 text-center">
-                              {activeStudentResult.totalMax}
-                            </td>
-                            <td className="py-2 px-1.5 text-center">
-                              {Math.round(activeStudentResult.totalMax * 0.32)}
-                            </td>
-                            <td className="py-2 px-2 text-center text-slate-900">
-                              {activeStudentResult.totalObtained}
-                            </td>
-                            <td className="py-2 px-1.5 text-center text-emerald-800">
-                              {activeStudentResult.grade}
-                            </td>
-                            <td className="py-2 px-2.5 text-left text-[11px] font-medium text-slate-600">
-                              Overall Result: {activeStudentResult.status === 'PASS' ? 'Passed' : 'Needs Improvement'}
-                            </td>
-                          </tr>
-                        </tbody>
-                      </table>
-                    </div>
+                            {/* Grand Total Row */}
+                            <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
+                              <td className="py-2 px-2.5 text-slate-900">Grand Total</td>
+                              {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
+                                <>
+                                  <td className="py-2 px-2 text-center text-[12px] text-slate-600 bg-blue-50/50">
+                                    Internal
+                                  </td>
+                                  <td className="py-2 px-2 text-center text-[12px] text-slate-600">
+                                    Written
+                                  </td>
+                                </>
+                              )}
+                              <td className="py-2 px-1.5 text-center">
+                                {activeStudentResult.totalMax}
+                              </td>
+                              <td className="py-2 px-1.5 text-center">
+                                {Math.round(activeStudentResult.totalMax * 0.32)}
+                              </td>
+                              <td className="py-2 px-2 text-center text-slate-900">
+                                {activeStudentResult.totalObtained}
+                              </td>
+                              <td className="py-2 px-1.5 text-center text-emerald-800">
+                                {activeStudentResult.grade}
+                              </td>
+                              <td className="py-2 px-2.5 text-left text-[12px] font-medium text-slate-600">
+                                Overall Result: {activeStudentResult.status === 'PASS' ? 'Passed' : 'Needs Improvement'}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
 
-                    {/* Performance Summary Metrics */}
-                    <div className="grid grid-cols-4 gap-3 my-4 p-3 bg-slate-50 border border-slate-200 rounded text-center text-xs">
-                      <div>
-                        <div className="text-[11px] text-slate-500 font-medium">Percentage</div>
-                        <div className="text-base font-bold text-slate-900">
-                          {activeStudentResult.percentage.toFixed(2)}%
+                      {/* Performance Summary Metrics */}
+                      <div className="grid grid-cols-4 gap-3 my-4 p-3 bg-slate-50 border border-slate-200 rounded text-center text-[12px]">
+                        <div>
+                          <div className="text-[12px] text-slate-500 font-medium">Percentage</div>
+                          <div className="text-[12px] font-bold text-slate-900">
+                            {activeStudentResult.percentage.toFixed(2)}%
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[12px] text-slate-500 font-medium">Overall Grade</div>
+                          <div className="text-[12px] font-bold text-emerald-700">
+                            {activeStudentResult.grade}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[12px] text-slate-500 font-medium">Class Rank</div>
+                          <div className="text-[12px] font-bold text-slate-900">
+                            {activeStudentResult.rank ? `#${activeStudentResult.rank}` : '-'}
+                          </div>
+                        </div>
+                        <div>
+                          <div className="text-[12px] text-slate-500 font-medium">Final Result</div>
+                          <div
+                            className={`text-[12px] font-bold ${
+                              activeStudentResult.status === 'PASS'
+                                ? 'text-emerald-700'
+                                : 'text-rose-600'
+                            }`}
+                          >
+                            {activeStudentResult.status === 'PASS' ? 'PASSED' : 'NEEDS RE-EXAM'}
+                          </div>
                         </div>
                       </div>
-                      <div>
-                        <div className="text-[11px] text-slate-500 font-medium">Overall Grade</div>
-                        <div className="text-base font-bold text-emerald-700">
-                          {activeStudentResult.grade}
+
+                      {/* Part 2: Co-Scholastic & Life Skills Assessment */}
+                      <div className="mb-4">
+                        <div className="text-[12px] font-bold text-slate-900 uppercase tracking-wide mb-1.5">
+                          Part 2: Co-Scholastic &amp; Personality Assessment
+                        </div>
+                        <div className="grid grid-cols-4 gap-2 text-[12px]">
+                          <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
+                            <div className="text-[12px] text-slate-500">Work Education &amp; ICT</div>
+                            <div className="font-bold text-slate-800">Grade A</div>
+                          </div>
+                          <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
+                            <div className="text-[12px] text-slate-500">Art &amp; Expression</div>
+                            <div className="font-bold text-slate-800">Grade A</div>
+                          </div>
+                          <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
+                            <div className="text-[12px] text-slate-500">Health &amp; Physical</div>
+                            <div className="font-bold text-slate-800">Grade A</div>
+                          </div>
+                          <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
+                            <div className="text-[12px] text-slate-500">Discipline &amp; Ethics</div>
+                            <div className="font-bold text-slate-800">Grade A</div>
+                          </div>
                         </div>
                       </div>
-                      <div>
-                        <div className="text-[11px] text-slate-500 font-medium">Class Rank</div>
-                        <div className="text-base font-bold text-slate-900">
-                          {activeStudentResult.rank ? `#${activeStudentResult.rank}` : '-'}
+
+                      {/* Teacher Remarks Display */}
+                      <div className="p-3 bg-white border border-slate-200 rounded text-[12px] mb-4 flex items-center justify-between gap-3">
+                        <div>
+                          <span className="font-bold text-slate-900">Class Teacher&apos;s Remark: </span>
+                          <span className="text-slate-700 italic">
+                            &ldquo;{activeStudentResult.student.customRemarks || getDefaultClassTeacherRemark(activeStudentResult.percentage, activeStudentResult.status)}&rdquo;
+                          </span>
                         </div>
-                      </div>
-                      <div>
-                        <div className="text-[11px] text-slate-500 font-medium">Final Result</div>
-                        <div
-                          className={`text-base font-bold ${
-                            activeStudentResult.status === 'PASS'
-                              ? 'text-emerald-700'
-                              : 'text-rose-600'
-                          }`}
+                        <button
+                          type="button"
+                          onClick={() => setActiveTab('remarks')}
+                          className="shrink-0 text-[12px] font-medium text-blue-600 hover:text-blue-700 hover:underline print:hidden"
                         >
-                          {activeStudentResult.status === 'PASS' ? 'PASSED' : 'NEEDS RE-EXAM'}
-                        </div>
+                          Edit Remarks →
+                        </button>
                       </div>
-                    </div>
 
-                    {/* Part 2: Co-Scholastic & Life Skills Assessment */}
-                    <div className="mb-4">
-                      <div className="text-xs font-bold text-slate-900 uppercase tracking-wide mb-1.5">
-                        Part 2: Co-Scholastic &amp; Personality Assessment
+                      {/* Sitewide 9-Point Grading Scale Reference */}
+                      <div className="p-2 bg-slate-50 border border-slate-200 rounded text-[12px] text-slate-600 flex flex-wrap items-center justify-between gap-1 mb-6">
+                        <span><strong>Grading System:</strong> A1 (91–100)</span>
+                        <span>·</span>
+                        <span>A2 (81–90)</span>
+                        <span>·</span>
+                        <span>B1 (71–80)</span>
+                        <span>·</span>
+                        <span>B2 (61–70)</span>
+                        <span>·</span>
+                        <span>C1 (51–60)</span>
+                        <span>·</span>
+                        <span>C2 (41–50)</span>
+                        <span>·</span>
+                        <span>D (32–40)</span>
+                        <span>·</span>
+                        <span>E1 (20–31)</span>
+                        <span>·</span>
+                        <span>E2 (01–19)</span>
                       </div>
-                      <div className="grid grid-cols-4 gap-2 text-xs">
-                        <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                          <div className="text-[10px] text-slate-500">Work Education &amp; ICT</div>
-                          <div className="font-bold text-slate-800">Grade A</div>
-                        </div>
-                        <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                          <div className="text-[10px] text-slate-500">Art &amp; Expression</div>
-                          <div className="font-bold text-slate-800">Grade A</div>
-                        </div>
-                        <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                          <div className="text-[10px] text-slate-500">Health &amp; Physical</div>
-                          <div className="font-bold text-slate-800">Grade A</div>
-                        </div>
-                        <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                          <div className="text-[10px] text-slate-500">Discipline &amp; Ethics</div>
-                          <div className="font-bold text-slate-800">Grade A</div>
-                        </div>
-                      </div>
-                    </div>
 
-                    {/* Teacher Remarks Display */}
-                    <div className="p-3 bg-white border border-slate-200 rounded text-xs mb-4 flex items-center justify-between gap-3">
-                      <div>
-                        <span className="font-bold text-slate-900">Class Teacher&apos;s Remark: </span>
-                        <span className="text-slate-700 italic">
-                          &ldquo;{activeStudentResult.student.customRemarks || getDefaultClassTeacherRemark(activeStudentResult.percentage, activeStudentResult.status)}&rdquo;
-                        </span>
-                      </div>
-                      <button
-                        type="button"
-                        onClick={() => setActiveTab('remarks')}
-                        className="shrink-0 text-[11px] font-medium text-blue-600 hover:text-blue-700 hover:underline print:hidden"
+                      {/* Official Signatures Section - Evenly spaced across left, center, and right */}
+                      <div
+                        data-testid="sa-signatures-row"
+                        className="flex items-end justify-between w-full px-4 pt-6 border-t border-slate-200 text-center text-[12px] font-bold font-aptos text-slate-900"
+                        style={{
+                          fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                          fontSize: '12px',
+                        }}
                       >
-                        Edit Remarks →
-                      </button>
-                    </div>
-
-                    {/* Sitewide 9-Point Grading Scale Reference */}
-                    <div className="p-2 bg-slate-50 border border-slate-200 rounded text-[9.5px] text-slate-600 flex flex-wrap items-center justify-between gap-1 mb-6">
-                      <span><strong>Grading System:</strong> A1 (91–100)</span>
-                      <span>·</span>
-                      <span>A2 (81–90)</span>
-                      <span>·</span>
-                      <span>B1 (71–80)</span>
-                      <span>·</span>
-                      <span>B2 (61–70)</span>
-                      <span>·</span>
-                      <span>C1 (51–60)</span>
-                      <span>·</span>
-                      <span>C2 (41–50)</span>
-                      <span>·</span>
-                      <span>D (32–40)</span>
-                      <span>·</span>
-                      <span>E1 (20–31)</span>
-                      <span>·</span>
-                      <span>E2 (01–19)</span>
-                    </div>
-
-                    {/* Official Signatures Section */}
-                    <div className="grid grid-cols-3 gap-6 pt-4 border-t border-slate-200 text-center text-xs text-slate-600">
-                      <div>
-                        <div className="h-10" />
-                        <div className="border-t border-slate-400 pt-1 font-medium text-slate-900">
-                          Signature of Class Teacher
+                        <div className="w-44 text-center">
+                          <div className="h-10" />
+                          <div className="border-t border-slate-400 pt-1.5 font-bold text-slate-900">
+                            Signature of Class Teacher
+                          </div>
                         </div>
-                      </div>
-                      <div>
-                        <div className="h-10" />
-                        <div className="border-t border-slate-400 pt-1 font-medium text-slate-900">
-                          Signature of Principal with Seal
+                        <div className="w-48 text-center">
+                          <div className="h-10" />
+                          <div className="border-t border-slate-400 pt-1.5 font-bold text-slate-900">
+                            Signature of Principal with Seal
+                          </div>
                         </div>
-                      </div>
-                      <div>
-                        <div className="h-10" />
-                        <div className="border-t border-slate-400 pt-1 font-medium text-slate-900">
-                          Signature of Parent / Guardian
+                        <div className="w-44 text-center">
+                          <div className="h-10" />
+                          <div className="border-t border-slate-400 pt-1.5 font-bold text-slate-900">
+                            Signature of Parent / Guardian
+                          </div>
                         </div>
                       </div>
                     </div>
@@ -6890,7 +7048,12 @@ export default function SchoolErpPage() {
                     fullWidth
                     icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
                     value={exportExam || selectedExam}
-                    onChange={(val) => setExportExam(val)}
+                    onChange={(val) => {
+                      setExportExam(val);
+                      if (val !== selectedExam) {
+                        handleExamChange(val);
+                      }
+                    }}
                     options={Object.values(examConfigs).map((ex) => ({
                       value: ex.id,
                       label: ex.code || ex.id,
@@ -6910,7 +7073,10 @@ export default function SchoolErpPage() {
                     fullWidth
                     icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
                     value={exportClass || 'all'}
-                    onChange={(val) => setExportClass(val)}
+                    onChange={(val) => {
+                      setExportClass(val);
+                      setSelectedClass(val);
+                    }}
                     options={[
                       { value: 'all', label: 'All Classes (Grade 6 to 9)' },
                       ...SVA_ALL_CLASSES.map((c) => ({
@@ -7007,51 +7173,115 @@ export default function SchoolErpPage() {
             activeExamId={selectedExam}
             selectedClass={selectedClass}
             onUpdateExamConfig={(examId, updated, classScope) => {
+              const prevExamCfg = examConfigs[examId] || INITIAL_EXAM_CONFIGS[examId];
               setExamConfigs((prev) => ({
                 ...prev,
                 [examId]: updated,
               }));
-              if (examId === selectedExam) {
-                const updatedStudents = students.map((st) => {
-                  if (
-                    classScope &&
-                    classScope !== 'ALL' &&
-                    st.section !== classScope &&
-                    st.class !== classScope &&
-                    getClassGradeFromSection(st.section) !== classScope
-                  ) {
-                    return st;
-                  }
-                  const effectiveCfg = getEffectiveExamConfigForClass(updated, st.section);
-                  const nextMarks = { ...st.marks };
-                  const nextBreakdowns = { ...(st.breakdowns || {}) };
-                  effectiveCfg.subjects.forEach((sub) => {
-                    if (sub.components && sub.components.length > 1) {
-                      const bd =
-                        nextBreakdowns[sub.name] ||
-                        generateDefaultBreakdown(
-                          nextMarks[sub.name],
-                          sub.name,
-                          st.section
-                        );
-                      nextBreakdowns[sub.name] = bd;
-                      nextMarks[sub.name] = computeSubjectTotalFromBreakdown(
-                        sub.name,
-                        st.section,
-                        bd,
-                        sub.components
-                      );
-                    }
-                  });
+
+              const currentStoreMarks = examMarksStore[examId] || {};
+              const currentStoreBds = examBreakdownsStore[examId] || {};
+              const updatedForStore = students.map((st) => {
+                const stSourceMarks =
+                  examId === selectedExam
+                    ? { ...st.marks }
+                    : currentStoreMarks[st.id]
+                    ? { ...currentStoreMarks[st.id] }
+                    : { ...st.marks };
+                const stSourceBds =
+                  examId === selectedExam
+                    ? { ...(st.breakdowns || {}) }
+                    : currentStoreBds[st.id]
+                    ? { ...currentStoreBds[st.id] }
+                    : { ...(st.breakdowns || {}) };
+
+                if (
+                  classScope &&
+                  classScope !== 'ALL' &&
+                  st.section !== classScope &&
+                  st.class !== classScope &&
+                  getClassGradeFromSection(st.section) !== classScope
+                ) {
                   return {
                     ...st,
-                    marks: nextMarks,
-                    breakdowns: nextBreakdowns,
+                    marks: stSourceMarks,
+                    breakdowns: stSourceBds,
                   };
+                }
+
+                const prevEffCfg = prevExamCfg
+                  ? getEffectiveExamConfigForClass(prevExamCfg, st.section)
+                  : undefined;
+                const effectiveCfg = getEffectiveExamConfigForClass(updated, st.section);
+                const nextMarks = { ...stSourceMarks };
+                const nextBreakdowns = { ...stSourceBds };
+
+                effectiveCfg.subjects.forEach((sub) => {
+                  const prevSub = prevEffCfg?.subjects.find(
+                    (ps) => ps.name.toLowerCase() === sub.name.toLowerCase()
+                  );
+                  const oldMax = prevSub?.maxMarks || (isPtExam(examId) ? 25 : 100);
+                  const newMax = sub.maxMarks || (isPtExam(examId) ? 25 : 100);
+
+                  if (sub.components && sub.components.length > 1) {
+                    const bd =
+                      nextBreakdowns[sub.name] ||
+                      generateDefaultBreakdown(
+                        nextMarks[sub.name],
+                        sub.name,
+                        st.section
+                      );
+                    nextBreakdowns[sub.name] = bd;
+                    nextMarks[sub.name] = computeSubjectTotalFromBreakdown(
+                      sub.name,
+                      st.section,
+                      bd,
+                      sub.components
+                    );
+                  } else {
+                    const curVal = nextMarks[sub.name];
+                    if (typeof curVal === 'number' && newMax > 0 && (oldMax !== newMax || curVal > newMax)) {
+                      const srcMax =
+                        curVal > oldMax
+                          ? curVal > 50
+                            ? 100
+                            : curVal > 25
+                            ? 50
+                            : 25
+                          : oldMax;
+                      nextMarks[sub.name] = Math.min(
+                        newMax,
+                        Math.max(0, Math.round((curVal / srcMax) * newMax))
+                      );
+                    } else if (
+                      (curVal === undefined || curVal === null) &&
+                      isPtExam(examId) &&
+                      hasCsInPtExam(st.section)
+                    ) {
+                      const baseSt = ALL_SVA_STUDENTS.find((b) => b.id === st.id);
+                      const baseVal = baseSt?.marks[sub.name];
+                      if (typeof baseVal === 'number') {
+                        nextMarks[sub.name] = Math.min(
+                          newMax,
+                          Math.max(0, Math.round((baseVal / 100) * newMax))
+                        );
+                      }
+                    }
+                  }
                 });
-                setStudents(updatedStudents);
-                syncStoresForExam(selectedExam, updatedStudents);
-                triggerAutoSync(updatedStudents);
+
+                return {
+                  ...st,
+                  marks: nextMarks,
+                  breakdowns: nextBreakdowns,
+                };
+              });
+
+              syncStoresForExam(examId, updatedForStore);
+
+              if (examId === selectedExam) {
+                setStudents(updatedForStore);
+                triggerAutoSync(updatedForStore);
               }
               showToast(
                 `Updated ${updated.name}${
