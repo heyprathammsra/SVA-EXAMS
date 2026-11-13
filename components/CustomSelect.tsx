@@ -6,6 +6,7 @@ import { ChevronDown, Check } from 'lucide-react';
 export interface CustomSelectOption {
   value: string | number;
   label: string;
+  meta?: string;
 }
 
 interface CustomSelectProps {
@@ -20,6 +21,12 @@ interface CustomSelectProps {
   chevronClassName?: string;
   menuClassName?: string;
   fullWidth?: boolean;
+  matchTriggerWidth?: boolean;
+  renderOptionAction?: (
+    option: CustomSelectOption,
+    closeMenu: () => void
+  ) => React.ReactNode;
+  renderFooter?: (closeMenu: () => void) => React.ReactNode;
 }
 
 export default function CustomSelect({
@@ -34,6 +41,9 @@ export default function CustomSelect({
   chevronClassName = 'w-3.5 h-3.5 text-slate-400 shrink-0',
   menuClassName = '',
   fullWidth = false,
+  matchTriggerWidth = false,
+  renderOptionAction,
+  renderFooter,
 }: CustomSelectProps) {
   const [isOpen, setIsOpen] = useState(false);
   const [hoveredIndex, setHoveredIndex] = useState<number>(-1);
@@ -96,6 +106,8 @@ export default function CustomSelect({
     };
   }, [isOpen]);
 
+  const closeMenu = () => setIsOpen(false);
+
   return (
     <div
       ref={wrapperRef}
@@ -129,9 +141,18 @@ export default function CustomSelect({
           fullWidth ? 'w-full flex-1' : ''
         } ${triggerClassName}`}
       >
-        <span className="truncate">{selectedOption?.label ?? ''}</span>
+        <span className="truncate flex items-baseline gap-1.5 min-w-0">
+          <span className="truncate">{selectedOption?.label ?? ''}</span>
+          {selectedOption?.meta && (
+            <span className="text-[11px] font-normal text-slate-400 tabular-nums shrink-0">
+              {selectedOption.meta}
+            </span>
+          )}
+        </span>
         <ChevronDown
-          className={chevronClassName}
+          className={`${chevronClassName} transition-transform duration-150 ${
+            isOpen ? 'rotate-180 text-slate-600' : ''
+          }`}
           strokeWidth={2}
         />
       </button>
@@ -140,11 +161,66 @@ export default function CustomSelect({
         <div
           role="listbox"
           onClick={(e) => e.stopPropagation()}
-          className={`absolute left-0 top-[calc(100%+4px)] z-50 min-w-full w-max min-w-[200px] bg-white border border-slate-200/90 rounded-xl shadow-lg p-1 max-h-[380px] overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-100 ${menuClassName}`}
+          className={`absolute left-0 top-[calc(100%+6px)] z-50 ${
+            matchTriggerWidth ? 'right-0 w-full' : 'w-max min-w-[max(100%,210px)]'
+          } bg-white border border-slate-200/90 rounded-xl shadow-[0_18px_40px_-12px_rgba(15,23,42,0.16),0_4px_14px_-4px_rgba(15,23,42,0.06)] ring-1 ring-slate-900/[0.04] p-1.5 max-h-[380px] overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-150 ${menuClassName}`}
         >
           {options.map((opt, idx) => {
             const isSelected = String(opt.value) === String(value);
             const isHovered = hoveredIndex === idx;
+            const rightAction = renderOptionAction
+              ? renderOptionAction(opt, closeMenu)
+              : null;
+
+            if (rightAction) {
+              return (
+                <div
+                  key={String(opt.value)}
+                  onMouseEnter={() => setHoveredIndex(idx)}
+                  onMouseLeave={() => setHoveredIndex(-1)}
+                  className={`group/item flex items-center justify-between gap-1 rounded-lg pr-1 transition-colors duration-100 ${
+                    isSelected
+                      ? 'bg-blue-50/85 text-blue-700'
+                      : isHovered
+                      ? 'bg-slate-100/85 text-slate-900'
+                      : 'text-slate-700 hover:bg-slate-50'
+                  }`}
+                >
+                  <button
+                    type="button"
+                    role="option"
+                    aria-selected={isSelected}
+                    onClick={() => {
+                      onChange(String(opt.value));
+                      setIsOpen(false);
+                    }}
+                    className={`flex-1 min-w-0 pl-2.5 pr-1 py-2 text-xs whitespace-nowrap cursor-pointer flex items-center justify-between gap-2 text-left bg-transparent focus:outline-none ${
+                      isSelected ? 'font-semibold text-blue-700' : 'font-medium text-inherit'
+                    }`}
+                  >
+                    <span className="flex items-center gap-1.5 min-w-0">
+                      <span className="truncate">{opt.label}</span>
+                      {isSelected && (
+                        <Check
+                          className="w-3.5 h-3.5 text-blue-600 shrink-0"
+                          strokeWidth={2.25}
+                        />
+                      )}
+                    </span>
+                    {opt.meta && (
+                      <span
+                        className={`text-[11px] font-normal tabular-nums shrink-0 ${
+                          isSelected ? 'text-blue-600/80' : 'text-slate-400'
+                        }`}
+                      >
+                        {opt.meta}
+                      </span>
+                    )}
+                  </button>
+                  <div className="shrink-0 flex items-center">{rightAction}</div>
+                </div>
+              );
+            }
 
             return (
               <div
@@ -157,24 +233,41 @@ export default function CustomSelect({
                   onChange(String(opt.value));
                   setIsOpen(false);
                 }}
-                className={`rounded-lg px-2.5 py-1.5 text-xs whitespace-nowrap cursor-pointer transition-colors flex items-center justify-between gap-4 ${
+                className={`rounded-lg px-2.5 py-2 text-xs whitespace-nowrap cursor-pointer transition-colors duration-100 flex items-center justify-between gap-4 ${
                   isSelected
-                    ? 'bg-blue-50 text-blue-700 font-semibold'
+                    ? 'bg-blue-50/85 text-blue-700 font-semibold'
                     : isHovered
-                    ? 'bg-slate-100 text-slate-900'
+                    ? 'bg-slate-100/85 text-slate-900'
                     : 'text-slate-700 hover:bg-slate-50'
                 }`}
               >
-                <span>{opt.label}</span>
-                {isSelected && (
-                  <Check
-                    className="w-3.5 h-3.5 text-blue-600 shrink-0"
-                    strokeWidth={2}
-                  />
-                )}
+                <span className="truncate">{opt.label}</span>
+                <span className="flex items-center gap-2 shrink-0">
+                  {opt.meta && (
+                    <span
+                      className={`text-[11px] font-normal tabular-nums ${
+                        isSelected ? 'text-blue-600/80' : 'text-slate-400'
+                      }`}
+                    >
+                      {opt.meta}
+                    </span>
+                  )}
+                  {isSelected && (
+                    <Check
+                      className="w-3.5 h-3.5 text-blue-600 shrink-0"
+                      strokeWidth={2.25}
+                    />
+                  )}
+                </span>
               </div>
             );
           })}
+
+          {renderFooter && (
+            <div className="mt-1 pt-1 border-t border-slate-100">
+              {renderFooter(closeMenu)}
+            </div>
+          )}
         </div>
       )}
     </div>

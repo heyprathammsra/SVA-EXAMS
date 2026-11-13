@@ -159,6 +159,71 @@ const DEFAULT_MOTHER_NAMES = [
   'Chhaya',
 ];
 
+export const SVA_SCHOOL_HOUSES = [
+  'Sinhagad',
+  'Raigad',
+  'Shivneri',
+  'Pratapgad',
+] as const;
+
+export type SvaSchoolHouse = typeof SVA_SCHOOL_HOUSES[number];
+
+export interface ClassDefinition {
+  id: string;
+  section: string;
+  grade: string;
+}
+
+export const DEFAULT_SVA_CLASSES: ClassDefinition[] = [
+  { id: 'Sparkle', section: 'Sparkle', grade: 'Class 6' },
+  { id: 'Twinkle', section: 'Twinkle', grade: 'Class 6' },
+  { id: 'Topaz', section: 'Topaz', grade: 'Class 7' },
+  { id: 'Jade', section: 'Jade', grade: 'Class 7' },
+  { id: 'Garnet', section: 'Garnet', grade: 'Class 8' },
+  { id: 'Emerald', section: 'Emerald', grade: 'Class 8' },
+  { id: 'Ruby', section: 'Ruby', grade: 'Class 9' },
+  { id: 'Diamond', section: 'Diamond', grade: 'Class 9' },
+];
+
+export const GRADE_OPTIONS = [
+  'Class 1',
+  'Class 2',
+  'Class 3',
+  'Class 4',
+  'Class 5',
+  'Class 6',
+  'Class 7',
+  'Class 8',
+  'Class 9',
+  'Class 10',
+  'Class 11',
+  'Class 12',
+] as const;
+
+export function gradeToRoman(gradeOrClass?: string): string {
+  const raw = (gradeOrClass || '').trim().toUpperCase();
+  if (!raw) return '';
+  if (/^(I|II|III|IV|V|VI|VII|VIII|IX|X|XI|XII)$/.test(raw)) return raw;
+  const numMatch = raw.match(/(?:CLASS\s*)?(\d{1,2})/);
+  if (!numMatch) return '';
+  const n = parseInt(numMatch[1], 10);
+  const romans: Record<number, string> = {
+    1: 'I',
+    2: 'II',
+    3: 'III',
+    4: 'IV',
+    5: 'V',
+    6: 'VI',
+    7: 'VII',
+    8: 'VIII',
+    9: 'IX',
+    10: 'X',
+    11: 'XI',
+    12: 'XII',
+  };
+  return romans[n] || String(n);
+}
+
 export function getStudentPtProfile(student: StudentReportRow): {
   rollNoDisplay: string;
   classSectionDisplay: string;
@@ -184,7 +249,10 @@ export function getStudentPtProfile(student: StudentReportRow): {
     Ruby: 'IX - Ruby',
     Diamond: 'IX - Diamond',
   };
-  const classSectionDisplay = romanMap[section] || `${student.class || 'VI'} - ${section}`;
+  const romanFromStudentClass = gradeToRoman(student.class);
+  const classSectionDisplay = romanFromStudentClass
+    ? `${romanFromStudentClass} - ${section}`
+    : romanMap[section] || `${student.class || 'VI'} - ${section}`;
 
   const isAayushSample =
     student.id === 'STU-2026-0031' ||
@@ -240,24 +308,23 @@ export function getStudentPtProfile(student: StudentReportRow): {
     motherNameDisplay = picked.charAt(0).toUpperCase() + picked.slice(1);
   }
 
-  const houses = ['Sinhagad', 'Raigad', 'Shivneri', 'Pratapgad'];
   const house =
-    student.house ||
+    (student.house || '').trim() ||
     (isAayushSample
       ? 'Sinhagad'
-      : houses[(!isNaN(numericRoll) ? Math.max(0, numericRoll - 1) : 0) % houses.length]);
+      : SVA_SCHOOL_HOUSES[(!isNaN(numericRoll) ? Math.max(0, numericRoll - 1) : 0) % SVA_SCHOOL_HOUSES.length]);
 
   let defaultHeight = 129;
   let defaultWeight = 21;
   if (!isAayushSample) {
     const rOffset = !isNaN(numericRoll) ? numericRoll % 11 : 0;
-    if (section === 'Sparkle' || section === 'Twinkle') {
+    if (section === 'Sparkle' || section === 'Twinkle' || student.class === 'Class 6') {
       defaultHeight = 128 + rOffset;
       defaultWeight = 21 + (rOffset % 8);
-    } else if (section === 'Topaz' || section === 'Jade') {
+    } else if (section === 'Topaz' || section === 'Jade' || student.class === 'Class 7') {
       defaultHeight = 135 + rOffset;
       defaultWeight = 26 + (rOffset % 9);
-    } else if (section === 'Garnet' || section === 'Emerald') {
+    } else if (section === 'Garnet' || section === 'Emerald' || student.class === 'Class 8') {
       defaultHeight = 142 + rOffset;
       defaultWeight = 31 + (rOffset % 10);
     } else {
@@ -279,7 +346,7 @@ export function getStudentPtProfile(student: StudentReportRow): {
   const cleanWeight = rawWeight.trim().replace(/\s*kg$/i, '');
   const height = cleanHeight;
   const weight = cleanWeight;
-  const attendance = student.attendance || '31/31';
+  const attendance = (student.attendance || '').trim() || '31/31';
 
   return {
     rollNoDisplay,
@@ -329,8 +396,17 @@ export interface ExamConfig {
   classOverrides?: Record<string, ClassExamOverride>;
 }
 
-export function getClassGradeFromSection(sec: string): string {
+export function getClassGradeFromSection(
+  sec: string,
+  classRegistry?: ClassDefinition[]
+): string {
   const norm = (sec || '').trim();
+  if (classRegistry && classRegistry.length > 0) {
+    const match = classRegistry.find(
+      (c) => c.section.toLowerCase() === norm.toLowerCase() || c.id.toLowerCase() === norm.toLowerCase()
+    );
+    if (match) return match.grade;
+  }
   if (norm === 'Sparkle' || norm === 'Twinkle' || norm === 'Class 6') return 'Class 6';
   if (norm === 'Topaz' || norm === 'Jade' || norm === 'Class 7') return 'Class 7';
   if (norm === 'Garnet' || norm === 'Emerald' || norm === 'Class 8') return 'Class 8';
@@ -338,17 +414,18 @@ export function getClassGradeFromSection(sec: string): string {
   return norm;
 }
 
-export function hasCsInPtExam(sectionOrClass?: string): boolean {
+export function hasCsInPtExam(sectionOrClass?: string, gradeOrClass?: string): boolean {
   const norm = (sectionOrClass || '').trim().toLowerCase();
-  return (
-    norm === 'ruby' ||
-    norm === 'diamond' ||
-    norm === 'class 9' ||
-    norm === '9' ||
-    norm.includes('ruby') ||
-    norm.includes('diamond') ||
-    norm.includes('class 9')
-  );
+  const gradeNorm = (gradeOrClass || '').trim().toLowerCase();
+  const matchesClass9 = (v: string) =>
+    v === 'ruby' ||
+    v === 'diamond' ||
+    v === 'class 9' ||
+    v === '9' ||
+    v.includes('ruby') ||
+    v.includes('diamond') ||
+    v.includes('class 9');
+  return matchesClass9(norm) || (gradeNorm ? matchesClass9(gradeNorm) : false);
 }
 
 export function getPtSubjectsForClass(
@@ -1179,7 +1256,7 @@ export function computeClassResults(
       subjects;
 
     if (isPtSubjectSet && !secOverride?.subjects && !gradeOverride?.subjects) {
-      if (hasCsInPtExam(s.section || s.class)) {
+      if (hasCsInPtExam(s.section, s.class)) {
         const hasCs = studentSubjects.some((sub) => {
           const lower = sub.name.trim().toLowerCase();
           return lower === 'computer science' || lower === 'cs';

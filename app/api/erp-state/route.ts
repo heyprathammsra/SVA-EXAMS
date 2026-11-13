@@ -1,23 +1,38 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import { getAuthSessionSecret, getTeacherProfileByUsername } from '@/lib/auth';
+import { getRequestAuthSession } from '@/lib/auth-server';
+import { PersistedErpState } from '@/lib/erp-persistence';
+import { computeStateHmac, sanitizeAndValidateErpState } from '@/lib/erp-security';
 
 export const dynamic = 'force-dynamic';
 
 const DATA_DIR = path.join(process.cwd(), '.data');
 const STATE_FILE = path.join(DATA_DIR, 'erp-state.json');
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const session = getRequestAuthSession(req);
+  if (!session) {
+    return NextResponse.json({ error: 'Authentication required' }, { status: 401 });
+  }
+  const teacherProfile =
+    session.role === 'teacher' ? getTeacherProfileByUsername(session.sub) : null;
   try {
     const raw = await readFile(STATE_FILE, 'utf8');
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== 'object' || !parsed.initialized) {
-      return NextResponse.json({ exists: false, state: null });
+      return NextResponse.json({ exists: false, state: null, role: session.role, teacherProfile });
     }
-    return NextResponse.json({ exists: true, state: parsed });
+    return NextResponse.json({
+      exists: true,
+      state: parsed,
+      role: session.role,
+      teacherProfile,
+    });
   } catch (err: any) {
     if (err?.code === 'ENOENT') {
-      return NextResponse.json({ exists: false, state: null });
+      return NextResponse.json({ exists: false, state: null, role: session.role, teacherProfile });
     }
     return NextResponse.json(
       { exists: false, state: null, error: 'Failed to read persisted ERP state' },
@@ -27,6 +42,10 @@ export async function GET() {
 }
 
 export async function POST(req: NextRequest) {
+  const session = getRequestAuthSession(req);
+  if (!session) {
+    return NextResponse.json({ success: false, error: 'Authentication required' }, { status: 401 });
+  }
   try {
     const body = await req.json().catch(() => null);
     if (!body || typeof body !== 'object') {
@@ -37,7 +56,6 @@ export async function POST(req: NextRequest) {
     }
 
     const incomingState = body.state && typeof body.state === 'object' ? body.state : body;
-    const force = Boolean(body.force);
 
     if (
       !incomingState ||
@@ -52,46 +70,44 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const incomingUpdatedAt =
-      typeof incomingState.updatedAt === 'number' && Number.isFinite(incomingState.updatedAt)
-        ? incomingState.updatedAt
-        : Date.now();
-
-    if (!force) {
-      try {
-        const existingRaw = await readFile(STATE_FILE, 'utf8');
-        const existingParsed = JSON.parse(existingRaw);
-        if (
-          existingParsed &&
-          typeof existingParsed.updatedAt === 'number' &&
-          existingParsed.updatedAt > incomingUpdatedAt
-        ) {
-          return NextResponse.json({
-            success: true,
-            skipped: true,
-            updatedAt: existingParsed.updatedAt,
-          });
-        }
-      } catch {
-        // File may not exist yet or be unreadable; proceed with write
+    let existingParsed: PersistedErpState | null = null;
+    try {
+      const existingRaw = await readFile(STATE_FILE, 'utf8');
+      const parsed = JSON.parse(existingRaw);
+      if (parsed && typeof parsed === 'object' && parsed.initialized) {
+        existingParsed = parsed as PersistedErpState;
       }
+    } catch {
+      // File may not exist yet; proceed with initial write
     }
 
+    const teacherProfile =
+      session.role === 'teacher' ? getTeacherProfileByUsername(session.sub) : null;
+
+    const nowMs = Date.now();
+    const sanitizedState = sanitizeAndValidateErpState(
+      incomingState as PersistedErpState,
+      existingParsed,
+      session.role,
+      nowMs,
+      teacherProfile
+    );
+
     const stateToPersist = {
-      ...incomingState,
-      version: 1,
-      initialized: true,
-      updatedAt: incomingUpdatedAt,
+      ...sanitizedState,
+      lastModifiedBy: session.sub,
+      lastModifiedRole: session.role,
+      integrityHmac: computeStateHmac(sanitizedState, getAuthSessionSecret()),
     };
 
     await mkdir(DATA_DIR, { recursive: true });
-    const tmpFile = `${STATE_FILE}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+    const tmpFile = `${STATE_FILE}.${nowMs}.${Math.random().toString(36).slice(2)}.tmp`;
     await writeFile(tmpFile, JSON.stringify(stateToPersist), 'utf8');
     await rename(tmpFile, STATE_FILE);
 
     return NextResponse.json({
       success: true,
-      updatedAt: stateToPersist.updatedAt,
+      updatedAt: sanitizedState.updatedAt,
     });
   } catch (err: any) {
     return NextResponse.json(
@@ -101,7 +117,17 @@ export async function POST(req: NextRequest) {
   }
 }
 
-export async function DELETE() {
+export async function DELETE(req: NextRequest) {
+  const session = getRequestAuthSession(req);
+  if (!session) {
+    return NextResponse.json({ success: false, error: 'Authentication required' }, { status: 401 });
+  }
+  if (session.role !== 'admin') {
+    return NextResponse.json(
+      { success: false, error: 'Administrator privileges required to reset storage' },
+      { status: 403 }
+    );
+  }
   try {
     await unlink(STATE_FILE);
   } catch (err: any) {

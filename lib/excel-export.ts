@@ -13,6 +13,7 @@ import {
   computeSubjectTotalFromBreakdown,
   syncBreakdownWithTotal,
   hasCsInPtExam,
+  gradeToRoman,
 } from '@/lib/report-card-types';
 
 /**
@@ -22,11 +23,12 @@ import {
 export function formatReferenceClassHeader(
   sectionOrAll: string,
   session: string = '2026 -2027',
-  examNameOrCode?: string
+  examNameOrCode?: string,
+  gradeForSection?: string
 ): string {
   let baseClass = '';
   if (!sectionOrAll || sectionOrAll === 'all' || sectionOrAll === 'ALL') {
-    baseClass = `CLASS - VI to IX (All Classes) ${session}`;
+    baseClass = `CLASS - All Classes ${session}`;
   } else {
     const romanMap: Record<string, string> = {
       Sparkle: 'VI Sparkle',
@@ -38,7 +40,10 @@ export function formatReferenceClassHeader(
       Ruby: 'IX Ruby',
       Diamond: 'IX Diamond',
     };
-    const label = romanMap[sectionOrAll] || sectionOrAll;
+    const romanGrade = gradeForSection ? gradeToRoman(gradeForSection) : '';
+    const label = romanGrade
+      ? `${romanGrade} ${sectionOrAll}`
+      : romanMap[sectionOrAll] || sectionOrAll;
     baseClass = `CLASS - ${label} ${session}`;
   }
 

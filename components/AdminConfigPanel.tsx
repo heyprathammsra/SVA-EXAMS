@@ -16,11 +16,17 @@ import {
   FileSpreadsheet,
   Award,
   Download,
+  Eraser,
 } from 'lucide-react';
 import GoogleSheetsConnectCard from '@/components/GoogleSheetsConnectCard';
 import TotalCalculationFormulaCard from '@/components/TotalCalculationFormulaCard';
+import ClassesStudentsManager from '@/components/ClassesStudentsManager';
+import TeacherAccessManager from '@/components/TeacherAccessManager';
+import StudentInfoSheet from '@/components/StudentInfoSheet';
 import CustomSelect from '@/components/CustomSelect';
 import {
+  ClassDefinition,
+  DEFAULT_SVA_CLASSES,
   ExamConfig,
   SubjectConfig,
   InternalComponentConfig,
@@ -29,14 +35,61 @@ import {
   getDefaultSubjectComponents,
   evaluateCustomFormula,
   getEffectiveExamConfigForClass,
-  getClassGradeFromSection,
 } from '@/lib/report-card-types';
-import { scaleComponentsToMaxMarks } from '@/lib/erp-persistence';
+import {
+  formatClassGradeShortLabel,
+  getGradeForSection,
+  scaleComponentsToMaxMarks,
+} from '@/lib/erp-persistence';
+import type { BulkStudentCandidate } from '@/lib/student-bulk-import';
 
 interface AdminConfigPanelProps {
   examConfigs: Record<string, ExamConfig>;
   activeExamId: string;
   selectedClass?: string;
+  classes?: ClassDefinition[];
+  onAddClass?: (grade: string, section: string) => boolean;
+  onEditClass?: (classId: string, nextGrade: string, nextSection: string) => boolean;
+  onDeleteClass?: (classId: string) => boolean;
+  onAddStudentFromSettings?: (input: {
+    name: string;
+    rollNo: string;
+    section: string;
+    dob?: string;
+    fatherName?: string;
+    motherName?: string;
+    house?: string;
+    height?: string;
+    weight?: string;
+    attendance?: string;
+    attendanceOutOf?: string;
+  }) => void;
+  onUpdateStudent?: (studentId: string, patch: Partial<StudentReportRow>) => void;
+  onUpdateStudentsBatch?: (
+    patchesByStudentId: Record<string, Partial<StudentReportRow>>
+  ) => void;
+  onAddStudentsBatch?: (
+    inputs: Array<{
+      name: string;
+      rollNo: string;
+      section: string;
+      dob?: string;
+      fatherName?: string;
+      motherName?: string;
+      house?: string;
+      height?: string;
+      weight?: string;
+      attendance?: string;
+      attendanceOutOf?: string;
+    }>
+  ) => void;
+  onBulkImportStudents?: (params: {
+    targetSection: string;
+    replaceExisting: boolean;
+    candidates: BulkStudentCandidate[];
+  }) => void;
+  onBulkUpdateAttendanceOutOf?: (section: string, outOf: string) => void;
+  onDeleteStudent?: (studentId: string) => void;
   onUpdateExamConfig: (examId: string, updated: ExamConfig, classScope?: string) => void;
   onRenameSubject?: (
     examId: string,
@@ -48,6 +101,7 @@ interface AdminConfigPanelProps {
   onDeleteExam: (examId: string) => void;
   onSetActiveExam: (examId: string) => void;
   onResetDefaults: () => void;
+  onOpenClearMarksRemarks?: () => void;
   onApplyLinkedInternalExam?: (
     targetExamId: string,
     targetSubjectScope: string,
@@ -83,37 +137,51 @@ const PRESET_SUBJECTS = [
   'Computer Science',
 ];
 
-const SPECIFIC_CLASS_OPTIONS: { value: string; label: string; group: string }[] = [
-  { value: 'Sparkle', label: '6 Sparkle', group: 'Classes (Sections)' },
-  { value: 'Twinkle', label: '6 Twinkle', group: 'Classes (Sections)' },
-  { value: 'Topaz', label: '7 Topaz', group: 'Classes (Sections)' },
-  { value: 'Jade', label: '7 Jade', group: 'Classes (Sections)' },
-  { value: 'Garnet', label: '8 Garnet', group: 'Classes (Sections)' },
-  { value: 'Emerald', label: '8 Emerald', group: 'Classes (Sections)' },
-  { value: 'Ruby', label: '9 Ruby', group: 'Classes (Sections)' },
-  { value: 'Diamond', label: '9 Diamond', group: 'Classes (Sections)' },
-  { value: 'Class 6', label: 'Class 6 (Sparkle & Twinkle)', group: 'Whole Grades' },
-  { value: 'Class 7', label: 'Class 7 (Topaz & Jade)', group: 'Whole Grades' },
-  { value: 'Class 8', label: 'Class 8 (Garnet & Emerald)', group: 'Whole Grades' },
-  { value: 'Class 9', label: 'Class 9 (Ruby & Diamond)', group: 'Whole Grades' },
-];
-
-function getClassDisplayLabel(scope: string): string {
-  if (!scope || scope === 'ALL' || scope === 'all') return 'All Classes';
-  const found = SPECIFIC_CLASS_OPTIONS.find((o) => o.value === scope);
-  return found ? found.label : scope;
+function buildSpecificClassOptions(
+  classes: ClassDefinition[]
+): { value: string; label: string; group: string }[] {
+  const byGrade = new Map<string, string[]>();
+  classes.forEach((c) => {
+    const arr = byGrade.get(c.grade) || [];
+    arr.push(c.section);
+    byGrade.set(c.grade, arr);
+  });
+  return [
+    ...classes.map((c) => ({
+      value: c.section,
+      label: formatClassGradeShortLabel(classes, c.section),
+      group: 'Classes (Sections)',
+    })),
+    ...Array.from(byGrade.entries()).map(([grade, sections]) => ({
+      value: grade,
+      label: `${grade} (${sections.join(' & ')})`,
+      group: 'Whole Grades',
+    })),
+  ];
 }
 
 export default function AdminConfigPanel({
   examConfigs,
   activeExamId,
   selectedClass,
+  classes = DEFAULT_SVA_CLASSES,
+  onAddClass,
+  onEditClass,
+  onDeleteClass,
+  onAddStudentFromSettings,
+  onUpdateStudent,
+  onUpdateStudentsBatch,
+  onAddStudentsBatch,
+  onBulkImportStudents,
+  onBulkUpdateAttendanceOutOf,
+  onDeleteStudent,
   onUpdateExamConfig,
   onRenameSubject,
   onCreateNewExam,
   onDeleteExam,
   onSetActiveExam,
   onResetDefaults,
+  onOpenClearMarksRemarks,
   onApplyLinkedInternalExam,
   showToast,
   sheetsSyncStatus = 'idle',
@@ -130,6 +198,19 @@ export default function AdminConfigPanel({
   svaSubjects = [],
   getClassGradeLabel = (c) => c,
 }: AdminConfigPanelProps) {
+  const [activeSheetSection, setActiveSheetSection] = useState<string | null>(null);
+  const specificClassOptions = React.useMemo(
+    () => buildSpecificClassOptions(classes),
+    [classes]
+  );
+  const getClassDisplayLabel = React.useCallback(
+    (scope: string): string => {
+      if (!scope || scope === 'ALL' || scope === 'all') return 'All Classes';
+      const found = specificClassOptions.find((o) => o.value === scope);
+      return found ? found.label : scope;
+    },
+    [specificClassOptions]
+  );
   const [editingExamId, setEditingExamId] = useState<string>(activeExamId);
   const [selectedSplitSubject, setSelectedSplitSubject] = useState<string>('ALL');
 
@@ -260,7 +341,7 @@ export default function AdminConfigPanel({
       // If user edited a whole grade (e.g. 'Class 9'), also sync its constituent sections if they had overrides
       if (activeClassScope.startsWith('Class ')) {
         Object.keys(nextOverrides).forEach((k) => {
-          if (k !== activeClassScope && getClassGradeFromSection(k) === activeClassScope) {
+          if (k !== activeClassScope && getGradeForSection(classes, k) === activeClassScope) {
             delete nextOverrides[k];
           }
         });
@@ -350,12 +431,12 @@ export default function AdminConfigPanel({
         (s) =>
           s.section === activeClassScope ||
           s.class === activeClassScope ||
-          getClassGradeFromSection(s.section) === activeClassScope
+          getGradeForSection(classes, s.section) === activeClassScope
       );
       if (match) return match;
     }
     return students[0];
-  }, [students, activeClassScope]);
+  }, [students, activeClassScope, classes]);
 
   const previewEvaluation = React.useMemo(() => {
     if (!currentConfig.subjects || currentConfig.subjects.length === 0) return null;
@@ -797,7 +878,7 @@ export default function AdminConfigPanel({
             className="text-xs font-medium text-slate-800 bg-white border border-slate-200 rounded-lg px-2.5 py-1 focus:outline-none focus:border-blue-600 cursor-pointer shadow-xs"
           >
             <optgroup label="Classes (Sections)">
-              {SPECIFIC_CLASS_OPTIONS.filter((o) => o.group === 'Classes (Sections)').map(
+              {specificClassOptions.filter((o) => o.group === 'Classes (Sections)').map(
                 (opt) => (
                   <option key={opt.value} value={opt.value}>
                     {opt.label}
@@ -806,7 +887,7 @@ export default function AdminConfigPanel({
               )}
             </optgroup>
             <optgroup label="Whole Grades">
-              {SPECIFIC_CLASS_OPTIONS.filter((o) => o.group === 'Whole Grades').map((opt) => (
+              {specificClassOptions.filter((o) => o.group === 'Whole Grades').map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>
@@ -829,24 +910,71 @@ export default function AdminConfigPanel({
     </div>
   );
 
+  const activeSheetClassDef = activeSheetSection
+    ? classes.find((c) => c.section === activeSheetSection) || null
+    : null;
+
+  if (activeSheetClassDef) {
+    return (
+      <div className="w-full min-w-0 max-w-7xl mx-auto pb-20">
+        <StudentInfoSheet
+          classDef={activeSheetClassDef}
+          classes={classes}
+          students={students}
+          onSwitchClass={(sec) => setActiveSheetSection(sec)}
+          onClose={() => setActiveSheetSection(null)}
+          onUpdateStudent={(studentId, patch) =>
+            onUpdateStudent?.(studentId, patch)
+          }
+          onUpdateStudentsBatch={(patches) =>
+            onUpdateStudentsBatch?.(patches)
+          }
+          onAddStudentsBatch={(inputs) =>
+            onAddStudentsBatch?.(inputs)
+          }
+          onBulkImportStudents={(params) =>
+            onBulkImportStudents?.(params)
+          }
+          onBulkUpdateAttendanceOutOf={(section, outOf) =>
+            onBulkUpdateAttendanceOutOf?.(section, outOf)
+          }
+          onAddStudent={(input) => onAddStudentFromSettings?.(input)}
+          onDeleteStudent={(studentId) => onDeleteStudent?.(studentId)}
+          showToast={showToast}
+        />
+      </div>
+    );
+  }
+
   return (
-    <div className="max-w-5xl mx-auto space-y-6 pb-20">
+    <div className="w-full min-w-0 max-w-5xl mx-auto space-y-6 pb-20">
       {/* Page Header Strip */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
           <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
-            Exam Settings
+            Settings
           </h1>
           <p className="text-xs sm:text-sm text-slate-500 mt-0.5 font-normal">
-            Manage exams, assessment breakdowns, and passing rules for all classes or a specific class.
+            Manage classes, student info sheets, exams, assessment breakdowns, and passing rules.
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
+          {onOpenClearMarksRemarks && (
+            <button
+              type="button"
+              onClick={onOpenClearMarksRemarks}
+              className="px-3.5 py-1.5 text-xs sm:text-sm font-medium text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-50 rounded-xl transition-all duration-150 flex items-center gap-1.5 cursor-pointer border border-slate-200/90 hover:border-slate-300 shadow-[0_1px_2px_rgba(15,23,42,0.03)] whitespace-nowrap shrink-0"
+            >
+              <Eraser className="w-3.5 h-3.5 text-slate-500" />
+              <span>Clear Marks & Remarks</span>
+            </button>
+          )}
+
           <button
             type="button"
             onClick={() => setIsCreatingNew(true)}
-            className="px-3.5 py-1.5 text-xs sm:text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer shadow-xs"
+            className="px-3.5 py-1.5 text-xs sm:text-sm font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-all duration-150 flex items-center gap-1.5 cursor-pointer shadow-[0_1px_2px_rgba(37,99,235,0.28),inset_0_1px_0_rgba(255,255,255,0.16)] active:scale-[0.99] whitespace-nowrap shrink-0"
           >
             <Plus className="w-4 h-4" />
             New Exam
@@ -855,19 +983,44 @@ export default function AdminConfigPanel({
           <button
             type="button"
             onClick={onResetDefaults}
-            title="Reset all settings to CBSE defaults"
-            className="p-1.5 text-slate-400 hover:text-slate-600 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer border border-slate-200"
+            title="Restore default CBSE demo data and settings"
+            aria-label="Reset all settings to defaults"
+            className="p-2 text-slate-400 hover:text-slate-700 bg-white hover:bg-slate-50 rounded-xl transition-all duration-150 cursor-pointer border border-slate-200/90 hover:border-slate-300 shadow-[0_1px_2px_rgba(15,23,42,0.03)] shrink-0"
           >
             <RotateCcw className="w-4 h-4" />
           </button>
         </div>
       </div>
 
+      {/* Classes & Student Roster Section */}
+      <ClassesStudentsManager
+        classes={classes}
+        students={students}
+        onOpenClassSheet={(section) => setActiveSheetSection(section)}
+        onAddClass={(grade, section) =>
+          onAddClass ? onAddClass(grade, section) : false
+        }
+        onEditClass={(classId, nextGrade, nextSection) =>
+          onEditClass ? onEditClass(classId, nextGrade, nextSection) : false
+        }
+        onDeleteClass={(classId) =>
+          onDeleteClass ? onDeleteClass(classId) : false
+        }
+        onAddStudent={(input) => onAddStudentFromSettings?.(input)}
+      />
+
+      {/* Teacher Accounts & Class-Subject Mapping Section */}
+      <TeacherAccessManager
+        classes={classes}
+        subjects={(svaSubjects || currentConfig.subjects || []).map((s) => s.name)}
+        showToast={showToast}
+      />
+
       {/* Main Grid: Left Navigation + Right Content */}
       <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
         {/* Left Minimal Sidebar: Exams */}
-        <div className="md:col-span-3 space-y-1">
-          <div className="text-[11px] font-medium text-slate-400 uppercase tracking-wider px-2 py-1">
+        <div className="md:col-span-3 space-y-1.5">
+          <div className="text-[11px] font-semibold text-slate-400 tracking-wide px-3 py-1">
             Exams
           </div>
           <div className="space-y-0.5">
@@ -880,15 +1033,17 @@ export default function AdminConfigPanel({
                 <div
                   key={ex.id}
                   onClick={() => handleSelectExamToEdit(ex.id)}
-                  className={`group flex items-center justify-between px-3 py-2 rounded-lg text-xs cursor-pointer transition-colors ${
+                  className={`group flex items-center justify-between px-3 py-2 rounded-xl text-xs cursor-pointer transition-all duration-150 ${
                     isSelected
-                      ? 'bg-blue-50/80 text-blue-700 font-semibold border border-blue-100'
-                      : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900 border border-transparent'
+                      ? 'bg-white text-blue-700 font-semibold border border-slate-200/90 shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
+                      : 'text-slate-600 hover:bg-white/70 hover:text-slate-900 border border-transparent'
                   }`}
                 >
                   <div className="min-w-0 flex items-baseline gap-2">
                     <span className="truncate">{ex.code || ex.id}</span>
-                    <span className="text-[11px] font-normal text-slate-400 truncate">
+                    <span className={`text-[11px] font-normal tabular-nums truncate ${
+                      isSelected ? 'text-blue-500/80' : 'text-slate-400'
+                    }`}>
                       {subMax}m
                     </span>
                   </div>
@@ -896,6 +1051,7 @@ export default function AdminConfigPanel({
                   {canDelete && (
                     <button
                       type="button"
+                      aria-label={`Delete ${ex.code || ex.id}`}
                       onClick={(e) => {
                         e.stopPropagation();
                         onDeleteExam(ex.id);
@@ -906,7 +1062,7 @@ export default function AdminConfigPanel({
                           setEditingExamId(remaining[0] || 'SA-1');
                         }
                       }}
-                      className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-rose-600 transition-opacity"
+                      className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-rose-600 rounded-md transition-opacity cursor-pointer"
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
@@ -920,7 +1076,7 @@ export default function AdminConfigPanel({
         {/* Right Content */}
         <div className="md:col-span-9 space-y-6">
           {/* Section: Exam Header, Class Scope & Mode */}
-          <div className="bg-white border border-slate-200/80 rounded-xl p-4 space-y-3 shadow-xs">
+          <div className="bg-white border border-slate-200/85 rounded-2xl p-5 space-y-3.5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex-1">
                 <label className="text-[11px] font-medium text-slate-400 block mb-0.5">Exam Name</label>
@@ -966,10 +1122,11 @@ export default function AdminConfigPanel({
 
             {/* Class Scope Selector Bar (All Classes vs Specific Class) */}
             <div className="pt-3 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-2 text-xs">
                 <Layers className="w-3.5 h-3.5 text-slate-400" />
-                <span className="text-xs font-medium text-slate-600">Apply Settings To:</span>
-                <span className="text-[11px] font-semibold text-slate-900 bg-slate-100 px-2 py-0.5 rounded">
+                <span className="font-medium text-slate-500">Apply settings to</span>
+                <span className="text-slate-300" aria-hidden="true">·</span>
+                <span className="font-semibold text-slate-900">
                   {getClassDisplayLabel(activeClassScope)}
                 </span>
               </div>
@@ -1013,14 +1170,15 @@ export default function AdminConfigPanel({
 
           {/* Section 1: Assessment Breakdown */}
           {hasInternalSplit && (
-            <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-xs space-y-4">
+            <div className="bg-white border border-slate-200/85 rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] space-y-4">
               <div className="flex items-center justify-between pb-3 border-b border-slate-100">
                 <div>
-                  <div className="flex items-center gap-2">
+                  <div className="flex items-baseline gap-2">
                     <h2 className="text-sm font-semibold text-slate-900">
                       Assessment Breakdown
                     </h2>
-                    <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                    <span className="text-xs text-slate-300" aria-hidden="true">·</span>
+                    <span className="text-xs font-medium text-slate-500">
                       {getClassDisplayLabel(activeClassScope)}
                     </span>
                   </div>
@@ -1201,14 +1359,15 @@ export default function AdminConfigPanel({
           )}
 
           {/* Section 2: Subjects & Passing Marks */}
-          <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-xs space-y-4">
+          <div className="bg-white border border-slate-200/85 rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] space-y-4">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <div>
-                <div className="flex items-center gap-2">
+                <div className="flex items-baseline gap-2">
                   <h2 className="text-sm font-semibold text-slate-900">
                     Subjects & Passing Marks
                   </h2>
-                  <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-slate-100 text-slate-600">
+                  <span className="text-xs text-slate-300" aria-hidden="true">·</span>
+                  <span className="text-xs font-medium text-slate-500">
                     {getClassDisplayLabel(activeClassScope)}
                   </span>
                 </div>
@@ -1225,7 +1384,7 @@ export default function AdminConfigPanel({
                     key={m}
                     type="button"
                     onClick={() => applyAllSubjectMaxMarks(m)}
-                    className="text-[11px] font-mono px-1.5 py-0.5 text-slate-600 bg-slate-100 hover:bg-slate-200 rounded transition-colors cursor-pointer"
+                    className="text-[11px] font-medium tabular-nums px-2 py-1 text-slate-600 bg-slate-100/80 hover:bg-slate-200/80 hover:text-slate-900 rounded-lg transition-colors cursor-pointer"
                   >
                     {m}m
                   </button>
@@ -1381,6 +1540,7 @@ export default function AdminConfigPanel({
               }
             }}
             students={students}
+            classes={classes}
             onUpdateExamConfig={onUpdateExamConfig}
             showToast={showToast}
           />
@@ -1402,9 +1562,9 @@ export default function AdminConfigPanel({
           onClick={(e) => {
             if (e.target === e.currentTarget) setIsCreatingNew(false);
           }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4 animate-in fade-in duration-150"
         >
-          <div className="bg-white border border-slate-200 rounded-xl shadow-xl w-full max-w-sm p-5 space-y-4 animate-in zoom-in-95 duration-150">
+          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-sm p-5 space-y-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
               <h3 className="text-sm font-semibold text-slate-900">
                 New Exam

@@ -1,11 +1,13 @@
 import {
+  ClassDefinition,
+  DEFAULT_SVA_CLASSES,
   ExamConfig,
   InternalComponentConfig,
   StudentReportRow,
   SubjectBreakdown,
   SubjectConfig,
   generateDefaultBreakdown,
-  getDefaultSubjectComponents,
+  getClassGradeFromSection,
   getEffectiveExamConfigForClass,
   hasCsInPtExam,
   isPtExam,
@@ -16,6 +18,7 @@ import { getDefaultSubjectRemark } from './remarks-utils';
 
 export const SVA_STORAGE_KEYS = {
   INIT_FLAG: 'sva_initialized_v1',
+  CLASSES: 'sva_classes_v1',
   STUDENTS: 'sva_students_roster_v1',
   EXAM_MARKS_STORE: 'sva_exam_marks_store_v1',
   EXAM_BREAKDOWNS_STORE: 'sva_exam_breakdowns_store_v1',
@@ -41,10 +44,15 @@ export interface PersistedErpState {
   updatedAt: number;
   selectedClass: string;
   selectedExam: string;
+  classes: ClassDefinition[];
   examConfigs: Record<string, ExamConfig>;
   students: StudentReportRow[];
   examMarksStore: ExamMarksStore;
   examBreakdownsStore: ExamBreakdownsStore;
+}
+
+export function getDefaultClasses(): ClassDefinition[] {
+  return DEFAULT_SVA_CLASSES.map((c) => ({ ...c }));
 }
 
 export function sanitizePtExamConfigs(
@@ -270,6 +278,7 @@ export function createDefaultErpState(
     updatedAt: 0,
     selectedClass: 'Diamond',
     selectedExam: 'SA-1',
+    classes: getDefaultClasses(),
     examConfigs,
     students,
     examMarksStore,
@@ -283,6 +292,7 @@ export function parseStoredErpState(
   validClasses: readonly string[]
 ): { state: PersistedErpState | null; hasSavedData: boolean } {
   const initFlag = rawStorage[SVA_STORAGE_KEYS.INIT_FLAG];
+  const rawClasses = rawStorage[SVA_STORAGE_KEYS.CLASSES];
   const rawConfigs = rawStorage[SVA_STORAGE_KEYS.EXAM_CONFIGS];
   const rawStudents = rawStorage[SVA_STORAGE_KEYS.STUDENTS];
   const rawMarksStore = rawStorage[SVA_STORAGE_KEYS.EXAM_MARKS_STORE];
@@ -293,6 +303,7 @@ export function parseStoredErpState(
 
   const hasSavedData = Boolean(
     initFlag === '1' ||
+      rawClasses ||
       rawConfigs ||
       rawStudents ||
       rawMarksStore ||
@@ -303,6 +314,28 @@ export function parseStoredErpState(
 
   if (!hasSavedData) {
     return { state: null, hasSavedData: false };
+  }
+
+  let classes: ClassDefinition[] = defaultState.classes || getDefaultClasses();
+  if (rawClasses) {
+    try {
+      const parsed = JSON.parse(rawClasses);
+      if (Array.isArray(parsed)) {
+        const sanitized = parsed
+          .filter(
+            (c): c is ClassDefinition =>
+              Boolean(c && typeof c === 'object' && typeof c.section === 'string' && c.section.trim())
+          )
+          .map((c) => ({
+            id: typeof c.id === 'string' && c.id.trim() ? c.id.trim() : c.section.trim(),
+            section: c.section.trim(),
+            grade: typeof c.grade === 'string' && c.grade.trim() ? c.grade.trim() : getClassGradeFromSection(c.section),
+          }));
+        if (sanitized.length > 0) {
+          classes = sanitized;
+        }
+      }
+    } catch {}
   }
 
   let examConfigs = defaultState.examConfigs;
@@ -360,16 +393,21 @@ export function parseStoredErpState(
     selectedExam = availableExamIds[0];
   }
 
+  const knownSections = new Set<string>([
+    ...validClasses,
+    ...classes.map((c) => c.section),
+    ...students.map((s) => s.section),
+  ]);
   let selectedClass = defaultState.selectedClass;
   if (rawSelectedClass && rawSelectedClass.trim()) {
     const trimmedCls = rawSelectedClass.trim();
-    if (
-      trimmedCls === 'all' ||
-      validClasses.includes(trimmedCls) ||
-      students.some((s) => s.section === trimmedCls)
-    ) {
+    if (trimmedCls === 'all' || knownSections.has(trimmedCls)) {
       selectedClass = trimmedCls;
+    } else if (classes.length > 0) {
+      selectedClass = classes[0].section;
     }
+  } else if (selectedClass !== 'all' && classes.length > 0 && !knownSections.has(selectedClass)) {
+    selectedClass = classes[0].section;
   }
 
   const updatedAtNum = rawUpdatedAt ? Number(rawUpdatedAt) : 1;
@@ -383,6 +421,7 @@ export function parseStoredErpState(
       updatedAt,
       selectedClass,
       selectedExam,
+      classes,
       examConfigs,
       students,
       examMarksStore,
@@ -699,3 +738,436 @@ export function removeStudentFromErpStores(
     examBreakdownsStore: nextBreakdownsStore,
   };
 }
+
+export function getSectionNames(classes: ClassDefinition[]): string[] {
+  return classes.map((c) => c.section);
+}
+
+export function getGradeForSection(
+  classes: ClassDefinition[],
+  sectionOrClass: string
+): string {
+  const trimmed = (sectionOrClass || '').trim();
+  const match = classes.find(
+    (c) =>
+      c.section.toLowerCase() === trimmed.toLowerCase() ||
+      c.id.toLowerCase() === trimmed.toLowerCase()
+  );
+  if (match) return match.grade;
+  return getClassGradeFromSection(trimmed);
+}
+
+export function formatClassGradeShortLabel(
+  classes: ClassDefinition[],
+  clsName: string
+): string {
+  const trimmed = (clsName || '').trim();
+  const match = classes.find(
+    (c) =>
+      c.section.toLowerCase() === trimmed.toLowerCase() ||
+      c.id.toLowerCase() === trimmed.toLowerCase()
+  );
+  if (match) {
+    const gradeNum = match.grade.replace(/^Class\s+/i, '').trim();
+    return `${gradeNum} ${match.section}`;
+  }
+  if (trimmed === 'Sparkle' || trimmed === 'Twinkle') return `6 ${trimmed}`;
+  if (trimmed === 'Topaz' || trimmed === 'Jade') return `7 ${trimmed}`;
+  if (trimmed === 'Garnet' || trimmed === 'Emerald') return `8 ${trimmed}`;
+  if (trimmed === 'Ruby' || trimmed === 'Diamond') return `9 ${trimmed}`;
+  if (/^Class\s+/i.test(trimmed)) {
+    return trimmed.replace(/^Class\s+/i, '');
+  }
+  return trimmed;
+}
+
+export function addClassDefinition(
+  classes: ClassDefinition[],
+  grade: string,
+  section: string
+): { classes: ClassDefinition[]; created?: ClassDefinition; error?: string } {
+  const cleanSection = section.trim();
+  const cleanGrade = grade.trim() || 'Class 6';
+  if (!cleanSection) {
+    return { classes, error: 'Please enter a class/section name' };
+  }
+  if (
+    classes.some(
+      (c) => c.section.toLowerCase() === cleanSection.toLowerCase()
+    )
+  ) {
+    return {
+      classes,
+      error: `Class "${cleanSection}" already exists`,
+    };
+  }
+  const id = cleanSection;
+  const created: ClassDefinition = {
+    id,
+    section: cleanSection,
+    grade: cleanGrade,
+  };
+  return {
+    classes: [...classes, created],
+    created,
+  };
+}
+
+export function updateClassDefinition(params: {
+  classes: ClassDefinition[];
+  students: StudentReportRow[];
+  examConfigs: Record<string, ExamConfig>;
+  selectedClass: string;
+  exportClass: string;
+  classId: string;
+  nextGrade: string;
+  nextSection: string;
+}): {
+  classes: ClassDefinition[];
+  students: StudentReportRow[];
+  examConfigs: Record<string, ExamConfig>;
+  selectedClass: string;
+  exportClass: string;
+  error?: string;
+} {
+  const {
+    classes,
+    students,
+    examConfigs,
+    selectedClass,
+    exportClass,
+    classId,
+    nextGrade,
+    nextSection,
+  } = params;
+
+  const target = classes.find((c) => c.id === classId || c.section === classId);
+  if (!target) {
+    return {
+      classes,
+      students,
+      examConfigs,
+      selectedClass,
+      exportClass,
+      error: 'Class not found',
+    };
+  }
+
+  const cleanSection = nextSection.trim();
+  const cleanGrade = nextGrade.trim() || target.grade;
+  if (!cleanSection) {
+    return {
+      classes,
+      students,
+      examConfigs,
+      selectedClass,
+      exportClass,
+      error: 'Class/section name cannot be empty',
+    };
+  }
+
+  const duplicate = classes.find(
+    (c) =>
+      c.id !== target.id &&
+      c.section.toLowerCase() === cleanSection.toLowerCase()
+  );
+  if (duplicate) {
+    return {
+      classes,
+      students,
+      examConfigs,
+      selectedClass,
+      exportClass,
+      error: `Another class named "${cleanSection}" already exists`,
+    };
+  }
+
+  const oldSection = target.section;
+  const nextClasses = classes.map((c) =>
+    c.id === target.id
+      ? { ...c, section: cleanSection, grade: cleanGrade }
+      : c
+  );
+
+  const nextStudents = students.map((st) =>
+    st.section === oldSection
+      ? { ...st, section: cleanSection, class: cleanGrade }
+      : st
+  );
+
+  let nextExamConfigs = examConfigs;
+  if (oldSection !== cleanSection) {
+    nextExamConfigs = {};
+    Object.entries(examConfigs).forEach(([exId, cfg]) => {
+      if (cfg.classOverrides && oldSection in cfg.classOverrides) {
+        const nextOverrides = { ...cfg.classOverrides };
+        nextOverrides[cleanSection] = nextOverrides[oldSection];
+        delete nextOverrides[oldSection];
+        nextExamConfigs[exId] = { ...cfg, classOverrides: nextOverrides };
+      } else {
+        nextExamConfigs[exId] = cfg;
+      }
+    });
+  }
+
+  return {
+    classes: nextClasses,
+    students: nextStudents,
+    examConfigs: nextExamConfigs,
+    selectedClass: selectedClass === oldSection ? cleanSection : selectedClass,
+    exportClass: exportClass === oldSection ? cleanSection : exportClass,
+  };
+}
+
+export function deleteClassDefinition(params: {
+  classes: ClassDefinition[];
+  students: StudentReportRow[];
+  examConfigs: Record<string, ExamConfig>;
+  examMarksStore: ExamMarksStore;
+  examBreakdownsStore: ExamBreakdownsStore;
+  selectedClass: string;
+  exportClass: string;
+  classId: string;
+}): {
+  classes: ClassDefinition[];
+  students: StudentReportRow[];
+  examConfigs: Record<string, ExamConfig>;
+  examMarksStore: ExamMarksStore;
+  examBreakdownsStore: ExamBreakdownsStore;
+  selectedClass: string;
+  exportClass: string;
+  removedStudentsCount: number;
+  error?: string;
+} {
+  const {
+    classes,
+    students,
+    examConfigs,
+    examMarksStore,
+    examBreakdownsStore,
+    selectedClass,
+    exportClass,
+    classId,
+  } = params;
+
+  if (classes.length <= 1) {
+    return {
+      classes,
+      students,
+      examConfigs,
+      examMarksStore,
+      examBreakdownsStore,
+      selectedClass,
+      exportClass,
+      removedStudentsCount: 0,
+      error: 'At least one class must remain configured',
+    };
+  }
+
+  const target = classes.find((c) => c.id === classId || c.section === classId);
+  if (!target) {
+    return {
+      classes,
+      students,
+      examConfigs,
+      examMarksStore,
+      examBreakdownsStore,
+      selectedClass,
+      exportClass,
+      removedStudentsCount: 0,
+      error: 'Class not found',
+    };
+  }
+
+  const nextClasses = classes.filter((c) => c.id !== target.id);
+  const removedStudentIds = new Set(
+    students.filter((s) => s.section === target.section).map((s) => s.id)
+  );
+  const nextStudents = students.filter((s) => s.section !== target.section);
+
+  let nextMarksStore = examMarksStore;
+  let nextBreakdownsStore = examBreakdownsStore;
+  if (removedStudentIds.size > 0) {
+    removedStudentIds.forEach((stuId) => {
+      const cleaned = removeStudentFromErpStores(
+        nextMarksStore,
+        nextBreakdownsStore,
+        stuId
+      );
+      nextMarksStore = cleaned.examMarksStore;
+      nextBreakdownsStore = cleaned.examBreakdownsStore;
+    });
+  }
+
+  const nextExamConfigs: Record<string, ExamConfig> = {};
+  Object.entries(examConfigs).forEach(([exId, cfg]) => {
+    if (cfg.classOverrides && target.section in cfg.classOverrides) {
+      const nextOverrides = { ...cfg.classOverrides };
+      delete nextOverrides[target.section];
+      nextExamConfigs[exId] = {
+        ...cfg,
+        classOverrides:
+          Object.keys(nextOverrides).length > 0 ? nextOverrides : undefined,
+      };
+    } else {
+      nextExamConfigs[exId] = cfg;
+    }
+  });
+
+  const fallbackClass = nextClasses[0]?.section || 'all';
+  return {
+    classes: nextClasses,
+    students: nextStudents,
+    examConfigs: nextExamConfigs,
+    examMarksStore: nextMarksStore,
+    examBreakdownsStore: nextBreakdownsStore,
+    selectedClass:
+      selectedClass === target.section ? fallbackClass : selectedClass,
+    exportClass: exportClass === target.section ? fallbackClass : exportClass,
+    removedStudentsCount: removedStudentIds.size,
+  };
+}
+
+export function parseAttendanceParts(
+  attendance?: string,
+  defaultOutOf: string = '31'
+): { present: string; outOf: string } {
+  const raw = (attendance || '').trim();
+  if (!raw) {
+    return { present: '', outOf: '' };
+  }
+  const slashIdx = raw.indexOf('/');
+  if (slashIdx === -1) {
+    return { present: raw, outOf: defaultOutOf };
+  }
+  return {
+    present: raw.slice(0, slashIdx).trim(),
+    outOf: raw.slice(slashIdx + 1).trim(),
+  };
+}
+
+export function formatAttendanceParts(present: string, outOf: string): string {
+  const cleanPresent = (present || '').trim();
+  const cleanOutOf = (outOf || '').trim();
+  if (!cleanPresent && !cleanOutOf) return '';
+  if (cleanPresent && cleanOutOf) return `${cleanPresent}/${cleanOutOf}`;
+  if (cleanPresent) return cleanPresent;
+  return `0/${cleanOutOf}`;
+}
+
+export function createStudentRecord(params: {
+  students: StudentReportRow[];
+  examConfigs: Record<string, ExamConfig>;
+  activeExamId: string;
+  classes: ClassDefinition[];
+  name: string;
+  rollNo: string;
+  section: string;
+  dob?: string;
+  fatherName?: string;
+  motherName?: string;
+  house?: string;
+  height?: string | number;
+  weight?: string | number;
+  attendance?: string;
+  attendanceOutOf?: string;
+}): {
+  createdStudent: StudentReportRow;
+  nextStudents: StudentReportRow[];
+  examMarksStoreUpdates: Record<string, Record<string, number | 'AB' | null>>;
+  examBreakdownsStoreUpdates: Record<string, Record<string, SubjectBreakdown>>;
+} {
+  const {
+    students,
+    examConfigs,
+    activeExamId,
+    classes,
+    name,
+    rollNo,
+    section,
+    dob,
+    fatherName,
+    motherName,
+    house,
+    height,
+    weight,
+    attendance,
+    attendanceOutOf,
+  } = params;
+
+  const targetSection = section.trim() || classes[0]?.section || 'Sparkle';
+  const grade = getGradeForSection(classes, targetSection);
+  const cleanRoll = rollNo.trim().padStart(2, '0');
+  const newId = `sva-${targetSection.toLowerCase().replace(/[^a-z0-9]/g, '')}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+
+  const activeCfg = examConfigs[activeExamId] || Object.values(examConfigs)[0];
+  const defaultMarks: Record<string, number | 'AB' | null> = {};
+  const defaultBreakdowns: Record<string, SubjectBreakdown> = {};
+
+  if (activeCfg) {
+    const eff = getEffectiveExamConfigForClass(activeCfg, targetSection);
+    eff.subjects.forEach((sub) => {
+      const defMark = Math.round((sub.maxMarks || 100) * 0.8);
+      defaultMarks[sub.name] = defMark;
+      const bd = syncBreakdownWithTotal(defMark, sub.name, targetSection, sub.components);
+      if (bd) {
+        defaultBreakdowns[sub.name] = bd;
+      }
+    });
+  }
+
+  const combinedAttendance =
+    attendanceOutOf !== undefined
+      ? formatAttendanceParts(attendance || '', attendanceOutOf)
+      : (attendance || '').trim();
+
+  const createdStudent: StudentReportRow = {
+    id: newId,
+    rollNo: cleanRoll,
+    name: name.trim(),
+    admissionNo: `SVA-2026-${targetSection.substring(0, 3).toUpperCase()}-${cleanRoll}`,
+    class: grade,
+    section: targetSection,
+    dob: (dob || '').trim() || '2014-01-01',
+    fatherName: (fatherName || '').trim() || 'Parent',
+    motherName: (motherName || '').trim() || 'Parent',
+    ...(house && house.trim() ? { house: house.trim() } : {}),
+    ...(height !== undefined && String(height).trim() !== '' ? { height: String(height).trim() } : {}),
+    ...(weight !== undefined && String(weight).trim() !== '' ? { weight: String(weight).trim() } : {}),
+    ...(combinedAttendance ? { attendance: combinedAttendance } : {}),
+    marks: defaultMarks,
+    breakdowns: defaultBreakdowns,
+    subjectRemarks: {},
+    customRemarks: 'Diligent student with regular academic participation.',
+  };
+
+  const examMarksStoreUpdates: Record<string, Record<string, number | 'AB' | null>> = {};
+  const examBreakdownsStoreUpdates: Record<string, Record<string, SubjectBreakdown>> = {};
+
+  Object.entries(examConfigs).forEach(([exId, exCfg]) => {
+    const eff = getEffectiveExamConfigForClass(exCfg, targetSection);
+    const exMarks: Record<string, number | 'AB' | null> = {};
+    const exBds: Record<string, SubjectBreakdown> = {};
+    eff.subjects.forEach((sub) => {
+      const defMark =
+        exId === activeExamId
+          ? (defaultMarks[sub.name] ?? Math.round((sub.maxMarks || 100) * 0.8))
+          : Math.round((sub.maxMarks || 100) * 0.8);
+      exMarks[sub.name] = defMark;
+      const bd = syncBreakdownWithTotal(defMark, sub.name, targetSection, sub.components);
+      if (bd) {
+        exBds[sub.name] = bd;
+      }
+    });
+    examMarksStoreUpdates[exId] = exMarks;
+    examBreakdownsStoreUpdates[exId] = exId === activeExamId ? defaultBreakdowns : exBds;
+  });
+
+  return {
+    createdStudent,
+    nextStudents: [...students, createdStudent],
+    examMarksStoreUpdates,
+    examBreakdownsStoreUpdates,
+  };
+}
+

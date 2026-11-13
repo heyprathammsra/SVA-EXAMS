@@ -25,6 +25,7 @@ interface ReferenceSheetPreviewCardProps {
   examConfig: ExamConfig;
   examId: string;
   classScope: string;
+  classGrade?: string;
   subjectScope: string;
   onSubjectScopeChange?: (val: string) => void;
 }
@@ -34,6 +35,7 @@ export default function ReferenceSheetPreviewCard({
   examConfig,
   examId,
   classScope,
+  classGrade,
   subjectScope,
   onSubjectScopeChange,
 }: ReferenceSheetPreviewCardProps) {
@@ -176,6 +178,8 @@ export default function ReferenceSheetPreviewCard({
     ? 'RESULT ANALYSIS SHEET'
     : getReferenceSubjectHeaderTitle(currentSubject.name);
 
+  const resolvedClassGrade = classGrade || filteredStudents[0]?.class || '';
+
   return (
     <div className="bg-white border border-slate-200/80 rounded-xl shadow-xs overflow-hidden">
       {/* Top Bar with matching workbook tab buttons */}
@@ -188,7 +192,7 @@ export default function ReferenceSheetPreviewCard({
             ·
           </span>
           <span className="text-[11px] font-medium text-slate-500">
-            {formatReferenceClassHeader(classScope, '2026 -2027', examCode)}
+            {formatReferenceClassHeader(classScope, '2026 -2027', examCode, resolvedClassGrade)}
           </span>
         </div>
 
@@ -262,7 +266,7 @@ export default function ReferenceSheetPreviewCard({
               SARASWATI VIDYA ACADEMY, LONAVALA
             </div>
             <div className="py-1.5 px-4 font-bold text-xs tracking-tight border-b border-slate-300 bg-white">
-              {formatReferenceClassHeader(classScope, '2026 -2027', examCode)}
+              {formatReferenceClassHeader(classScope, '2026 -2027', examCode, resolvedClassGrade)}
             </div>
             <div className="py-1.5 px-4 font-bold text-xs tracking-wide border-b border-slate-900 bg-slate-50/60">
               {sheetRow3Title}

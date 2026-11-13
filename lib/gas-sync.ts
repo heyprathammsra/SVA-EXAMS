@@ -4,6 +4,8 @@
  * without complex OAuth popups, 403 permission errors, or token expirations.
  */
 
+import { getAdminAuthHeaders } from './auth-client';
+
 export const LOCKED_SPREADSHEET_ID = '1EzodiIYrfqqNoLgkvBATIvZAlRo00-UlDFw2XJXW0s';
 export const LOCKED_SPREADSHEET_URL = 'https://docs.google.com/spreadsheets/d/1EzodiIYrfqqNoLgkvBATIvZAlRo00-UlDFw2XJXW0s/edit';
 export const DEFAULT_GAS_URL = 'https://script.google.com/macros/s/AKfycbxX9Bt6NGyVlhJ8LnsRbI47SrUrYdYfKBAMxfKaBOnnwjBSA7ok5VfrUnJ9ha7IPw37ZA/exec';
@@ -354,7 +356,10 @@ export class GasSyncService {
     try {
       const res = await fetch(`/api/gas-sync?url=${encodeURIComponent(url)}&examName=${encodeURIComponent(examName)}`, {
         method: 'GET',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAdminAuthHeaders(),
+        },
       });
 
       const data = await res.json();
@@ -376,7 +381,10 @@ export class GasSyncService {
     try {
       const res = await fetch('/api/gas-sync', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAdminAuthHeaders(),
+        },
         body: JSON.stringify({
           url,
           students,

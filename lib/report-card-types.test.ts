@@ -625,6 +625,40 @@ test('excluded subject fails or AB do not mark student FAIL/ABSENT, and componen
   });
 });
 
+test('getStudentPtProfile supports custom class Roman numerals and edited particulars (house, height, weight, attendance, dob, parents)', async () => {
+  const { SVA_SCHOOL_HOUSES, gradeToRoman } = await import('./report-card-types');
+  assert.deepEqual([...SVA_SCHOOL_HOUSES], ['Sinhagad', 'Raigad', 'Shivneri', 'Pratapgad']);
+  assert.equal(gradeToRoman('Class 10'), 'X');
+  assert.equal(gradeToRoman('Class 6'), 'VI');
+
+  const customProfile = getStudentPtProfile({
+    id: 'STU-CUSTOM-1',
+    rollNo: '07',
+    name: 'Riya Deshmukh',
+    admissionNo: 'ADM-C1',
+    class: 'Class 10',
+    section: 'Lotus',
+    dob: '2011-09-21',
+    fatherName: 'Anil Deshmukh',
+    motherName: 'Sneha Deshmukh',
+    house: 'Raigad',
+    height: '158',
+    weight: '46',
+    attendance: '28/31',
+    marks: {},
+  });
+
+  assert.equal(customProfile.classSectionDisplay, 'X - Lotus');
+  assert.equal(customProfile.dobDisplay, '21/09/2011');
+  assert.equal(customProfile.fatherNameDisplay, 'Anil Deshmukh');
+  assert.equal(customProfile.motherNameDisplay, 'Sneha Deshmukh');
+  assert.equal(customProfile.house, 'Raigad');
+  assert.equal(customProfile.height, '158');
+  assert.equal(customProfile.weight, '46');
+  assert.equal(customProfile.attendance, '28/31');
+});
+
+
 
 
 

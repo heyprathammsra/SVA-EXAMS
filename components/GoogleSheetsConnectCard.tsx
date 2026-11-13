@@ -39,10 +39,10 @@ export default function GoogleSheetsConnectCard({
   const displayStudentCount = students ? students.length : 0;
 
   return (
-    <div className="bg-white border border-slate-200 rounded-xl p-5 font-sans">
+    <div className="bg-white border border-slate-200/85 rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] font-sans">
       <div className="flex items-start justify-between">
         <div>
-          <h2 className="text-sm font-bold text-slate-900">
+          <h2 className="text-sm font-semibold text-slate-900">
             Google Sheets Backup
           </h2>
           <p className="text-xs text-slate-500 mt-1 max-w-xl">
@@ -51,13 +51,12 @@ export default function GoogleSheetsConnectCard({
         </div>
       </div>
 
-      <div className="mt-4 p-3 bg-slate-50 border border-slate-200 rounded-lg text-[11px] font-mono text-slate-600 flex items-center justify-between gap-3">
+      <div className="mt-4 px-3.5 py-2.5 bg-slate-50/80 border border-slate-200/80 rounded-xl text-xs text-slate-600 tabular-nums flex items-center justify-between gap-3">
         <span className="truncate">
           Backed up ({displayStudentCount} students) &middot; Last update {displayTime}
         </span>
         {sheetsSyncStatus === 'syncing' && (
-          <span className="text-amber-600 font-bold flex items-center gap-1.5 shrink-0">
-            <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-ping" />
+          <span className="text-amber-600 font-semibold shrink-0">
             Syncing...
           </span>
         )}

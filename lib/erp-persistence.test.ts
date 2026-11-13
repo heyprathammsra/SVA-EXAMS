@@ -360,3 +360,127 @@ test('removeStudentFromErpStores removes deleted student entries across all exam
   assert.equal(cleaned.examMarksStore['PT-1']['STU-2'].English, 20);
 });
 
+test('addClassDefinition, updateClassDefinition, and deleteClassDefinition maintain class, student, and override consistency', async () => {
+  const {
+    getDefaultClasses,
+    addClassDefinition,
+    updateClassDefinition,
+    deleteClassDefinition,
+    formatClassGradeShortLabel,
+    createStudentRecord,
+    parseAttendanceParts,
+    formatAttendanceParts,
+  } = await import('./erp-persistence');
+
+  let classes = getDefaultClasses();
+  assert.equal(classes.length, 8);
+
+  const dup = addClassDefinition(classes, 'Class 6', 'Sparkle');
+  assert.ok(dup.error);
+  assert.equal(dup.classes.length, 8);
+
+  const added = addClassDefinition(classes, 'Class 10', 'Lotus');
+  assert.equal(added.error, undefined);
+  assert.equal(added.classes.length, 9);
+  assert.equal(formatClassGradeShortLabel(added.classes, 'Lotus'), '10 Lotus');
+
+  classes = added.classes;
+
+  const createdRes = createStudentRecord({
+    students: SAMPLE_STUDENTS,
+    examConfigs: SAMPLE_CONFIGS,
+    activeExamId: 'SA-1',
+    classes,
+    name: 'Meera Patil',
+    rollNo: '5',
+    section: 'Lotus',
+    dob: '2011-05-14',
+    fatherName: 'Suresh Patil',
+    motherName: 'Kavita Patil',
+    house: 'Pratapgad',
+    height: '154',
+    weight: '44',
+    attendance: '29',
+    attendanceOutOf: '32',
+  });
+  assert.equal(createdRes.createdStudent.class, 'Class 10');
+  assert.equal(createdRes.createdStudent.section, 'Lotus');
+  assert.equal(createdRes.createdStudent.house, 'Pratapgad');
+  assert.equal(createdRes.createdStudent.attendance, '29/32');
+  assert.deepEqual(parseAttendanceParts(createdRes.createdStudent.attendance), {
+    present: '29',
+    outOf: '32',
+  });
+  assert.equal(formatAttendanceParts('30', '35'), '30/35');
+
+  const configsWithOverride: Record<string, ExamConfig> = {
+    'SA-1': {
+      ...SAMPLE_CONFIGS['SA-1'],
+      classOverrides: {
+        Lotus: { totalFormula: 'BEST_5' },
+      },
+    },
+  };
+
+  const edited = updateClassDefinition({
+    classes,
+    students: createdRes.nextStudents,
+    examConfigs: configsWithOverride,
+    selectedClass: 'Lotus',
+    exportClass: 'Lotus',
+    classId: 'Lotus',
+    nextGrade: 'Class 8',
+    nextSection: 'Aster',
+  });
+  assert.equal(edited.error, undefined);
+  assert.equal(edited.selectedClass, 'Aster');
+  assert.equal(edited.exportClass, 'Aster');
+  const migratedStu = edited.students.find((s) => s.id === createdRes.createdStudent.id);
+  assert.equal(migratedStu?.section, 'Aster');
+  assert.equal(migratedStu?.class, 'Class 8');
+  assert.ok(edited.examConfigs['SA-1'].classOverrides?.Aster);
+  assert.equal(edited.examConfigs['SA-1'].classOverrides?.Lotus, undefined);
+
+  const deleted = deleteClassDefinition({
+    classes: edited.classes,
+    students: edited.students,
+    examConfigs: edited.examConfigs,
+    examMarksStore: { 'SA-1': { [createdRes.createdStudent.id]: { English: 80 } } },
+    examBreakdownsStore: {},
+    selectedClass: edited.selectedClass,
+    exportClass: edited.exportClass,
+    classId: 'Aster',
+  });
+  assert.equal(deleted.error, undefined);
+  assert.equal(deleted.classes.length, 8);
+  assert.equal(deleted.removedStudentsCount, 1);
+  assert.equal(
+    deleted.students.some((s) => s.section === 'Aster'),
+    false
+  );
+  assert.equal(deleted.selectedClass, 'Sparkle');
+});
+
+test('parseStoredErpState persists custom classes list across reloads', () => {
+  const defaultState = createDefaultErpState(SAMPLE_CONFIGS, SAMPLE_STUDENTS, getClassNumber);
+  const customClasses = [
+    ...defaultState.classes,
+    { id: 'Lotus', section: 'Lotus', grade: 'Class 10' },
+  ];
+  const parsed = parseStoredErpState(
+    {
+      [SVA_STORAGE_KEYS.INIT_FLAG]: '1',
+      [SVA_STORAGE_KEYS.CLASSES]: JSON.stringify(customClasses),
+      [SVA_STORAGE_KEYS.SELECTED_CLASS]: 'Lotus',
+      [SVA_STORAGE_KEYS.SELECTED_EXAM]: 'SA-1',
+    },
+    defaultState,
+    defaultState.classes.map((c) => c.section)
+  );
+  assert.equal(parsed.hasSavedData, true);
+  assert.ok(parsed.state);
+  assert.equal(parsed.state.classes.length, 9);
+  assert.equal(parsed.state.selectedClass, 'Lotus');
+});
+
+

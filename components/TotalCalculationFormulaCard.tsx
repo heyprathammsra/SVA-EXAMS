@@ -8,6 +8,8 @@ import {
   ChevronUp,
 } from 'lucide-react';
 import {
+  ClassDefinition,
+  DEFAULT_SVA_CLASSES,
   ExamConfig,
   TotalFormulaType,
   StudentReportRow,
@@ -16,26 +18,36 @@ import {
   computeStudentResult,
   getClassGradeFromSection,
 } from '@/lib/report-card-types';
+import { formatClassGradeShortLabel, getGradeForSection } from '@/lib/erp-persistence';
 
-const SPECIFIC_CLASS_OPTIONS: { value: string; label: string }[] = [
-  { value: 'ALL', label: 'All Classes' },
-  { value: 'Sparkle', label: '6 Sparkle' },
-  { value: 'Twinkle', label: '6 Twinkle' },
-  { value: 'Topaz', label: '7 Topaz' },
-  { value: 'Jade', label: '7 Jade' },
-  { value: 'Garnet', label: '8 Garnet' },
-  { value: 'Emerald', label: '8 Emerald' },
-  { value: 'Ruby', label: '9 Ruby' },
-  { value: 'Diamond', label: '9 Diamond' },
-  { value: 'Class 6', label: 'Class 6 (Both Sections)' },
-  { value: 'Class 7', label: 'Class 7 (Both Sections)' },
-  { value: 'Class 8', label: 'Class 8 (Both Sections)' },
-  { value: 'Class 9', label: 'Class 9 (Both Sections)' },
-];
+function buildSpecificClassOptions(
+  classes: ClassDefinition[]
+): { value: string; label: string }[] {
+  const byGrade = new Map<string, string[]>();
+  classes.forEach((c) => {
+    const arr = byGrade.get(c.grade) || [];
+    arr.push(c.section);
+    byGrade.set(c.grade, arr);
+  });
+  return [
+    { value: 'ALL', label: 'All Classes' },
+    ...classes.map((c) => ({
+      value: c.section,
+      label: formatClassGradeShortLabel(classes, c.section),
+    })),
+    ...Array.from(byGrade.entries()).map(([grade, sections]) => ({
+      value: grade,
+      label: `${grade} (${sections.join(' & ')})`,
+    })),
+  ];
+}
 
-function getClassDisplayLabel(scope: string): string {
+function getClassDisplayLabel(
+  scope: string,
+  options: { value: string; label: string }[]
+): string {
   if (!scope || scope === 'ALL' || scope === 'all') return 'All Classes';
-  const found = SPECIFIC_CLASS_OPTIONS.find((o) => o.value === scope);
+  const found = options.find((o) => o.value === scope);
   return found ? found.label : scope;
 }
 
@@ -74,6 +86,7 @@ interface TotalCalculationFormulaCardProps {
   selectedClass?: string;
   onSelectClassScope?: (scope: string) => void;
   students: StudentReportRow[];
+  classes?: ClassDefinition[];
   onUpdateExamConfig: (
     examId: string,
     updated: ExamConfig,
@@ -87,11 +100,17 @@ export default function TotalCalculationFormulaCard({
   selectedClass = 'ALL',
   onSelectClassScope,
   students,
+  classes = DEFAULT_SVA_CLASSES,
   onUpdateExamConfig,
   showToast,
 }: TotalCalculationFormulaCardProps) {
   const [localScope, setLocalScope] = useState<string>('ALL');
   const [showCustomInput, setShowCustomInput] = useState<boolean>(false);
+
+  const specificClassOptions = useMemo(
+    () => buildSpecificClassOptions(classes),
+    [classes]
+  );
 
   const activeClassScope =
     selectedClass && selectedClass !== 'all' ? selectedClass : localScope;
@@ -127,12 +146,13 @@ export default function TotalCalculationFormulaCard({
         (s) =>
           s.section === activeClassScope ||
           s.class === activeClassScope ||
-          getClassGradeFromSection(s.section) === activeClassScope
+          getGradeForSection(classes, s.section) === activeClassScope ||
+          getClassGradeFromSection(s.section, classes) === activeClassScope
       );
       if (match) return match;
     }
     return students[0];
-  }, [students, activeClassScope]);
+  }, [students, activeClassScope, classes]);
 
   const previewEvaluation = useMemo(() => {
     if (!currentConfig.subjects || currentConfig.subjects.length === 0) return null;
@@ -209,7 +229,10 @@ export default function TotalCalculationFormulaCard({
 
       if (activeClassScope.startsWith('Class ')) {
         Object.keys(nextOverrides).forEach((k) => {
-          if (k !== activeClassScope && getClassGradeFromSection(k) === activeClassScope) {
+          if (
+            k !== activeClassScope &&
+            getGradeForSection(classes, k) === activeClassScope
+          ) {
             delete nextOverrides[k];
           }
         });
@@ -226,7 +249,9 @@ export default function TotalCalculationFormulaCard({
     }
 
     if (toastLabel) {
-      showToast?.(`${toastLabel} applied to ${getClassDisplayLabel(activeClassScope)}`);
+      showToast?.(
+        `${toastLabel} applied to ${getClassDisplayLabel(activeClassScope, specificClassOptions)}`
+      );
     }
   };
 
@@ -278,7 +303,7 @@ export default function TotalCalculationFormulaCard({
   const allSubMax = currentConfig.subjects.reduce((acc, s) => acc + (s.maxMarks || 0), 0);
 
   return (
-    <div className="bg-white border border-slate-200/80 rounded-xl p-5 shadow-xs space-y-4">
+    <div className="bg-white border border-slate-200/85 rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] space-y-4">
       {/* Header Row */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
         <div>
@@ -292,7 +317,7 @@ export default function TotalCalculationFormulaCard({
               aria-label="Apply Total Calculation Rule To"
               className="text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200/70 border border-slate-200/80 rounded-md px-2 py-0.5 focus:outline-none focus:border-blue-600 cursor-pointer"
             >
-              {SPECIFIC_CLASS_OPTIONS.map((opt) => (
+              {specificClassOptions.map((opt) => (
                 <option key={opt.value} value={opt.value}>
                   {opt.label}
                 </option>

@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { isRequestAuthenticated } from '@/lib/auth-server';
 
 export const dynamic = 'force-dynamic';
 
@@ -179,6 +180,9 @@ function normalizeStudentList(rawData: any): any[] {
 }
 
 export async function GET(req: NextRequest) {
+  if (!isRequestAuthenticated(req)) {
+    return NextResponse.json({ success: false, error: 'Authentication required' }, { status: 401 });
+  }
   try {
     const { searchParams } = new URL(req.url);
     const gasUrl = searchParams.get('url')?.trim();
@@ -242,6 +246,9 @@ export async function GET(req: NextRequest) {
 }
 
 export async function POST(req: NextRequest) {
+  if (!isRequestAuthenticated(req)) {
+    return NextResponse.json({ success: false, error: 'Authentication required' }, { status: 401 });
+  }
   try {
     let body: any = {};
     try {
