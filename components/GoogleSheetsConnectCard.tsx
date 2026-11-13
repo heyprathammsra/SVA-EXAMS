@@ -1,6 +1,6 @@
 'use client';
 
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { StudentReportRow } from '@/lib/report-card-types';
 
 interface GoogleSheetsConnectCardProps {
@@ -17,19 +17,26 @@ export default function GoogleSheetsConnectCard({
   lastSyncTime: propLastSyncTime,
   sheetsSyncStatus = 'idle',
 }: GoogleSheetsConnectCardProps) {
-  const [initialTime] = useState<string>(() => {
-    const now = new Date();
-    return now.toLocaleTimeString('en-US', {
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-      hour12: true,
-    });
-  });
+  const [initialTime, setInitialTime] = useState<string>('--:--');
+
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const now = new Date();
+      setInitialTime(
+        now.toLocaleTimeString('en-US', {
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+          hour12: true,
+        })
+      );
+    }, 0);
+    return () => clearTimeout(timer);
+  }, []);
 
   const displayTime = propLastSyncTime || initialTime;
 
-  const displayStudentCount = students.length || 280;
+  const displayStudentCount = students ? students.length : 0;
 
   return (
     <div className="bg-white border border-slate-200 rounded-xl p-5 font-sans">

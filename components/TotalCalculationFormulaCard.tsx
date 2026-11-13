@@ -59,9 +59,8 @@ function getActiveSimplePreset(
   if (upper === 'BEST(6)') return 'BEST_6';
   if (upper === 'SUM_MAIN') return 'WRITTEN_ONLY';
 
-  // If it's a subject list like [English] + [Hindi] ...
-  const bracketMatches = raw.match(/\[([^\]:]+)\]/g);
-  if (bracketMatches && bracketMatches.length > 0 && !raw.includes(':')) {
+  // If it's a pure additive subject list like [English] + [Hindi] ...
+  if (/^\s*\[[^\]:]+\](\s*\+\s*\[[^\]:]+\])*\s*$/.test(raw)) {
     return 'ALL_SUBJECTS';
   }
 
@@ -108,7 +107,7 @@ export default function TotalCalculationFormulaCard({
   );
 
   const currentTotalFormula: TotalFormulaType = currentConfig.totalFormula || 'SUM';
-  const currentCustomFormula = currentConfig.customFormula || 'SUM_MAIN + SUM_INTERNAL';
+  const currentCustomFormula = currentConfig.customFormula ?? 'SUM_MAIN + SUM_INTERNAL';
 
   const activePreset = useMemo(
     () =>

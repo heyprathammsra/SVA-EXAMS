@@ -109,7 +109,20 @@ import {
   saveStoredGasUrl,
   GAS_SCRIPT_CODE,
 } from '@/lib/gas-sync';
-import { StorageService } from '@/lib/storage';
+import {
+  SVA_STORAGE_KEYS,
+  ExamMarksStore,
+  ExamBreakdownsStore,
+  PersistedErpState,
+  createDefaultErpState,
+  parseStoredErpState,
+  pickAuthoritativeState,
+  switchExamState,
+  parseSpreadsheetMarkInput,
+  migrateRenamedSubjectInStudents,
+  removeStudentFromErpStores,
+} from '@/lib/erp-persistence';
+import { parseImportedSpreadsheetRows } from '@/lib/excel-import';
 import { copyToClipboard } from '@/lib/utils';
 import { ALL_SVA_STUDENTS, SVA_ALL_CLASSES, SvaClassName } from '@/lib/sva-students-data';
 import {
@@ -370,19 +383,46 @@ function InternalAssessmentModal({
           onSubmit={(e) => {
             e.preventDefault();
             const formData = new FormData(e.currentTarget);
-            const parseField = (val: string, max: number): number | 'AB' => {
+            const parseField = (val: string, max: number): number | 'AB' | null => {
               const t = (val || '').trim();
-              if (t.toUpperCase() === 'AB') return 'AB';
+              if (t === '') return null;
+              if (t.toUpperCase() === 'AB' || t.toUpperCase() === 'A') return 'AB';
               const num = parseFloat(t);
-              return isNaN(num) ? 0 : Math.min(max, Math.max(0, num));
+              return isNaN(num) ? null : Math.min(max, Math.max(0, num));
             };
             const updated: SubjectBreakdown = { ...currentBd };
             activeComponents.forEach((comp) => {
-              updated[comp.key] = parseField(
-                formData.get(comp.key) as string,
+              const parsed = parseField(
+                (formData.get(comp.key) as string) ?? '',
                 comp.maxMarks
               );
+              if (parsed === null) {
+                delete updated[comp.key];
+              } else {
+                updated[comp.key] = parsed;
+              }
             });
+            const hasInternalSubKeys = activeComponents.some((c) =>
+              ['penPaper', 'multipleAssessment', 'subjectEnrichment', 'portfolio'].includes(c.key)
+            );
+            if (hasInternalSubKeys && !activeComponents.some((c) => c.key === 'internalMarks')) {
+              const subVals = [
+                updated.penPaper,
+                updated.multipleAssessment,
+                updated.subjectEnrichment,
+                updated.portfolio,
+              ];
+              if (subVals.every((v) => v === undefined || v === null)) {
+                delete updated.internalMarks;
+              } else if (subVals.every((v) => v === 'AB')) {
+                updated.internalMarks = 'AB';
+              } else {
+                updated.internalMarks = subVals.reduce<number>(
+                  (sum, v) => sum + (typeof v === 'number' ? v : 0),
+                  0
+                );
+              }
+            }
             onSave(student.id, subjectName, updated);
           }}
           className="space-y-3.5"
@@ -399,9 +439,7 @@ function InternalAssessmentModal({
               const fallbackVal =
                 rawDefault !== undefined && rawDefault !== null
                   ? rawDefault
-                  : comp.isMainExam && typeof student.marks[subjectName] === 'number'
-                  ? Math.min(comp.maxMarks, Math.round(Number(student.marks[subjectName]) * (comp.maxMarks / (totalMaxMarks || 100))))
-                  : Math.round(comp.maxMarks * 0.8);
+                  : '';
               return (
                 <div
                   key={comp.key}
@@ -454,26 +492,51 @@ function InternalAssessmentModal({
 
 export default function SchoolErpPage() {
   const [activeTab, setActiveTab] = useState<ActiveTab>('spreadsheet');
-  
-  // Class / Section filter: defaults to 'Diamond' (Class IX Diamond 2026-2027)
-  const [selectedClass, setSelectedClass] = useState<string>('Diamond');
-  
-  // Exam selection & Exam Configuration Store
-  const [selectedExam, setSelectedExam] = useState<string>('SA-1');
-  const [examConfigs, setExamConfigs] = useState<Record<string, ExamConfig>>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const saved = localStorage.getItem('sva_exam_configs_v1');
-        if (saved) {
-          const parsed = JSON.parse(saved);
-          if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
-            return sanitizePtExamConfigs({ ...INITIAL_EXAM_CONFIGS, ...parsed });
-          }
-        }
-      } catch {}
-    }
-    return INITIAL_EXAM_CONFIGS;
+
+  // Deterministic SSR-safe default seed state (hydrated from localStorage + backend API after mount so saved data is NEVER overwritten)
+  const defaultErpState = useMemo(
+    () =>
+      createDefaultErpState(
+        INITIAL_EXAM_CONFIGS,
+        ALL_SVA_STUDENTS,
+        getClassNumberForSection
+      ),
+    []
+  );
+
+  // Storage readiness & hydration guards so initial defaults NEVER overwrite saved user data
+  const [isStorageReady, setIsStorageReady] = useState<boolean>(false);
+  const stateUpdatedAtRef = useRef<number>(0);
+  const serverSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastSyncedSnapshotRef = useRef<{
+    selectedClass: string;
+    selectedExam: string;
+    examConfigs: Record<string, ExamConfig>;
+    students: StudentReportRow[];
+    examMarksStore: ExamMarksStore;
+    examBreakdownsStore: ExamBreakdownsStore;
+  }>({
+    selectedClass: defaultErpState.selectedClass,
+    selectedExam: defaultErpState.selectedExam,
+    examConfigs: defaultErpState.examConfigs,
+    students: defaultErpState.students,
+    examMarksStore: defaultErpState.examMarksStore,
+    examBreakdownsStore: defaultErpState.examBreakdownsStore,
   });
+  const isStorageReadyRef = useRef<boolean>(false);
+  const dirtyBeforeReadyRef = useRef<boolean>(false);
+  const userPickedExamBeforeReadyRef = useRef<string | null>(null);
+  const userPickedClassBeforeReadyRef = useRef<string | null>(null);
+
+  // Class / Section filter: defaults to 'Diamond' until hydrated from saved state
+  const [selectedClass, setSelectedClass] = useState<string>(defaultErpState.selectedClass);
+
+  // Exam selection & Exam Configuration Store (persistent)
+  const [selectedExam, setSelectedExam] = useState<string>(defaultErpState.selectedExam);
+  const [examConfigs, setExamConfigs] = useState<Record<string, ExamConfig>>(
+    () => defaultErpState.examConfigs
+  );
 
   // Base exam config (global across classes, including classOverrides)
   const baseExamConfig: ExamConfig = useMemo(() => {
@@ -509,50 +572,10 @@ export default function SchoolErpPage() {
     return currentExamConfig.subjects;
   }, [currentExamConfig]);
 
-
-
-  // Initial student roster with marks, internal breakdowns, and remarks for SA-1 exam
-  const [students, setStudents] = useState<StudentReportRow[]>(() => {
-    return ALL_SVA_STUDENTS.map((st) => {
-      const normalizedMarks: Record<string, number | 'AB' | null> = {};
-      const breakdowns: Record<string, SubjectBreakdown> = {};
-      const subjectRemarks: Record<string, string> = { ...(st.subjectRemarks || {}) };
-      Object.entries(st.marks).forEach(([sub, val]) => {
-        const normSub = sub === 'Mathematics' ? 'Maths' : sub;
-        const total = typeof val === 'number' ? Math.round(val) : val;
-        normalizedMarks[normSub] = total;
-        breakdowns[normSub] =
-          st.breakdowns?.[normSub] || generateDefaultBreakdown(total, normSub, st.section);
-        if (!subjectRemarks[normSub]) {
-          subjectRemarks[normSub] = getDefaultSubjectRemark(total, 100);
-        }
-      });
-
-      const isAayushSample =
-        st.id === 'STU-2026-0031' ||
-        st.name.trim().toLowerCase() === 'aayush satish nalawade';
-
-      if (isAayushSample) {
-        subjectRemarks['English'] = 'Outstanding! Strong command of language.';
-        subjectRemarks['Hindi'] = 'Excellent performance keep it up.';
-        subjectRemarks['Marathi'] = 'Excellent Performance';
-        subjectRemarks['Maths'] = 'Outstanding! Strong conceptual understanding.';
-        subjectRemarks['Science'] = 'Outstanding! Strong conceptual understanding.';
-        subjectRemarks['Social Science'] = 'Good.Keep it up!';
-      }
-
-      return {
-        ...st,
-        class: getClassNumberForSection(st.section),
-        marks: normalizedMarks,
-        breakdowns,
-        subjectRemarks,
-        customRemarks: isAayushSample
-          ? 'Excellent and consistent performance with strong understanding and commendable effort.'
-          : st.customRemarks,
-      };
-    });
-  });
+  // Student roster with marks, internal breakdowns, and remarks (hydrated after mount)
+  const [students, setStudents] = useState<StudentReportRow[]>(
+    () => defaultErpState.students
+  );
 
   // Scope filter for the dedicated Teacher Remarks Entry page ('all' | 'class_teacher' | subjectName)
   const [selectedRemarkScope, setSelectedRemarkScope] = useState<string>('all');
@@ -618,87 +641,13 @@ export default function SchoolErpPage() {
   );
 
   // Multi-exam marks & breakdowns stores so marks and internal components are preserved and isolated per exam
-  const [examMarksStore, setExamMarksStore] = useState<Record<string, Record<string, Record<string, number | 'AB' | null>>>>(() => {
-    const store: Record<string, Record<string, Record<string, number | 'AB' | null>>> = {
-      'PT-1': {},
-      'PT-2': {},
-      'PT-3': {},
-      'PT-4': {},
-      'SA-1': {},
-      'SA-2': {},
-    };
-    const exams: string[] = ['PT-1', 'PT-2', 'PT-3', 'PT-4', 'SA-1', 'SA-2'];
-    exams.forEach((ex) => {
-      const isPt = isPtExam(ex);
-      const cfgForEx = examConfigs[ex] || INITIAL_EXAM_CONFIGS[ex];
-      ALL_SVA_STUDENTS.forEach((st) => {
-        const effCfg = cfgForEx ? getEffectiveExamConfigForClass(cfgForEx, st.section) : undefined;
-        const defaultMax = effCfg?.subjects[0]?.maxMarks || (isPt ? 25 : 100);
-        const isAayushSample =
-          st.id === 'STU-2026-0031' ||
-          st.name.trim().toLowerCase() === 'aayush satish nalawade';
+  const [examMarksStore, setExamMarksStore] = useState<ExamMarksStore>(
+    () => defaultErpState.examMarksStore
+  );
 
-        if (ex === 'PT-1' && isAayushSample && defaultMax === 25) {
-          store[ex][st.id] = {
-            English: 25,
-            Hindi: 25,
-            Marathi: 24,
-            Maths: 22,
-            Science: 25,
-            'Social Science': 24,
-          };
-          return;
-        }
-
-        const scaled: Record<string, number | 'AB' | null> = {};
-        Object.entries(st.marks).forEach(([sub, val]) => {
-          const normSub = sub === 'Mathematics' ? 'Maths' : sub;
-          if (
-            isPt &&
-            !hasCsInPtExam(st.section) &&
-            (normSub.toLowerCase() === 'computer science' || normSub.toLowerCase() === 'cs')
-          ) {
-            return;
-          }
-          const subMax =
-            effCfg?.subjects.find((s) => s.name.toLowerCase() === normSub.toLowerCase())?.maxMarks ||
-            defaultMax;
-          scaled[normSub] =
-            typeof val === 'number'
-              ? Math.min(subMax, Math.max(0, Math.round((val / 100) * subMax)))
-              : val;
-        });
-        store[ex][st.id] = scaled;
-      });
-    });
-    return store;
-  });
-
-  const [examBreakdownsStore, setExamBreakdownsStore] = useState<
-    Record<string, Record<string, Record<string, SubjectBreakdown>>>
-  >(() => {
-    const bdStore: Record<string, Record<string, Record<string, SubjectBreakdown>>> = {
-      'PT-1': {},
-      'PT-2': {},
-      'PT-3': {},
-      'PT-4': {},
-      'SA-1': {},
-      'SA-2': {},
-    };
-    ['SA-1', 'SA-2'].forEach((ex) => {
-      ALL_SVA_STUDENTS.forEach((st) => {
-        const bds: Record<string, SubjectBreakdown> = {};
-        Object.entries(st.marks).forEach(([sub, val]) => {
-          const normSub = sub === 'Mathematics' ? 'Maths' : sub;
-          const total = typeof val === 'number' ? Math.round(val) : val;
-          bds[normSub] =
-            st.breakdowns?.[normSub] || generateDefaultBreakdown(total, normSub, st.section);
-        });
-        bdStore[ex][st.id] = bds;
-      });
-    });
-    return bdStore;
-  });
+  const [examBreakdownsStore, setExamBreakdownsStore] = useState<ExamBreakdownsStore>(
+    () => defaultErpState.examBreakdownsStore
+  );
 
   const [searchQuery, setSearchQuery] = useState('');
   const [filterStatus, setFilterStatus] = useState<FilterStatus>('all');
@@ -790,11 +739,28 @@ export default function SchoolErpPage() {
   const consolidatedMarksStructure = useMemo(() => {
     const isPt = selectedExam.toUpperCase().startsWith('PT');
     const orderedSubs = orderSubjectsForConsolidated(activeSubjects);
+    const flatColIndexByKey: Record<string, number> = {};
+    const editableCols: {
+      subjectName: string;
+      compKey: string;
+      isMulti: boolean;
+      maxMarks: number;
+    }[] = [];
+
     const sections = orderedSubs.map((sub) => {
       const sampleBd = students.find((s) => s.breakdowns?.[sub.name])?.breakdowns?.[sub.name];
       const comps = resolveSubjectComponentsForExport(sub, selectedExam, sampleBd);
       const isMulti = !isPt && comps.length > 1;
       const colSpan = isMulti ? comps.length + 2 : comps.length;
+      comps.forEach((comp) => {
+        flatColIndexByKey[`${sub.name}::${comp.key}`] = editableCols.length;
+        editableCols.push({
+          subjectName: sub.name,
+          compKey: comp.key,
+          isMulti,
+          maxMarks: comp.maxMarks,
+        });
+      });
       return {
         subject: sub,
         components: comps,
@@ -806,6 +772,8 @@ export default function SchoolErpPage() {
     return {
       totalCols,
       sections,
+      editableCols,
+      flatColIndexByKey,
     };
   }, [activeSubjects, selectedExam, students]);
 
@@ -814,16 +782,16 @@ export default function SchoolErpPage() {
   const [exportClass, setExportClass] = useState<string>('Diamond');
   const [exportSubjectScope, setExportSubjectScope] = useState<string>('all_consolidated');
 
-  // Resolved student list with target exam marks for export and preview
+  // Resolved student list with target exam marks for export and preview (never leaks marks from other exams)
   const exportStudentsList = useMemo(() => {
     const targetExam = exportExam || selectedExam;
     if (targetExam === selectedExam) return students;
-    const targetMarks = examMarksStore[targetExam];
-    const targetBds = examBreakdownsStore[targetExam];
+    const targetMarks = examMarksStore[targetExam] || {};
+    const targetBds = examBreakdownsStore[targetExam] || {};
     return students.map((s) => ({
       ...s,
-      marks: targetMarks?.[s.id] ? { ...targetMarks[s.id] } : { ...s.marks },
-      breakdowns: targetBds?.[s.id] ? { ...targetBds[s.id] } : s.breakdowns,
+      marks: targetMarks[s.id] ? { ...targetMarks[s.id] } : {},
+      breakdowns: targetBds[s.id] ? { ...targetBds[s.id] } : {},
     }));
   }, [students, exportExam, selectedExam, examMarksStore, examBreakdownsStore]);
 
@@ -902,31 +870,47 @@ export default function SchoolErpPage() {
   const [quickToast, setQuickToast] = useState<string | null>(null);
   const [reportZoom, setReportZoom] = useState<'100%' | '90%' | '80%'>('100%');
 
-  // Close context menu on outside click, scroll, resize, or Escape
+  // Close context menu on outside mousedown/click/focus, scroll, resize, or keydown
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const isContextMenuOpen = Boolean(contextMenu);
+
   useEffect(() => {
-    if (!contextMenu) return;
+    if (!isContextMenuOpen) return;
+
+    const handleOutsideEvent = (e: Event) => {
+      if (contextMenuRef.current && contextMenuRef.current.contains(e.target as Node)) {
+        return;
+      }
+      setContextMenu(null);
+    };
 
     const handleDismiss = () => setContextMenu(null);
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      if (e.key === 'Escape' || !contextMenuRef.current?.contains(e.target as Node)) {
         setContextMenu(null);
       }
     };
 
-    window.addEventListener('click', handleDismiss);
+    window.addEventListener('pointerdown', handleOutsideEvent, true);
+    window.addEventListener('mousedown', handleOutsideEvent, true);
+    window.addEventListener('click', handleOutsideEvent, true);
+    window.addEventListener('focusin', handleOutsideEvent, true);
     window.addEventListener('contextmenu', handleDismiss);
     window.addEventListener('scroll', handleDismiss, true);
     window.addEventListener('resize', handleDismiss);
-    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keydown', handleKeyDown, true);
 
     return () => {
-      window.removeEventListener('click', handleDismiss);
+      window.removeEventListener('pointerdown', handleOutsideEvent, true);
+      window.removeEventListener('mousedown', handleOutsideEvent, true);
+      window.removeEventListener('click', handleOutsideEvent, true);
+      window.removeEventListener('focusin', handleOutsideEvent, true);
       window.removeEventListener('contextmenu', handleDismiss);
       window.removeEventListener('scroll', handleDismiss, true);
       window.removeEventListener('resize', handleDismiss);
-      window.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('keydown', handleKeyDown, true);
     };
-  }, [contextMenu]);
+  }, [isContextMenuOpen]);
 
   // New Student Form State
   const [newStudentName, setNewStudentName] = useState('');
@@ -952,44 +936,83 @@ export default function SchoolErpPage() {
     subjectName: string;
   } | null>(null);
 
-  // Undo / Redo history stacks for seamless Ctrl+Z / Ctrl+Y
-  const [undoStack, setUndoStack] = useState<StudentReportRow[][]>([]);
-  const [redoStack, setRedoStack] = useState<StudentReportRow[][]>([]);
+  // Undo / Redo history stacks for seamless Ctrl+Z / Ctrl+Y across students & exam stores
+  type UndoSnapshot = {
+    students: StudentReportRow[];
+    examMarksStore: ExamMarksStore;
+    examBreakdownsStore: ExamBreakdownsStore;
+  };
+  const [undoStack, setUndoStack] = useState<UndoSnapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<UndoSnapshot[]>([]);
   const lastUndoTimeRef = useRef<number>(0);
 
-  const pushUndoSnapshot = useCallback((currentStudents: StudentReportRow[]) => {
-    const now = Date.now();
-    // Group rapid keystrokes within 900ms into a single undo snapshot for 60fps typing
-    if (now - lastUndoTimeRef.current < 900) return;
-    lastUndoTimeRef.current = now;
-    const cloned = currentStudents.map((s) => ({
+  const cloneRosterSnapshot = (roster: StudentReportRow[]): StudentReportRow[] =>
+    roster.map((s) => ({
       ...s,
       marks: { ...s.marks },
       breakdowns: s.breakdowns ? { ...s.breakdowns } : undefined,
       subjectRemarks: s.subjectRemarks ? { ...s.subjectRemarks } : undefined,
     }));
-    setUndoStack((prev) => [...prev.slice(-25), cloned]);
+
+  const cloneMarksStoreSnapshot = (store: ExamMarksStore): ExamMarksStore => {
+    const out: ExamMarksStore = {};
+    Object.entries(store).forEach(([exId, byStu]) => {
+      const m: Record<string, Record<string, number | 'AB' | null>> = {};
+      Object.entries(byStu || {}).forEach(([sId, marks]) => {
+        m[sId] = { ...marks };
+      });
+      out[exId] = m;
+    });
+    return out;
+  };
+
+  const cloneBreakdownsStoreSnapshot = (store: ExamBreakdownsStore): ExamBreakdownsStore => {
+    const out: ExamBreakdownsStore = {};
+    Object.entries(store).forEach(([exId, byStu]) => {
+      const m: Record<string, Record<string, SubjectBreakdown>> = {};
+      Object.entries(byStu || {}).forEach(([sId, bds]) => {
+        const subMap: Record<string, SubjectBreakdown> = {};
+        Object.entries(bds || {}).forEach(([subName, bd]) => {
+          subMap[subName] = { ...bd };
+        });
+        m[sId] = subMap;
+      });
+      out[exId] = m;
+    });
+    return out;
+  };
+
+  const pushUndoSnapshot = useCallback((currentStudents: StudentReportRow[]) => {
+    if (!isStorageReadyRef.current) {
+      dirtyBeforeReadyRef.current = true;
+    }
+    const now = Date.now();
+    // Group rapid keystrokes within 900ms into a single undo snapshot for 60fps typing
+    if (now - lastUndoTimeRef.current < 900) return;
+    lastUndoTimeRef.current = now;
+    const snap: UndoSnapshot = {
+      students: cloneRosterSnapshot(currentStudents),
+      examMarksStore: cloneMarksStoreSnapshot(examMarksStore),
+      examBreakdownsStore: cloneBreakdownsStoreSnapshot(examBreakdownsStore),
+    };
+    setUndoStack((prev) => [...prev.slice(-25), snap]);
     setRedoStack([]);
-  }, [setUndoStack, setRedoStack]);
+  }, [examMarksStore, examBreakdownsStore, setUndoStack, setRedoStack]);
 
   const showToast = useCallback((message: string) => {
+    if (toastTimerRef.current) {
+      clearTimeout(toastTimerRef.current);
+    }
     setQuickToast(message);
-    setTimeout(() => setQuickToast(null), 3000);
+    toastTimerRef.current = setTimeout(() => {
+      setQuickToast(null);
+      toastTimerRef.current = null;
+    }, 3000);
   }, []);
 
-  // Google Apps Script Sync state
-  const [gasUrl, setGasUrl] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return getStoredGasUrl();
-    }
-    return '';
-  });
-  const [tempGasUrl, setTempGasUrl] = useState<string>(() => {
-    if (typeof window !== 'undefined') {
-      return getStoredGasUrl();
-    }
-    return '';
-  });
+  // Google Apps Script Sync state (SSR-safe initialization)
+  const [gasUrl, setGasUrl] = useState<string>('');
+  const [tempGasUrl, setTempGasUrl] = useState<string>('');
   const [isTestingGas, setIsTestingGas] = useState<boolean>(false);
   const [gasCopied, setGasCopied] = useState<boolean>(false);
   const [isGasModalOpen, setIsGasModalOpen] = useState<boolean>(false);
@@ -998,21 +1021,261 @@ export default function SchoolErpPage() {
   const autoSyncTimerRef = useRef<NodeJS.Timeout | null>(null);
   const studentsRef = useRef<StudentReportRow[]>(students);
   const selectedExamRef = useRef<string>(selectedExam);
+  const selectedClassRef = useRef<string>(selectedClass);
   const examConfigsRef = useRef<Record<string, ExamConfig>>(examConfigs);
+  const examMarksStoreRef = useRef<ExamMarksStore>(examMarksStore);
+  const examBreakdownsStoreRef = useRef<ExamBreakdownsStore>(examBreakdownsStore);
 
   useEffect(() => {
+    isStorageReadyRef.current = isStorageReady;
     studentsRef.current = students;
     selectedExamRef.current = selectedExam;
+    selectedClassRef.current = selectedClass;
     examConfigsRef.current = examConfigs;
-  }, [students, selectedExam, examConfigs]);
+    examMarksStoreRef.current = examMarksStore;
+    examBreakdownsStoreRef.current = examBreakdownsStore;
+  }, [isStorageReady, students, selectedExam, selectedClass, examConfigs, examMarksStore, examBreakdownsStore]);
 
-
-  useEffect(() => {
+  const writeStateToLocalStorage = useCallback((state: PersistedErpState) => {
     if (typeof window === 'undefined') return;
     try {
-      localStorage.setItem('sva_exam_configs_v1', JSON.stringify(examConfigs));
-    } catch {}
-  }, [examConfigs]);
+      localStorage.setItem(SVA_STORAGE_KEYS.SELECTED_CLASS, state.selectedClass);
+      localStorage.setItem(SVA_STORAGE_KEYS.SELECTED_EXAM, state.selectedExam);
+      localStorage.setItem(SVA_STORAGE_KEYS.EXAM_CONFIGS, JSON.stringify(state.examConfigs));
+      localStorage.setItem(SVA_STORAGE_KEYS.STUDENTS, JSON.stringify(state.students));
+      localStorage.setItem(SVA_STORAGE_KEYS.EXAM_MARKS_STORE, JSON.stringify(state.examMarksStore));
+      localStorage.setItem(
+        SVA_STORAGE_KEYS.EXAM_BREAKDOWNS_STORE,
+        JSON.stringify(state.examBreakdownsStore)
+      );
+      localStorage.setItem(SVA_STORAGE_KEYS.UPDATED_AT, String(state.updatedAt));
+      localStorage.setItem(SVA_STORAGE_KEYS.INIT_FLAG, '1');
+    } catch (e) {
+      console.warn('Failed to save ERP state to localStorage (backend backup remains active):', e);
+    }
+  }, []);
+
+  const persistToBackend = useCallback((state: PersistedErpState, immediate = false) => {
+    if (serverSaveTimerRef.current) {
+      clearTimeout(serverSaveTimerRef.current);
+      serverSaveTimerRef.current = null;
+    }
+    const send = () => {
+      fetch('/api/erp-state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ state }),
+      }).catch((err) => {
+        console.warn('Backend ERP state sync warning:', err);
+      });
+    };
+    if (immediate) {
+      send();
+    } else {
+      serverSaveTimerRef.current = setTimeout(send, 120);
+    }
+  }, []);
+
+  // 1. Hydrate once from localStorage AND /api/erp-state without ever overwriting saved data with defaults
+  useEffect(() => {
+    let cancelled = false;
+    if (typeof window === 'undefined') return;
+
+    const applyHydratedState = (state: PersistedErpState) => {
+      stateUpdatedAtRef.current = state.updatedAt || Date.now();
+      lastSyncedSnapshotRef.current = {
+        selectedClass: state.selectedClass,
+        selectedExam: state.selectedExam,
+        examConfigs: state.examConfigs,
+        students: state.students,
+        examMarksStore: state.examMarksStore,
+        examBreakdownsStore: state.examBreakdownsStore,
+      };
+      setExamConfigs(state.examConfigs);
+      setStudents(state.students);
+      setExamMarksStore(state.examMarksStore);
+      setExamBreakdownsStore(state.examBreakdownsStore);
+      setSelectedExam(state.selectedExam);
+      setExportExam(state.selectedExam);
+      setSelectedClass(state.selectedClass);
+      setExportClass(state.selectedClass);
+      selectedExamRef.current = state.selectedExam;
+      selectedClassRef.current = state.selectedClass;
+      studentsRef.current = state.students;
+      examConfigsRef.current = state.examConfigs;
+      examMarksStoreRef.current = state.examMarksStore;
+      examBreakdownsStoreRef.current = state.examBreakdownsStore;
+    };
+
+    const rawStorage: Record<string, string | null> = {
+      [SVA_STORAGE_KEYS.INIT_FLAG]: localStorage.getItem(SVA_STORAGE_KEYS.INIT_FLAG),
+      [SVA_STORAGE_KEYS.STUDENTS]: localStorage.getItem(SVA_STORAGE_KEYS.STUDENTS),
+      [SVA_STORAGE_KEYS.EXAM_MARKS_STORE]: localStorage.getItem(SVA_STORAGE_KEYS.EXAM_MARKS_STORE),
+      [SVA_STORAGE_KEYS.EXAM_BREAKDOWNS_STORE]: localStorage.getItem(SVA_STORAGE_KEYS.EXAM_BREAKDOWNS_STORE),
+      [SVA_STORAGE_KEYS.EXAM_CONFIGS]: localStorage.getItem(SVA_STORAGE_KEYS.EXAM_CONFIGS),
+      [SVA_STORAGE_KEYS.SELECTED_EXAM]: localStorage.getItem(SVA_STORAGE_KEYS.SELECTED_EXAM),
+      [SVA_STORAGE_KEYS.SELECTED_CLASS]: localStorage.getItem(SVA_STORAGE_KEYS.SELECTED_CLASS),
+      [SVA_STORAGE_KEYS.UPDATED_AT]: localStorage.getItem(SVA_STORAGE_KEYS.UPDATED_AT),
+    };
+    const localParsed = parseStoredErpState(rawStorage, defaultErpState, SVA_ALL_CLASSES);
+
+    (async () => {
+      await Promise.resolve();
+      if (cancelled) return;
+
+      const storedGas = getStoredGasUrl();
+      setGasUrl(storedGas);
+      setTempGasUrl(storedGas);
+
+      if (localParsed.hasSavedData && localParsed.state && !dirtyBeforeReadyRef.current) {
+        applyHydratedState(localParsed.state);
+      }
+
+      let remoteState: PersistedErpState | null = null;
+      try {
+        const res = await fetch('/api/erp-state', { cache: 'no-store' });
+        if (res.ok) {
+          const payload = await res.json();
+          if (payload?.exists && payload?.state?.initialized) {
+            remoteState = payload.state as PersistedErpState;
+          }
+        }
+      } catch {}
+
+      if (cancelled) return;
+
+      if (!dirtyBeforeReadyRef.current) {
+        const authoritative = pickAuthoritativeState(localParsed.state, remoteState);
+        if (authoritative) {
+          let stateToApply = authoritative;
+          const pickedExam = userPickedExamBeforeReadyRef.current;
+          if (pickedExam && pickedExam !== authoritative.selectedExam) {
+            const switched = switchExamState({
+              students: authoritative.students,
+              currentExam: authoritative.selectedExam,
+              targetExam: pickedExam,
+              examConfigs: authoritative.examConfigs,
+              initialConfigs: INITIAL_EXAM_CONFIGS,
+              examMarksStore: authoritative.examMarksStore,
+              examBreakdownsStore: authoritative.examBreakdownsStore,
+            });
+            stateToApply = {
+              ...authoritative,
+              selectedExam: pickedExam,
+              students: switched.nextRoster,
+              examMarksStore: switched.nextMarksStore,
+              examBreakdownsStore: switched.nextBreakdownsStore,
+            };
+          }
+          const pickedClass = userPickedClassBeforeReadyRef.current;
+          if (pickedClass) {
+            stateToApply = { ...stateToApply, selectedClass: pickedClass };
+          }
+          if (authoritative !== localParsed.state || stateToApply !== authoritative) {
+            applyHydratedState(stateToApply);
+            writeStateToLocalStorage(stateToApply);
+          } else if (!remoteState || authoritative.updatedAt > (remoteState.updatedAt || 0)) {
+            persistToBackend(authoritative, true);
+          }
+        }
+      }
+
+      isStorageReadyRef.current = true;
+      setIsStorageReady(true);
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [defaultErpState, writeStateToLocalStorage, persistToBackend]);
+
+  // 2. Persist state changes to BOTH localStorage and /api/erp-state ONLY when actual user changes differ from last synced state
+  useEffect(() => {
+    const snap = lastSyncedSnapshotRef.current;
+    const matchesLastSynced =
+      selectedClass === snap.selectedClass &&
+      selectedExam === snap.selectedExam &&
+      examConfigs === snap.examConfigs &&
+      students === snap.students &&
+      examMarksStore === snap.examMarksStore &&
+      examBreakdownsStore === snap.examBreakdownsStore;
+
+    if (!isStorageReady) {
+      return;
+    }
+    if (matchesLastSynced) {
+      return;
+    }
+
+    const updatedAt = Date.now();
+    stateUpdatedAtRef.current = updatedAt;
+    lastSyncedSnapshotRef.current = {
+      selectedClass,
+      selectedExam,
+      examConfigs,
+      students,
+      examMarksStore,
+      examBreakdownsStore,
+    };
+    const nextState: PersistedErpState = {
+      version: 1,
+      initialized: true,
+      updatedAt,
+      selectedClass,
+      selectedExam,
+      examConfigs,
+      students,
+      examMarksStore,
+      examBreakdownsStore,
+    };
+
+    writeStateToLocalStorage(nextState);
+    persistToBackend(nextState, false);
+  }, [
+    isStorageReady,
+    selectedClass,
+    selectedExam,
+    examConfigs,
+    students,
+    examMarksStore,
+    examBreakdownsStore,
+    writeStateToLocalStorage,
+    persistToBackend,
+  ]);
+
+  // Flush any pending backend write before tab close or reload
+  useEffect(() => {
+    if (!isStorageReady) return;
+    const flushPendingSave = () => {
+      if (!serverSaveTimerRef.current) return;
+      clearTimeout(serverSaveTimerRef.current);
+      serverSaveTimerRef.current = null;
+      const snapshot: PersistedErpState = {
+        version: 1,
+        initialized: true,
+        updatedAt: stateUpdatedAtRef.current || Date.now(),
+        selectedClass: selectedClassRef.current,
+        selectedExam: selectedExamRef.current,
+        examConfigs: examConfigsRef.current,
+        students: studentsRef.current,
+        examMarksStore: examMarksStoreRef.current,
+        examBreakdownsStore: examBreakdownsStoreRef.current,
+      };
+      const payload = JSON.stringify({ state: snapshot });
+      fetch('/api/erp-state', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: payload,
+        keepalive: payload.length < 60000,
+      }).catch(() => {});
+    };
+    window.addEventListener('pagehide', flushPendingSave);
+    window.addEventListener('beforeunload', flushPendingSave);
+    return () => {
+      window.removeEventListener('pagehide', flushPendingSave);
+      window.removeEventListener('beforeunload', flushPendingSave);
+    };
+  }, [isStorageReady]);
 
   const syncStoresForExam = useCallback((examId: string, roster: StudentReportRow[]) => {
     const marksMap: Record<string, Record<string, number | 'AB' | null>> = {};
@@ -1085,33 +1348,6 @@ export default function SchoolErpPage() {
               const merged = rawMerged.map((s) => {
                 const effCfg = getEffectiveExamConfigForClass(targetCfg, s.section);
                 const defaultMax = effCfg.subjects[0]?.maxMarks || (isPtExam(examName) ? 25 : 100);
-                const isAayushSample =
-                  s.id === 'STU-2026-0031' ||
-                  s.name.trim().toLowerCase() === 'aayush satish nalawade';
-                if (examName === 'PT-1' && isAayushSample && defaultMax === 25) {
-                  return {
-                    ...s,
-                    marks: {
-                      English: 25,
-                      Hindi: 25,
-                      Marathi: 24,
-                      Maths: 22,
-                      Science: 25,
-                      'Social Science': 24,
-                    },
-                    subjectRemarks: {
-                      ...(s.subjectRemarks || {}),
-                      English: 'Outstanding! Strong command of language.',
-                      Hindi: 'Excellent performance keep it up.',
-                      Marathi: 'Excellent Performance',
-                      Maths: 'Outstanding! Strong conceptual understanding.',
-                      Science: 'Outstanding! Strong conceptual understanding.',
-                      'Social Science': 'Good.Keep it up!',
-                    },
-                    customRemarks:
-                      'Excellent and consistent performance with strong understanding and commendable effort.',
-                  };
-                }
                 if (isPtExam(examName) && hasCsInPtExam(s.section)) {
                   const csSub = effCfg.subjects.find(
                     (sub) =>
@@ -1220,18 +1456,19 @@ export default function SchoolErpPage() {
     setUndoStack((prev) => prev.slice(0, -1));
     setRedoStack((prev) => [
       ...prev,
-      students.map((s) => ({
-        ...s,
-        marks: { ...s.marks },
-        breakdowns: s.breakdowns ? { ...s.breakdowns } : undefined,
-        subjectRemarks: s.subjectRemarks ? { ...s.subjectRemarks } : undefined,
-      })),
+      {
+        students: cloneRosterSnapshot(students),
+        examMarksStore: cloneMarksStoreSnapshot(examMarksStore),
+        examBreakdownsStore: cloneBreakdownsStoreSnapshot(examBreakdownsStore),
+      },
     ]);
-    setStudents(previous);
-    syncStoresForExam(selectedExamRef.current, previous);
-    triggerAutoSync(previous);
+    setExamMarksStore(previous.examMarksStore);
+    setExamBreakdownsStore(previous.examBreakdownsStore);
+    setStudents(previous.students);
+    syncStoresForExam(selectedExam, previous.students);
+    triggerAutoSync(previous.students);
     showToast('Undo change (Ctrl+Z)');
-  }, [undoStack, students, showToast, syncStoresForExam, triggerAutoSync]);
+  }, [undoStack, students, examMarksStore, examBreakdownsStore, selectedExam, showToast, syncStoresForExam, triggerAutoSync, setUndoStack, setRedoStack]);
 
   const handleRedo = useCallback(() => {
     if (redoStack.length === 0) {
@@ -1242,115 +1479,60 @@ export default function SchoolErpPage() {
     setRedoStack((prev) => prev.slice(0, -1));
     setUndoStack((prev) => [
       ...prev,
-      students.map((s) => ({
-        ...s,
-        marks: { ...s.marks },
-        breakdowns: s.breakdowns ? { ...s.breakdowns } : undefined,
-        subjectRemarks: s.subjectRemarks ? { ...s.subjectRemarks } : undefined,
-      })),
+      {
+        students: cloneRosterSnapshot(students),
+        examMarksStore: cloneMarksStoreSnapshot(examMarksStore),
+        examBreakdownsStore: cloneBreakdownsStoreSnapshot(examBreakdownsStore),
+      },
     ]);
-    setStudents(next);
-    syncStoresForExam(selectedExamRef.current, next);
-    triggerAutoSync(next);
+    setExamMarksStore(next.examMarksStore);
+    setExamBreakdownsStore(next.examBreakdownsStore);
+    setStudents(next.students);
+    syncStoresForExam(selectedExam, next.students);
+    triggerAutoSync(next.students);
     showToast('Redo change (Ctrl+Y)');
-  }, [redoStack, students, showToast, syncStoresForExam, triggerAutoSync]);
+  }, [redoStack, students, examMarksStore, examBreakdownsStore, selectedExam, showToast, syncStoresForExam, triggerAutoSync, setUndoStack, setRedoStack]);
 
-  const handleExamChange = useCallback(
-    (newExam: string) => {
-      // 1. Save current exam's marks and breakdowns
-      syncStoresForExam(selectedExam, students);
+  const handleExamChange = (newExam: string, overrideTargetConfig?: ExamConfig) => {
+    if (!isStorageReadyRef.current && !overrideTargetConfig) {
+      userPickedExamBeforeReadyRef.current = newExam;
+    }
 
-      // 2. Load cached marks and breakdowns for newExam immediately, clamping/scaling to targetCfg maxMarks
-      const targetMarks = examMarksStore[newExam];
-      const targetBds = examBreakdownsStore[newExam];
-      const targetCfg =
-        examConfigs[newExam] || INITIAL_EXAM_CONFIGS[newExam] || INITIAL_EXAM_CONFIGS['SA-1'];
-
-      const nextRoster = students.map((s) => {
-        const m: Record<string, number | 'AB' | null> = targetMarks?.[s.id]
-          ? { ...targetMarks[s.id] }
-          : { ...s.marks };
-        const bds: Record<string, SubjectBreakdown> = targetBds?.[s.id]
-          ? { ...targetBds[s.id] }
-          : {};
-        const effCfg = getEffectiveExamConfigForClass(targetCfg, s.section);
-        effCfg.subjects.forEach((sub) => {
-          const curVal = m[sub.name];
-          if (typeof curVal === 'number' && sub.maxMarks > 0 && curVal > sub.maxMarks) {
-            const srcScale = curVal > 50 ? 100 : curVal > 25 ? 50 : 25;
-            m[sub.name] = Math.min(
-              sub.maxMarks,
-              Math.max(0, Math.round((curVal / srcScale) * sub.maxMarks))
-            );
-          } else if (
-            (curVal === undefined || curVal === null) &&
-            isPtExam(newExam) &&
-            hasCsInPtExam(s.section)
-          ) {
-            const baseSt = ALL_SVA_STUDENTS.find((b) => b.id === s.id);
-            const baseVal = baseSt?.marks[sub.name];
-            if (typeof baseVal === 'number') {
-              m[sub.name] = Math.min(
-                sub.maxMarks,
-                Math.max(0, Math.round((baseVal / 100) * sub.maxMarks))
-              );
-            }
-          }
-          if (!bds[sub.name]) {
-            const synced = syncBreakdownWithTotal(
-              m[sub.name] ?? null,
-              sub.name,
-              s.section,
-              sub.components
-            );
-            if (synced) {
-              bds[sub.name] = synced;
-            }
-          }
-        });
-        return {
-          ...s,
-          marks: m,
-          breakdowns: bds,
-        };
-      });
-
-      setStudents(nextRoster);
-      syncStoresForExam(newExam, nextRoster);
-
-      selectedExamRef.current = newExam;
-      setSelectedExam(newExam);
-      setExportExam(newExam);
-      if (isPtExam(newExam) && !hasCsInPtExam(selectedClass)) {
-        if (selectedSubject.toLowerCase() === 'computer science' || selectedSubject.toLowerCase() === 'cs') {
-          setSelectedSubject('all');
-        }
-        if (selectedRemarkScope.toLowerCase() === 'computer science' || selectedRemarkScope.toLowerCase() === 'cs') {
-          setSelectedRemarkScope('all');
-        }
-      }
-      setSelectedRange(null);
-      setIsSelecting(false);
-      showToast(`Switched ledger to ${newExam}`);
-
-      // 3. Pull fresh data for newExam from Google Sheets in the background
-      pullFromLockedSheet(newExam, true);
-    },
-    [
-      selectedExam,
-      selectedClass,
-      selectedSubject,
-      selectedRemarkScope,
+    const { nextRoster, nextMarksStore, nextBreakdownsStore } = switchExamState({
       students,
+      currentExam: selectedExam,
+      targetExam: newExam,
+      examConfigs,
+      initialConfigs: INITIAL_EXAM_CONFIGS,
       examMarksStore,
       examBreakdownsStore,
-      examConfigs,
-      syncStoresForExam,
-      setExportExam,
-      showToast,
-      pullFromLockedSheet,
-    ]
-  );
+      overrideTargetConfig,
+    });
+
+    setExamMarksStore(nextMarksStore);
+    setExamBreakdownsStore(nextBreakdownsStore);
+    setStudents(nextRoster);
+    setUndoStack([]);
+    setRedoStack([]);
+
+    selectedExamRef.current = newExam;
+    setSelectedExam(newExam);
+    setExportExam(newExam);
+    if (isPtExam(newExam) && !hasCsInPtExam(selectedClass)) {
+      if (selectedSubject.toLowerCase() === 'computer science' || selectedSubject.toLowerCase() === 'cs') {
+        setSelectedSubject('all');
+      }
+      if (selectedRemarkScope.toLowerCase() === 'computer science' || selectedRemarkScope.toLowerCase() === 'cs') {
+        setSelectedRemarkScope('all');
+      }
+      if (uploadTargetSubject.toLowerCase() === 'computer science' || uploadTargetSubject.toLowerCase() === 'cs') {
+        setUploadTargetSubject('English');
+      }
+    }
+    setSelectedRange(null);
+    setIsSelecting(false);
+    showToast(`Switched ledger to ${newExam}`);
+  };
 
   const handleSaveAndTestGasUrl = useCallback(async (urlToSave: string) => {
     const trimmed = urlToSave.trim();
@@ -1419,19 +1601,21 @@ export default function SchoolErpPage() {
     setInternalModalData(null);
   }, [students, baseExamConfig, selectedExam, pushUndoSnapshot, syncStoresForExam, triggerAutoSync, showToast, setInternalModalData]);
 
-  // Pull fresh data directly from Google Sheets on every visit (mount)
+  // Clean up timers on unmount
   useEffect(() => {
-    pullFromLockedSheet(selectedExamRef.current, true);
-
     return () => {
       if (autoSyncTimerRef.current) {
         clearTimeout(autoSyncTimerRef.current);
       }
+      if (toastTimerRef.current) {
+        clearTimeout(toastTimerRef.current);
+      }
     };
-  }, [pullFromLockedSheet]);
+  }, []);
 
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const cellInputRefs = useRef<{ [key: string]: HTMLInputElement | null }>({});
+  const consolidatedCellRefs = useRef<{ [key: string]: HTMLInputElement | null }>({});
 
   const handleRowContextMenu = (e: React.MouseEvent, student: StudentReportRow) => {
     e.preventDefault();
@@ -1586,8 +1770,7 @@ export default function SchoolErpPage() {
       if (valA > valB) return sortAsc ? 1 : -1;
       return 0;
     });
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [students, selectedClass, searchQuery, filterStatus, activeSubjects, sortField, sortAsc]);
+  }, [students, selectedClass, searchQuery, filterStatus, activeSubjects, sortField, sortAsc, computedResultsMap]);
 
   // Paginated students for smooth 60fps table rendering
   const paginatedStudents = useMemo(() => {
@@ -1760,7 +1943,7 @@ export default function SchoolErpPage() {
     // Row 3: Subject Name Header
     aoa.push([`SUBJECT: ${subjectTitle}`]);
     // Row 4: Class & Session Metadata
-    aoa.push([`CLASS: ${classSectionTitle} | ACADEMIC SESSION: 2025-2026 | CBSE AFFILIATION: 1130982`]);
+    aoa.push([`CLASS: ${classSectionTitle} | ACADEMIC SESSION: ${SVA_EXAM_INFO.academicSession} | CBSE AFFILIATION: ${SVA_EXAM_INFO.affiliationNo}`]);
     // Row 5: Blank spacer row
     aoa.push([]);
     // Row 6: Column Table Headers
@@ -1878,10 +2061,10 @@ export default function SchoolErpPage() {
             components: getDefaultSubjectComponents(s.name, exportExam),
           })),
     };
-    const targetExamConfig: ExamConfig = getEffectiveExamConfigForClass(
-      rawTargetConfig,
-      exportClass || 'Diamond'
-    );
+    const targetExamConfig: ExamConfig =
+      exportClass && exportClass !== 'all'
+        ? getEffectiveExamConfigForClass(rawTargetConfig, exportClass)
+        : rawTargetConfig;
 
     const targetExamMarks =
       exportExam === selectedExam ? null : examMarksStore[exportExam] || {};
@@ -1890,9 +2073,9 @@ export default function SchoolErpPage() {
 
     const studentsForExport: StudentReportRow[] = students.map((s) => ({
       ...s,
-      marks: targetExamMarks ? targetExamMarks[s.id] || s.marks : s.marks,
+      marks: targetExamMarks ? targetExamMarks[s.id] || {} : s.marks,
       breakdowns: targetExamBreakdowns
-        ? targetExamBreakdowns[s.id] || s.breakdowns
+        ? targetExamBreakdowns[s.id] || {}
         : s.breakdowns,
     }));
 
@@ -1928,10 +2111,10 @@ export default function SchoolErpPage() {
               components: getDefaultSubjectComponents(s.name, exportExam),
             })),
       };
-      const targetExamConfig: ExamConfig = getEffectiveExamConfigForClass(
-        rawTargetConfig,
-        exportClass || 'Diamond'
-      );
+      const targetExamConfig: ExamConfig =
+        exportClass && exportClass !== 'all'
+          ? getEffectiveExamConfigForClass(rawTargetConfig, exportClass)
+          : rawTargetConfig;
 
       const targetExamMarks =
         exportExam === selectedExam ? null : examMarksStore[exportExam] || {};
@@ -1940,9 +2123,9 @@ export default function SchoolErpPage() {
 
       const studentsForExport: StudentReportRow[] = students.map((s) => ({
         ...s,
-        marks: targetExamMarks ? targetExamMarks[s.id] || s.marks : s.marks,
+        marks: targetExamMarks ? targetExamMarks[s.id] || {} : s.marks,
         breakdowns: targetExamBreakdowns
-          ? targetExamBreakdowns[s.id] || s.breakdowns
+          ? targetExamBreakdowns[s.id] || {}
           : s.breakdowns,
       }));
 
@@ -2243,25 +2426,12 @@ export default function SchoolErpPage() {
     }
   };
 
-  // Update cell mark handler with undo snapshot and synchronized breakdown
+  // Update cell mark handler with undo snapshot, AB typing preservation, per-student clamping, and synchronized breakdown
   const handleMarkChange = (studentId: string, subjectName: string, value: string, recordUndo = true) => {
     if (recordUndo) {
       pushUndoSnapshot(students);
     }
     const subConfig = activeSubjects.find((s) => s.name === subjectName);
-    const maxMark = subConfig?.maxMarks ?? 100;
-    const trimmed = value.trim();
-    let newMark: number | 'AB' | null = null;
-    if (trimmed.toUpperCase() === 'AB' || trimmed.toUpperCase() === 'A') {
-      newMark = 'AB';
-    } else if (trimmed === '') {
-      newMark = null;
-    } else {
-      const parsed = parseFloat(trimmed);
-      if (!isNaN(parsed)) {
-        newMark = Math.min(maxMark, Math.max(0, parsed));
-      }
-    }
 
     const updatedStudents = students.map((s) => {
       if (s.id !== studentId) return s;
@@ -2269,6 +2439,12 @@ export default function SchoolErpPage() {
         getEffectiveExamConfigForClass(baseExamConfig, s.section).subjects.find(
           (sub) => sub.name === subjectName
         ) || subConfig;
+      const maxMark = effectiveSub?.maxMarks ?? 100;
+      const prevMark = s.marks[subjectName];
+      const parsed = parseSpreadsheetMarkInput(value, maxMark, prevMark);
+      if (!parsed.valid) return s;
+      const newMark = parsed.value;
+
       const nextBd = syncBreakdownWithTotal(
         newMark,
         subjectName,
@@ -2310,47 +2486,6 @@ export default function SchoolErpPage() {
       if (recordUndo) {
         pushUndoSnapshot(students);
       }
-      const trimmed = value.trim();
-      let parsedVal: number | 'AB' | null = null;
-      if (trimmed.toUpperCase() === 'AB' || trimmed.toUpperCase() === 'A') {
-        parsedVal = 'AB';
-      } else if (trimmed === '') {
-        parsedVal = null;
-      } else {
-        const num = parseFloat(trimmed);
-        if (!isNaN(num)) {
-          const subConfig = activeSubjects.find(
-            (s) => s.name.toLowerCase() === subjectName.toLowerCase()
-          );
-          const customComp = subConfig?.components?.find((c) => c.key === field);
-          let maxVal = customComp?.maxMarks ?? 100;
-          if (!customComp) {
-            const targetSt = students.find((s) => s.id === studentId);
-            const isC9 = isClass9Section(targetSt?.section || '');
-            const isHindi = subjectName.toLowerCase() === 'hindi';
-            if (isC9 && isHindi) {
-              if (field === 'listening') maxVal = 20;
-              else if (field === 'speaking') maxVal = 20;
-              else if (field === 'project') maxVal = 15;
-              else if (field === 'saExam') maxVal = 45;
-            } else {
-              if (field === 'internalMarks') {
-                maxVal = 20;
-              } else if (
-                field === 'penPaper' ||
-                field === 'multipleAssessment' ||
-                field === 'subjectEnrichment' ||
-                field === 'portfolio'
-              ) {
-                maxVal = 5;
-              } else if (field === 'writtenExam') {
-                maxVal = 80;
-              }
-            }
-          }
-          parsedVal = Math.min(maxVal, Math.max(0, num));
-        }
-      }
 
       const subConfig = activeSubjects.find(
         (s) => s.name.toLowerCase() === subjectName.toLowerCase()
@@ -2358,9 +2493,44 @@ export default function SchoolErpPage() {
 
       const updatedStudents = students.map((s) => {
         if (s.id !== studentId) return s;
+        const effectiveSub =
+          getEffectiveExamConfigForClass(baseExamConfig, s.section).subjects.find(
+            (sub) => sub.name.toLowerCase() === subjectName.toLowerCase()
+          ) || subConfig;
+        const customComp = effectiveSub?.components?.find((c) => c.key === field);
+        let maxVal = customComp?.maxMarks ?? 100;
+        if (!customComp) {
+          const isC9 = isClass9Section(s.section || '');
+          const isHindi = subjectName.toLowerCase() === 'hindi';
+          if (isC9 && isHindi) {
+            if (field === 'listening') maxVal = 20;
+            else if (field === 'speaking') maxVal = 20;
+            else if (field === 'project') maxVal = 15;
+            else if (field === 'saExam') maxVal = 45;
+          } else {
+            if (field === 'internalMarks') {
+              maxVal = 20;
+            } else if (
+              field === 'penPaper' ||
+              field === 'multipleAssessment' ||
+              field === 'subjectEnrichment' ||
+              field === 'portfolio'
+            ) {
+              maxVal = 5;
+            } else if (field === 'writtenExam') {
+              maxVal = 80;
+            }
+          }
+        }
+
         const currentBd =
           s.breakdowns?.[subjectName] ||
           generateDefaultBreakdown(s.marks[subjectName], subjectName, s.section);
+        const prevFieldVal = currentBd[field];
+        const parsed = parseSpreadsheetMarkInput(value, maxVal, prevFieldVal);
+        if (!parsed.valid) return s;
+        const parsedVal = parsed.value;
+
         let nextBd: SubjectBreakdown = {
           ...currentBd,
           [field]: parsedVal,
@@ -2403,7 +2573,10 @@ export default function SchoolErpPage() {
           const ma = nextBd.multipleAssessment;
           const se = nextBd.subjectEnrichment;
           const pf = nextBd.portfolio;
-          if (pp === 'AB' && ma === 'AB' && se === 'AB' && pf === 'AB') {
+          const subVals = [pp, ma, se, pf];
+          if (subVals.every((v) => v === undefined || v === null)) {
+            nextBd.internalMarks = null;
+          } else if (pp === 'AB' && ma === 'AB' && se === 'AB' && pf === 'AB') {
             nextBd.internalMarks = 'AB';
           } else {
             nextBd.internalMarks =
@@ -2413,10 +2586,6 @@ export default function SchoolErpPage() {
               (typeof pf === 'number' ? pf : 0);
           }
         }
-        const effectiveSub =
-          getEffectiveExamConfigForClass(baseExamConfig, s.section).subjects.find(
-            (sub) => sub.name.toLowerCase() === subjectName.toLowerCase()
-          ) || subConfig;
         const newTotal = computeSubjectTotalFromBreakdown(
           subjectName,
           s.section,
@@ -3055,7 +3224,11 @@ export default function SchoolErpPage() {
 
           const subName = activeGridColumnKeys[targetColIdx];
           const subConfig = activeSubjects.find((s) => s.name === subName);
-          const maxMark = subConfig?.maxMarks ?? 100;
+          const effectiveSub =
+            getEffectiveExamConfigForClass(baseExamConfig, st.section).subjects.find(
+              (sub) => sub.name === subName
+            ) || subConfig;
+          const maxMark = effectiveSub?.maxMarks ?? 100;
           const trimmed = cellVal.trim();
           let newMark: number | 'AB' | null = null;
           if (trimmed.toUpperCase() === 'AB' || trimmed.toUpperCase() === 'A') {
@@ -3070,10 +3243,6 @@ export default function SchoolErpPage() {
           }
 
           nextMarks[subName] = newMark;
-          const effectiveSub =
-            getEffectiveExamConfigForClass(baseExamConfig, st.section).subjects.find(
-              (sub) => sub.name === subName
-            ) || subConfig;
           const nextBd = syncBreakdownWithTotal(
             newMark,
             subName,
@@ -3145,7 +3314,46 @@ export default function SchoolErpPage() {
 
     const updated = [...students, newStudent];
     setStudents(updated);
-    syncStoresForExam(selectedExam, updated);
+
+    // Ensure the new student is initialized across all configured exams so switching exams never blanks out their row
+    setExamMarksStore((prevMarksStore) => {
+      const nextStore: ExamMarksStore = { ...prevMarksStore };
+      Object.entries(examConfigs).forEach(([exId, exCfg]) => {
+        const eff = getEffectiveExamConfigForClass(exCfg, targetSection);
+        const exMarks: Record<string, number | 'AB' | null> = {};
+        eff.subjects.forEach((sub) => {
+          exMarks[sub.name] =
+            exId === selectedExam
+              ? (defaultMarks[sub.name] ?? Math.round((sub.maxMarks || 100) * 0.8))
+              : Math.round((sub.maxMarks || 100) * 0.8);
+        });
+        nextStore[exId] = {
+          ...(nextStore[exId] || {}),
+          [newId]: exMarks,
+        };
+      });
+      return nextStore;
+    });
+    setExamBreakdownsStore((prevBdStore) => {
+      const nextBdStore: ExamBreakdownsStore = { ...prevBdStore };
+      Object.entries(examConfigs).forEach(([exId, exCfg]) => {
+        const eff = getEffectiveExamConfigForClass(exCfg, targetSection);
+        const exBds: Record<string, SubjectBreakdown> = {};
+        eff.subjects.forEach((sub) => {
+          const defMark = Math.round((sub.maxMarks || 100) * 0.8);
+          const bd = syncBreakdownWithTotal(defMark, sub.name, targetSection, sub.components);
+          if (bd) {
+            exBds[sub.name] = bd;
+          }
+        });
+        nextBdStore[exId] = {
+          ...(nextBdStore[exId] || {}),
+          [newId]: exId === selectedExam ? defaultBreakdowns : exBds,
+        };
+      });
+      return nextBdStore;
+    });
+
     triggerAutoSync(updated);
     setIsAddStudentModalOpen(false);
     setNewStudentName('');
@@ -3155,12 +3363,30 @@ export default function SchoolErpPage() {
     showToast(`Added ${newStudent.name} (Roll ${newStudent.rollNo}) to ${targetSection}`);
   };
 
-  // Delete student (supports instant Ctrl+Z undo without iframe-blocked confirm dialog)
+  // Delete student (supports instant Ctrl+Z undo without iframe-blocked confirm dialog & cleans all exam stores)
   const handleDeleteStudent = (studentId: string, studentName: string) => {
     pushUndoSnapshot(students);
     const updated = students.filter((s) => s.id !== studentId);
+    const cleanedStores = removeStudentFromErpStores(
+      examMarksStore,
+      examBreakdownsStore,
+      studentId
+    );
+    setExamMarksStore(cleanedStores.examMarksStore);
+    setExamBreakdownsStore(cleanedStores.examBreakdownsStore);
     setStudents(updated);
-    syncStoresForExam(selectedExam, updated);
+    if (editingStudent?.id === studentId) {
+      setEditingStudent(null);
+    }
+    if (internalModalData?.student.id === studentId) {
+      setInternalModalData(null);
+    }
+    if (selectedStudentId === studentId) {
+      const nextSameClass = updated.find(
+        (s) => selectedClass === 'all' || s.section === selectedClass
+      );
+      setSelectedStudentId(nextSameClass?.id || updated[0]?.id || '');
+    }
     triggerAutoSync(updated);
     showToast(`Removed ${studentName} (Press Ctrl+Z to undo)`);
   };
@@ -3285,7 +3511,7 @@ export default function SchoolErpPage() {
     showToast(`Downloaded ${subjectName} Upload Template (.xlsx)`);
   };
 
-  // Excel / CSV file upload handler (Supports Consolidated & Subject-Wise modes + Aptos template header detection)
+  // Excel / CSV file upload handler (Supports Reference multi-tab, Consolidated 2-row merged, PT single-row, & Subject-Wise formats)
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -3297,227 +3523,51 @@ export default function SchoolErpPage() {
       try {
         const data = evt.target?.result;
         const workbook = XLSX.read(data, { type: 'binary' });
-        const firstSheetName = workbook.SheetNames[0];
-        const worksheet = workbook.Sheets[firstSheetName];
+        const sheetNames = workbook.SheetNames;
+        const sheetsAoa: Record<string, any[][]> = {};
+        sheetNames.forEach((name) => {
+          sheetsAoa[name] = XLSX.utils.sheet_to_json(workbook.Sheets[name], {
+            header: 1,
+            defval: '',
+          }) as any[][];
+        });
 
-        // Detect header row (handles both plain sheets and Aptos-formatted templates with 5 title rows)
-        const aoa = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' }) as any[][];
-        let headerRowIdx = 0;
-        for (let i = 0; i < Math.min(12, aoa.length); i++) {
-          const rowCells = (aoa[i] || []).map((c) => String(c).trim().toLowerCase());
-          if (
-            rowCells.includes('roll no') ||
-            rowCells.includes('roll_number') ||
-            rowCells.includes('student name') ||
-            rowCells.includes('full_name')
-          ) {
-            headerRowIdx = i;
-            break;
-          }
-        }
-
-        const jsonData = XLSX.utils.sheet_to_json(worksheet, {
-          defval: '',
-          range: headerRowIdx,
-        }) as any[];
-
-        if (!jsonData || jsonData.length === 0) {
+        if (
+          sheetNames.length === 0 ||
+          sheetNames.every((name) => !sheetsAoa[name] || sheetsAoa[name].length === 0)
+        ) {
           setUploadError('The uploaded file contains no readable student rows.');
           return;
         }
 
-        pushUndoSnapshot(students);
+        const importResult = parseImportedSpreadsheetRows({
+          sheetNames,
+          sheetsAoa,
+          uploadMode,
+          uploadTargetSubject,
+          currentStudents: students,
+          baseExamConfig,
+          selectedClass,
+          getClassNumberForSection,
+        });
 
-        if (uploadMode === 'subject') {
-          // ==========================================
-          // SUBJECT-WISE MARKS UPLOAD MODE
-          // ==========================================
-          let updatedCount = 0;
-          const updated = [...students];
-          const subConfig = activeSubjects.find((s) => s.name === uploadTargetSubject);
-
-          jsonData.forEach((row) => {
-            const studentId = String(
-              row['student_id'] || row['Student ID'] || row['Admission No'] || row['AdmNo'] || ''
-            ).trim();
-            const rawRoll = String(
-              row['roll_number'] || row['Roll No'] || row['Roll'] || row['RollNo'] || ''
-            ).trim();
-            const rollNo = rawRoll ? rawRoll.padStart(2, '0') : '';
-            const rowSection = String(row['section'] || row['Section'] || '').trim();
-            const name = String(
-              row['full_name'] || row['Student Name'] || row['Name'] || row['StudentName'] || ''
-            )
-              .trim()
-              .toLowerCase();
-
-            if (!studentId && !rollNo && !name) return;
-
-            const rawVal =
-              row['Marks Obtained'] ??
-              row['Marks'] ??
-              row['Mark'] ??
-              row[uploadTargetSubject] ??
-              row[uploadTargetSubject.toLowerCase()] ??
-              row['Obtained'] ??
-              row['Score'];
-
-            let parsedMark: number | 'AB' | null = null;
-            if (
-              String(rawVal).trim().toUpperCase() === 'AB' ||
-              String(rawVal).trim().toUpperCase() === 'ABSENT'
-            ) {
-              parsedMark = 'AB';
-            } else if (
-              rawVal !== '' &&
-              rawVal !== null &&
-              rawVal !== undefined &&
-              !isNaN(Number(rawVal))
-            ) {
-              const maxVal = subConfig?.maxMarks ?? 100;
-              parsedMark = Math.min(maxVal, Math.max(0, Number(rawVal)));
-            }
-
-            // Match student in existing roster by Admission No, Roll No (+ Section), or Name
-            const matchIdx = updated.findIndex(
-              (st) =>
-                (studentId && st.admissionNo.toLowerCase() === studentId.toLowerCase()) ||
-                (name && st.name.toLowerCase() === name) ||
-                (rollNo &&
-                  st.rollNo.padStart(2, '0') === rollNo &&
-                  (rowSection
-                    ? st.section.toLowerCase() === rowSection.toLowerCase()
-                    : selectedClass === 'all' || st.section === selectedClass))
-            );
-
-            if (matchIdx !== -1) {
-              updatedCount++;
-              const st = updated[matchIdx];
-              const effectiveSub =
-                getEffectiveExamConfigForClass(baseExamConfig, st.section).subjects.find(
-                  (sub) => sub.name === uploadTargetSubject
-                ) || subConfig;
-              const nextBd = syncBreakdownWithTotal(
-                parsedMark,
-                uploadTargetSubject,
-                st.section,
-                effectiveSub?.components,
-                st.breakdowns?.[uploadTargetSubject]
-              );
-              const nextBreakdowns = { ...(st.breakdowns || {}) };
-              if (nextBd) {
-                nextBreakdowns[uploadTargetSubject] = nextBd;
-              } else {
-                delete nextBreakdowns[uploadTargetSubject];
-              }
-              updated[matchIdx] = {
-                ...st,
-                marks: {
-                  ...st.marks,
-                  [uploadTargetSubject]: parsedMark,
-                },
-                breakdowns: nextBreakdowns,
-              };
-            }
-          });
-
-          setStudents(updated);
-          syncStoresForExam(selectedExam, updated);
-          triggerAutoSync(updated);
-
-          setIsUploadModalOpen(false);
-          showToast(
-            `Successfully updated ${uploadTargetSubject} marks for ${updatedCount} students`
+        if (!importResult.success || importResult.importedCount === 0) {
+          setUploadError(
+            importResult.error || 'No matching student rows were found in the uploaded file.'
           );
           return;
         }
 
-        // ==========================================
-        // CONSOLIDATED MULTI-SUBJECT MARKS UPLOAD MODE
-        // ==========================================
-        const incomingStudents: StudentReportRow[] = [];
-        jsonData.forEach((row, idx) => {
-          const rawRoll = String(
-            row['roll_number'] || row['Roll No'] || row['Roll'] || row['RollNo'] || ''
-          ).trim();
-          const rawName = String(
-            row['full_name'] || row['Student Name'] || row['Name'] || row['StudentName'] || ''
-          ).trim();
-          if (!rawRoll && !rawName) return;
-
-          const rollNo = (rawRoll || String(idx + 1)).padStart(2, '0');
-          const name = rawName || `Student ${rollNo}`;
-          const section = String(
-            row['section'] ||
-              row['Section'] ||
-              (selectedClass !== 'all' ? selectedClass : 'Sparkle')
-          ).trim();
-          const studentId = String(
-            row['student_id'] ||
-              row['Student ID'] ||
-              row['Admission No'] ||
-              row['AdmNo'] ||
-              `sva-${section.toLowerCase()}-${rollNo}`
-          ).trim();
-
-          const effectiveCfg = getEffectiveExamConfigForClass(baseExamConfig, section);
-          const marks: Record<string, number | 'AB' | null> = {};
-          const breakdowns: Record<string, SubjectBreakdown> = {};
-
-          effectiveCfg.subjects.forEach((sub) => {
-            const rawVal =
-              row[sub.name] ??
-              row[sub.name.toLowerCase()] ??
-              (sub.name === 'Maths' ? row['Mathematics'] ?? row['mathematics'] : undefined) ??
-              row[sub.name.substring(0, 3)] ??
-              row[sub.name.substring(0, 3).toLowerCase()];
-
-            const trimmedVal = String(rawVal ?? '').trim();
-            if (trimmedVal.toUpperCase() === 'AB' || trimmedVal.toUpperCase() === 'ABSENT') {
-              marks[sub.name] = 'AB';
-            } else if (trimmedVal !== '' && trimmedVal !== '-' && !isNaN(Number(trimmedVal))) {
-              marks[sub.name] = Math.min(sub.maxMarks || 100, Math.max(0, Number(trimmedVal)));
-            } else {
-              marks[sub.name] = null;
-            }
-
-            const bd = syncBreakdownWithTotal(marks[sub.name], sub.name, section, sub.components);
-            if (bd) {
-              breakdowns[sub.name] = bd;
-            }
-          });
-
-          incomingStudents.push({
-            id: studentId,
-            rollNo,
-            name,
-            admissionNo: studentId,
-            class: getClassNumberForSection(section),
-            section,
-            dob: String(row['DOB'] || row['dob'] || '2010-01-01'),
-            fatherName: String(row['Father Name'] || row["Father's Name"] || 'Parent'),
-            motherName: String(row['Mother Name'] || row["Mother's Name"] || 'Parent'),
-            marks,
-            breakdowns,
-            customRemarks: String(
-              row['Remarks'] ||
-                row['Class Teacher Remark'] ||
-                'Imported from official student record.'
-            ),
-          });
-        });
-
-        const mergedRoster = mergePulledStudentsWithRoster(
-          students,
-          incomingStudents,
-          baseExamConfig
-        );
-
-        setStudents(mergedRoster);
-        syncStoresForExam(selectedExam, mergedRoster);
-        triggerAutoSync(mergedRoster);
+        pushUndoSnapshot(students);
+        setStudents(importResult.updatedStudents);
+        syncStoresForExam(selectedExam, importResult.updatedStudents);
+        triggerAutoSync(importResult.updatedStudents);
         setIsUploadModalOpen(false);
-        showToast(`Successfully imported ${incomingStudents.length} students across sections`);
+        showToast(
+          uploadMode === 'subject'
+            ? `Successfully updated ${uploadTargetSubject} marks for ${importResult.importedCount} students`
+            : `Successfully imported marks for ${importResult.importedCount} students`
+        );
       } catch (err: any) {
         setUploadError(`Failed to parse file: ${err.message || 'Invalid format'}`);
       }
@@ -3711,7 +3761,12 @@ export default function SchoolErpPage() {
                   <span>Import Marks</span>
                 </button>
                 <button
-                  onClick={() => setIsAddStudentModalOpen(true)}
+                  onClick={() => {
+                    if (selectedClass && selectedClass !== 'all') {
+                      setNewStudentSection(selectedClass);
+                    }
+                    setIsAddStudentModalOpen(true);
+                  }}
                   className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-2xs transition-colors cursor-pointer"
                 >
                   <Plus className="w-3.5 h-3.5" />
@@ -3721,7 +3776,7 @@ export default function SchoolErpPage() {
             </div>
 
             {/* Class, Exam & Subject Unified Control Bar */}
-            <div className="bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+            <div className="bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 relative z-30">
               <div className="flex flex-wrap items-center gap-2.5">
                 {/* 1. Class Dropdown */}
                 <CustomSelect
@@ -3730,6 +3785,9 @@ export default function SchoolErpPage() {
                   prefixLabel="Class:"
                   value={selectedClass}
                   onChange={(val) => {
+                    if (!isStorageReadyRef.current) {
+                      userPickedClassBeforeReadyRef.current = val;
+                    }
                     setSelectedClass(val);
                     setExportClass(val);
                     setCurrentPage(1);
@@ -3966,6 +4024,17 @@ export default function SchoolErpPage() {
                                   >
                                     <span className="truncate">{student.name}</span>
                                     <ChevronRight className="w-3 h-3 text-slate-400 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0" />
+                                  </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSelectedStudentId(student.id);
+                                      setEditingStudent(student);
+                                    }}
+                                    title={`Edit details for ${student.name}`}
+                                    className="opacity-0 group-hover/name:opacity-100 p-1 text-slate-400 hover:text-slate-900 hover:bg-slate-200/70 rounded transition-all shrink-0"
+                                  >
+                                    <Edit2 className="w-3 h-3" />
                                   </button>
                                 </div>
                               </td>
@@ -4415,6 +4484,17 @@ export default function SchoolErpPage() {
                                     <span className="truncate">{student.name}</span>
                                     <ChevronRight className="w-3 h-3 text-slate-400 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0" />
                                   </button>
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      setSelectedStudentId(student.id);
+                                      setEditingStudent(student);
+                                    }}
+                                    title={`Edit details for ${student.name}`}
+                                    className="opacity-0 group-hover/name:opacity-100 p-1 text-slate-400 hover:text-slate-900 hover:bg-slate-200/70 rounded transition-all shrink-0"
+                                  >
+                                    <Edit2 className="w-3 h-3" />
+                                  </button>
                                 </div>
                               </td>
 
@@ -4454,36 +4534,256 @@ export default function SchoolErpPage() {
 
                                 return (
                                   <React.Fragment key={`cells-${student.id}-${subName}`}>
-                                    {sec.components.map((comp) => {
-                                      const rawVal = sec.isMulti ? bd[comp.key] : student.marks[subName];
-                                      const displayVal =
-                                        rawVal === null || rawVal === undefined ? '' : String(rawVal);
-                                      return (
-                                        <td
-                                          key={`${student.id}-${subName}-${comp.key}`}
-                                          className="min-w-[92px] h-10 p-0 border-b border-l border-slate-200 relative transition-colors"
-                                        >
-                                          <input
-                                            type="text"
-                                            value={displayVal}
-                                            placeholder={`/${comp.maxMarks}`}
-                                            onChange={(e) => {
-                                              if (sec.isMulti) {
-                                                handleInternalCellChange(
-                                                  student.id,
-                                                  subName,
-                                                  comp.key,
-                                                  e.target.value
+                                      {sec.components.map((comp) => {
+                                        const flatColIdx =
+                                          consolidatedMarksStructure.flatColIndexByKey[
+                                            `${subName}::${comp.key}`
+                                          ] ?? 0;
+                                        const rawVal = sec.isMulti ? bd[comp.key] : student.marks[subName];
+                                        const displayVal =
+                                          rawVal === null || rawVal === undefined ? '' : String(rawVal);
+                                        return (
+                                          <td
+                                            key={`${student.id}-${subName}-${comp.key}`}
+                                            className="min-w-[92px] h-10 p-0 border-b border-l border-slate-200 relative transition-colors"
+                                          >
+                                            <input
+                                              ref={(el) => {
+                                                consolidatedCellRefs.current[`${rowIdx}-${flatColIdx}`] = el;
+                                              }}
+                                              data-excel-cell="true"
+                                              type="text"
+                                              value={displayVal}
+                                              placeholder={`/${comp.maxMarks}`}
+                                              onFocus={(e) => {
+                                                setSelectedStudentId(student.id);
+                                                ensureCellVisible(e.currentTarget);
+                                              }}
+                                              onKeyDown={(e) => {
+                                                const totalColsCount =
+                                                  consolidatedMarksStructure.editableCols.length;
+                                                const focusConsolidated = (r: number, c: number) => {
+                                                  const targetInput =
+                                                    consolidatedCellRefs.current[`${r}-${c}`];
+                                                  if (targetInput) {
+                                                    targetInput.focus({ preventScroll: true });
+                                                    targetInput.select();
+                                                    ensureCellVisible(targetInput);
+                                                    if (paginatedStudents[r]) {
+                                                      setSelectedStudentId(paginatedStudents[r].id);
+                                                    }
+                                                  }
+                                                };
+
+                                                if (
+                                                  (e.ctrlKey || e.metaKey) &&
+                                                  (e.key === 'z' || e.key === 'Z')
+                                                ) {
+                                                  e.preventDefault();
+                                                  if (e.shiftKey) handleRedo();
+                                                  else handleUndo();
+                                                  return;
+                                                }
+                                                if (
+                                                  (e.ctrlKey || e.metaKey) &&
+                                                  (e.key === 'y' || e.key === 'Y')
+                                                ) {
+                                                  e.preventDefault();
+                                                  handleRedo();
+                                                  return;
+                                                }
+                                                if (e.key === 'Enter' || e.key === 'ArrowDown') {
+                                                  e.preventDefault();
+                                                  const nextRow =
+                                                    e.key === 'Enter' && e.shiftKey
+                                                      ? Math.max(0, rowIdx - 1)
+                                                      : Math.min(
+                                                          paginatedStudents.length - 1,
+                                                          rowIdx + 1
+                                                        );
+                                                  focusConsolidated(nextRow, flatColIdx);
+                                                  return;
+                                                }
+                                                if (e.key === 'ArrowUp') {
+                                                  e.preventDefault();
+                                                  focusConsolidated(
+                                                    Math.max(0, rowIdx - 1),
+                                                    flatColIdx
+                                                  );
+                                                  return;
+                                                }
+                                                if (e.key === 'Tab') {
+                                                  e.preventDefault();
+                                                  if (e.shiftKey) {
+                                                    if (flatColIdx > 0) {
+                                                      focusConsolidated(rowIdx, flatColIdx - 1);
+                                                    } else if (rowIdx > 0 && totalColsCount > 0) {
+                                                      focusConsolidated(
+                                                        rowIdx - 1,
+                                                        totalColsCount - 1
+                                                      );
+                                                    }
+                                                  } else {
+                                                    if (flatColIdx < totalColsCount - 1) {
+                                                      focusConsolidated(rowIdx, flatColIdx + 1);
+                                                    } else if (
+                                                      rowIdx <
+                                                      paginatedStudents.length - 1
+                                                    ) {
+                                                      focusConsolidated(rowIdx + 1, 0);
+                                                    }
+                                                  }
+                                                  return;
+                                                }
+                                                if (e.key === 'ArrowRight') {
+                                                  const cursorAtEnd =
+                                                    e.currentTarget.selectionStart ===
+                                                      e.currentTarget.value.length &&
+                                                    e.currentTarget.selectionEnd ===
+                                                      e.currentTarget.value.length;
+                                                  if (cursorAtEnd && flatColIdx < totalColsCount - 1) {
+                                                    e.preventDefault();
+                                                    focusConsolidated(rowIdx, flatColIdx + 1);
+                                                  }
+                                                  return;
+                                                }
+                                                if (e.key === 'ArrowLeft') {
+                                                  const cursorAtStart =
+                                                    e.currentTarget.selectionStart === 0 &&
+                                                    e.currentTarget.selectionEnd === 0;
+                                                  if (cursorAtStart && flatColIdx > 0) {
+                                                    e.preventDefault();
+                                                    focusConsolidated(rowIdx, flatColIdx - 1);
+                                                  }
+                                                  return;
+                                                }
+                                              }}
+                                              onPaste={(e) => {
+                                                const clip = e.clipboardData.getData('text');
+                                                if (!clip || (!clip.includes('\t') && !clip.includes('\n'))) {
+                                                  return;
+                                                }
+                                                e.preventDefault();
+                                                pushUndoSnapshot(students);
+                                                const rowsData = clip
+                                                  .split(/\r?\n/)
+                                                  .filter((r) => r.length > 0);
+                                                const editableCols =
+                                                  consolidatedMarksStructure.editableCols;
+                                                const updatedRoster = [...students];
+                                                rowsData.forEach((rowStr, rOff) => {
+                                                  const targetStu =
+                                                    paginatedStudents[rowIdx + rOff];
+                                                  if (!targetStu) return;
+                                                  const stIdx = updatedRoster.findIndex(
+                                                    (s) => s.id === targetStu.id
+                                                  );
+                                                  if (stIdx === -1) return;
+                                                  let nextStu = {
+                                                    ...updatedRoster[stIdx],
+                                                    marks: { ...updatedRoster[stIdx].marks },
+                                                    breakdowns: {
+                                                      ...(updatedRoster[stIdx].breakdowns || {}),
+                                                    },
+                                                  };
+                                                  const cells = rowStr.split('\t');
+                                                  cells.forEach((cellVal, cOff) => {
+                                                    const colDef = editableCols[flatColIdx + cOff];
+                                                    if (!colDef) return;
+                                                    const trimmed = cellVal.trim();
+                                                    let parsedVal: number | 'AB' | null = null;
+                                                    if (
+                                                      trimmed.toUpperCase() === 'AB' ||
+                                                      trimmed.toUpperCase() === 'A'
+                                                    ) {
+                                                      parsedVal = 'AB';
+                                                    } else if (trimmed !== '') {
+                                                      const num = parseFloat(trimmed);
+                                                      if (!isNaN(num)) {
+                                                        parsedVal = Math.min(
+                                                          colDef.maxMarks,
+                                                          Math.max(0, Math.round(num))
+                                                        );
+                                                      }
+                                                    }
+                                                    if (colDef.isMulti) {
+                                                      const prevBd =
+                                                        nextStu.breakdowns[colDef.subjectName] ||
+                                                        generateDefaultBreakdown(
+                                                          nextStu.marks[colDef.subjectName],
+                                                          colDef.subjectName,
+                                                          nextStu.section
+                                                        );
+                                                      const nextBd: SubjectBreakdown = {
+                                                        ...prevBd,
+                                                        [colDef.compKey]: parsedVal,
+                                                      };
+                                                      nextStu.breakdowns[colDef.subjectName] =
+                                                        nextBd;
+                                                      const subCfg = getEffectiveExamConfigForClass(
+                                                        baseExamConfig,
+                                                        nextStu.section
+                                                      ).subjects.find(
+                                                        (sub) => sub.name === colDef.subjectName
+                                                      );
+                                                      nextStu.marks[colDef.subjectName] =
+                                                        computeSubjectTotalFromBreakdown(
+                                                          colDef.subjectName,
+                                                          nextStu.section,
+                                                          nextBd,
+                                                          subCfg?.components
+                                                        );
+                                                    } else {
+                                                      nextStu.marks[colDef.subjectName] = parsedVal;
+                                                      const subCfg = getEffectiveExamConfigForClass(
+                                                        baseExamConfig,
+                                                        nextStu.section
+                                                      ).subjects.find(
+                                                        (sub) => sub.name === colDef.subjectName
+                                                      );
+                                                      const syncedBd = syncBreakdownWithTotal(
+                                                        parsedVal,
+                                                        colDef.subjectName,
+                                                        nextStu.section,
+                                                        subCfg?.components,
+                                                        nextStu.breakdowns[colDef.subjectName]
+                                                      );
+                                                      if (syncedBd) {
+                                                        nextStu.breakdowns[colDef.subjectName] =
+                                                          syncedBd;
+                                                      } else {
+                                                        delete nextStu.breakdowns[
+                                                          colDef.subjectName
+                                                        ];
+                                                      }
+                                                    }
+                                                  });
+                                                  updatedRoster[stIdx] = nextStu;
+                                                });
+                                                setStudents(updatedRoster);
+                                                syncStoresForExam(selectedExam, updatedRoster);
+                                                triggerAutoSync(updatedRoster);
+                                                showToast(
+                                                  `Pasted ${rowsData.length} row${rowsData.length > 1 ? 's' : ''} of marks`
                                                 );
-                                              } else {
-                                                handleMarkChange(student.id, subName, e.target.value);
-                                              }
-                                            }}
-                                            className="w-full h-10 px-1 text-center font-mono tabular-nums text-xs font-semibold bg-transparent text-slate-800 focus:bg-white focus:ring-2 focus:ring-inset focus:ring-blue-600 focus:outline-none"
-                                          />
-                                        </td>
-                                      );
-                                    })}
+                                              }}
+                                              onChange={(e) => {
+                                                if (sec.isMulti) {
+                                                  handleInternalCellChange(
+                                                    student.id,
+                                                    subName,
+                                                    comp.key,
+                                                    e.target.value
+                                                  );
+                                                } else {
+                                                  handleMarkChange(student.id, subName, e.target.value);
+                                                }
+                                              }}
+                                              className="w-full h-10 px-1 text-center font-mono tabular-nums text-xs font-semibold bg-transparent text-slate-800 focus:bg-white focus:ring-2 focus:ring-inset focus:ring-blue-600 focus:outline-none"
+                                            />
+                                          </td>
+                                        );
+                                      })}
                                     {sec.isMulti && (
                                       <>
                                         <td className="min-w-[78px] h-10 p-0 text-center font-mono tabular-nums text-xs font-extrabold border-b border-l border-slate-200 bg-slate-50/90 text-slate-900 select-none">
@@ -4981,6 +5281,7 @@ export default function SchoolErpPage() {
         const res = computedResults.find((r) => r.student.id === contextMenu.student.id);
         return (
           <div
+            ref={contextMenuRef}
             style={{ left: `${contextMenu.x}px`, top: `${contextMenu.y}px` }}
             className="fixed z-50 w-64 bg-white border border-slate-200/90 rounded-xl shadow-2xl p-1.5 text-xs text-slate-800 select-none animate-in fade-in zoom-in-95 duration-100"
             onClick={(e) => e.stopPropagation()}
@@ -5189,10 +5490,10 @@ export default function SchoolErpPage() {
             </div>
 
             {/* Unified Control Bar (Identical styling to Marks Entry) */}
-            <div className="bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
+            <div className="bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 relative z-30">
               <div className="flex flex-wrap items-center gap-2.5">
                 {/* 1. Class Dropdown */}
-                <CustomSelect
+                  <CustomSelect
                   id="remarks-class-select"
                   icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
                   prefixLabel="Class:"
@@ -5201,6 +5502,14 @@ export default function SchoolErpPage() {
                     setSelectedClass(val);
                     setExportClass(val);
                     setCurrentPage(1);
+                    if (isPtExam(selectedExam) && !hasCsInPtExam(val)) {
+                      if (
+                        selectedRemarkScope.toLowerCase() === 'computer science' ||
+                        selectedRemarkScope.toLowerCase() === 'cs'
+                      ) {
+                        setSelectedRemarkScope('all');
+                      }
+                    }
                   }}
                   options={[
                     { value: 'all', label: `All Classes (${students.length})` },
@@ -5928,12 +6237,12 @@ export default function SchoolErpPage() {
                 </button>
                 <button
                   onClick={() => {
+                    const filteredResults = computedResults
+                      .filter((r) => (selectedClass === 'all' ? true : r.student.section === selectedClass))
+                      .sort((a, b) => (parseInt(a.student.rollNo, 10) || 0) - (parseInt(b.student.rollNo, 10) || 0));
                     setIsExporting(true);
-                    showToast(`Generating Class PDF for ${processedStudents.length} student report cards...`);
+                    showToast(`Generating Class PDF for ${filteredResults.length} student report cards...`);
                     setTimeout(() => {
-                      const filteredResults = computedResults
-                        .filter((r) => (selectedClass === 'all' ? true : r.student.section === selectedClass))
-                        .sort((a, b) => (parseInt(a.student.rollNo, 10) || 0) - (parseInt(b.student.rollNo, 10) || 0));
                       downloadAllReportCardsSinglePDF(
                         { ...SVA_EXAM_INFO, examName: currentExamConfig.name, examCode: selectedExam },
                         filteredResults,
@@ -5953,7 +6262,7 @@ export default function SchoolErpPage() {
                 <button
                   onClick={() => {
                     setIsExporting(true);
-                    showToast('Generating School PDF for all 280 student report cards...');
+                    showToast(`Generating School PDF for all ${computedResults.length} student report cards...`);
                     setTimeout(() => {
                       downloadAllReportCardsSinglePDF(
                         { ...SVA_EXAM_INFO, examName: currentExamConfig.name, examCode: selectedExam },
@@ -5965,7 +6274,7 @@ export default function SchoolErpPage() {
                     }, 100);
                   }}
                   disabled={isExporting}
-                  title="Download report cards for ALL 280 students across all 8 classes in 1 combined multi-page PDF"
+                  title={`Download report cards for all ${computedResults.length} students across all classes in 1 combined multi-page PDF`}
                   className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5 text-slate-500" />
@@ -6193,7 +6502,7 @@ export default function SchoolErpPage() {
                          ========================================================= */}
                       <div
                         data-testid="pt-report-card-page-1"
-                        className="w-full bg-white border border-slate-300 shadow-xl px-12 pt-8 pb-14 text-black font-aptos"
+                        className="a4-report-card-sheet w-full bg-white border border-slate-300 shadow-xl px-12 pt-8 pb-14 text-black font-aptos"
                         style={{ minHeight: '1040px' }}
                       >
                         {/* Header with Crest on Left and School Identity Centered */}
@@ -6254,25 +6563,25 @@ export default function SchoolErpPage() {
                           </div>
                         </div>
 
-                        {/* REPORT CARD BODY BELOW HEADER: APTOS FONT SIZE 12 */}
+                        {/* REPORT CARD BODY BELOW HEADER: APTOS 11PT (14.5PX) */}
                         <div
                           data-testid="pt-report-card-body"
-                          className="font-aptos text-[12px] text-black"
+                          className="font-aptos text-[14.5px] text-black"
                           style={{
                             fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                            fontSize: '12px',
+                            fontSize: '14.5px',
                             fontWeight: 400,
                             WebkitTextStroke: '0.35px currentColor',
                           }}
                         >
                           {/* REPORT CARD & PERIODIC TEST - X Titles */}
                           <div className="text-center mt-2.5 mb-2.5">
-                            <div className="text-[12px] font-bold font-aptos uppercase tracking-normal text-black leading-snug">
+                            <div className="text-[15px] font-bold font-aptos uppercase tracking-normal text-black leading-snug">
                               REPORT CARD
                             </div>
                             <div
                               data-testid="pt-report-card-heading"
-                              className="text-[12px] font-bold font-aptos uppercase tracking-normal text-black leading-snug mt-0.5"
+                              className="text-[20px] font-bold font-aptos uppercase tracking-normal text-black leading-snug mt-0.5"
                             >
                               {ptHeading}
                             </div>
@@ -6281,12 +6590,12 @@ export default function SchoolErpPage() {
                           {/* Table 1: Student Particulars Box (10-column double-bordered framed table) */}
                           <table
                             data-testid="pt-student-particulars-table"
-                            className="w-full text-[12px] font-bold font-aptos text-black border border-black mb-5"
+                            className="w-full text-[14.5px] font-bold font-aptos text-black border border-black mb-5"
                             style={{
                               borderCollapse: 'separate',
                               borderSpacing: '1.5px',
                               fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                              fontSize: '12px',
+                              fontSize: '14.5px',
                             }}
                           >
                             <colgroup>
@@ -6303,107 +6612,107 @@ export default function SchoolErpPage() {
                             </colgroup>
                             <tbody>
                               <tr>
-                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
                                   Roll No.
                                 </td>
-                                <td className="border border-black px-2 py-1 text-left">
+                                <td className="border border-black px-2 py-1.5 text-left">
                                   {ptProfile.rollNoDisplay}
                                 </td>
                                 <td
                                   colSpan={2}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   Class &amp; Section:
                                 </td>
                                 <td
                                   colSpan={3}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   {ptProfile.classSectionDisplay}
                                 </td>
                                 <td
                                   colSpan={2}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   DOB:
                                 </td>
-                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
                                   {ptProfile.dobDisplay}
                                 </td>
                               </tr>
                               <tr>
                                 <td
                                   colSpan={2}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   Name of the Student:
                                 </td>
-                                <td colSpan={8} className="border border-black px-2 py-1 text-left">
+                                <td colSpan={8} className="border border-black px-2 py-1.5 text-left">
                                   {activeStudentResult.student.name}
                                 </td>
                               </tr>
                               <tr>
                                 <td
                                   colSpan={2}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   Father’s Name:
                                 </td>
-                                <td colSpan={8} className="border border-black px-2 py-1 text-left">
+                                <td colSpan={8} className="border border-black px-2 py-1.5 text-left">
                                   {ptProfile.fatherNameDisplay}
                                 </td>
                               </tr>
                               <tr>
                                 <td
                                   colSpan={2}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   Mother’s Name:
                                 </td>
-                                <td colSpan={8} className="border border-black px-2 py-1 text-left">
+                                <td colSpan={8} className="border border-black px-2 py-1.5 text-left">
                                   {ptProfile.motherNameDisplay}
                                 </td>
                               </tr>
                               <tr>
                                 <td
                                   colSpan={2}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   House:
                                 </td>
-                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
                                   {ptProfile.house}
                                 </td>
                                 <td
                                   colSpan={2}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   Height:
                                 </td>
                                 <td
                                   colSpan={2}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   {ptProfile.height}
                                 </td>
                                 <td
                                   colSpan={2}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   Weight:
                                 </td>
-                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
                                   {ptProfile.weight}
                                 </td>
                               </tr>
                               <tr>
                                 <td
                                   colSpan={2}
-                                  className="border border-black px-2 py-1 text-left whitespace-nowrap"
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
                                 >
                                   Attendance:
                                 </td>
-                                <td colSpan={8} className="border border-black px-4 py-1 text-left">
+                                <td colSpan={8} className="border border-black px-2 py-1.5 text-left">
                                   {ptProfile.attendance}
                                 </td>
                               </tr>
@@ -6413,34 +6722,34 @@ export default function SchoolErpPage() {
                           {/* Table 2: Subject Marks Table (6 subjects for Classes 6-8; 7 subjects with CS for Class 9) */}
                           <table
                             data-testid="pt-subjects-table"
-                            className="w-full text-[12px] font-bold font-aptos text-black border border-black mb-7"
+                            className="w-full text-[14.5px] font-bold font-aptos text-black border border-black mb-8"
                             style={{
                               borderCollapse: 'separate',
                               borderSpacing: '1.5px',
                               fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                              fontSize: '12px',
+                              fontSize: '14.5px',
                             }}
                           >
                             <colgroup>
-                              <col style={{ width: '10%' }} />
-                              <col style={{ width: '26%' }} />
-                              <col style={{ width: '14%' }} />
-                              <col style={{ width: '50%' }} />
+                              <col style={{ width: '11.5%' }} />
+                              <col style={{ width: '29.0%' }} />
+                              <col style={{ width: '22.0%' }} />
+                              <col style={{ width: '37.5%' }} />
                             </colgroup>
                             <thead>
                               <tr>
-                                <th className="border border-black px-2 py-1 text-center align-middle leading-tight whitespace-nowrap">
+                                <th className="border border-black px-2 py-1.5 text-center align-middle leading-tight whitespace-nowrap">
                                   <div>SL.</div>
                                   <div>NO.</div>
                                 </th>
-                                <th className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap">
+                                <th className="border border-black px-2 py-2 text-center align-middle whitespace-nowrap">
                                   NAME OF THE SUBJECT
                                 </th>
-                                <th className="border border-black px-2 py-1 text-center align-middle leading-tight whitespace-nowrap">
+                                <th className="border border-black px-2 py-1.5 text-center align-middle leading-tight whitespace-nowrap">
                                   <div>MARKS</div>
                                   <div>OBTAINED</div>
                                 </th>
-                                <th className="border border-black px-2 py-1.5 text-center align-top whitespace-nowrap">
+                                <th className="border border-black px-2 py-2 text-center align-top whitespace-nowrap">
                                   REMARKS
                                 </th>
                               </tr>
@@ -6459,16 +6768,16 @@ export default function SchoolErpPage() {
 
                                 return (
                                   <tr key={detail.name}>
-                                    <td className="border border-black px-2 py-1.5 text-center align-middle font-bold">
+                                    <td className="border border-black px-2 py-2 text-center align-middle font-bold">
                                       {idx + 1}
                                     </td>
-                                    <td className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap font-bold">
+                                    <td className="border border-black px-2 py-2 text-center align-middle whitespace-nowrap font-bold">
                                       {getPtSubjectDisplayName(detail.name)}
                                     </td>
-                                    <td className="border border-black px-2 py-1.5 text-center align-middle font-bold">
+                                    <td className="border border-black px-2 py-2 text-center align-middle font-bold">
                                       {markStr}
                                     </td>
-                                    <td className="border border-black px-2.5 py-1.5 text-left align-middle font-bold">
+                                    <td className="border border-black px-2.5 py-2 text-left align-middle font-bold">
                                       {remarkText}
                                     </td>
                                   </tr>
@@ -6480,12 +6789,12 @@ export default function SchoolErpPage() {
                           {/* Table 3: Summary Strip (TOTAL, PERCENTAGE, GRADE) */}
                           <table
                             data-testid="pt-summary-table"
-                            className="w-full text-[12px] font-bold font-aptos text-black border border-black mb-6"
+                            className="w-full text-[14.5px] font-bold font-aptos text-black border border-black mb-7"
                             style={{
                               borderCollapse: 'separate',
                               borderSpacing: '1.5px',
                               fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                              fontSize: '12px',
+                              fontSize: '14.5px',
                             }}
                           >
                             <colgroup>
@@ -6498,22 +6807,22 @@ export default function SchoolErpPage() {
                             </colgroup>
                             <tbody>
                               <tr>
-                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
                                   TOTAL:
                                 </td>
-                                <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                <td className="border border-black px-2 py-1.5 text-center whitespace-nowrap">
                                   {activeStudentResult.totalObtained}/{activeStudentResult.totalMax}
                                 </td>
-                                <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                <td className="border border-black px-2 py-1.5 text-center whitespace-nowrap">
                                   PERCENTAGE:
                                 </td>
-                                <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                <td className="border border-black px-2 py-1.5 text-center whitespace-nowrap">
                                   {ptPctStr}
                                 </td>
-                                <td className="border border-black px-2 py-1 text-left whitespace-nowrap">
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
                                   GRADE:
                                 </td>
-                                <td className="border border-black px-2 py-1 text-center whitespace-nowrap">
+                                <td className="border border-black px-2 py-1.5 text-center whitespace-nowrap">
                                   {activeStudentResult.grade}
                                 </td>
                               </tr>
@@ -6523,12 +6832,12 @@ export default function SchoolErpPage() {
                           {/* Table 4: Class Teacher's Remarks Box */}
                           <table
                             data-testid="pt-remarks-table"
-                            className="w-full text-[12px] font-bold font-aptos text-black border border-black"
+                            className="w-full text-[14.5px] font-bold font-aptos text-black border border-black"
                             style={{
                               borderCollapse: 'separate',
                               borderSpacing: '1.5px',
                               fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                              fontSize: '12px',
+                              fontSize: '14.5px',
                             }}
                           >
                             <colgroup>
@@ -6540,7 +6849,7 @@ export default function SchoolErpPage() {
                                 <td className="border border-black px-2 py-2.5 text-left align-middle whitespace-nowrap">
                                   CLASS TEACHER’S REMARKS:
                                 </td>
-                                <td className="border border-black px-2.5 py-1.5 text-left align-middle leading-snug">
+                                <td className="border border-black px-2.5 py-2 text-left align-middle leading-snug">
                                   {ctRemark}
                                 </td>
                               </tr>
@@ -6554,26 +6863,25 @@ export default function SchoolErpPage() {
                          ========================================================= */}
                       <div
                         data-testid="pt-report-card-page-2"
-                        className="w-full bg-white border border-slate-300 shadow-xl px-12 pt-11 pb-20 text-black font-aptos text-[12px]"
+                        className="a4-report-card-sheet w-full bg-white border border-slate-300 shadow-xl px-12 pt-11 pb-20 text-black font-aptos text-[14.5px]"
                         style={{
                           minHeight: '960px',
                           pageBreakBefore: 'always',
                           fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                          fontSize: '12px',
+                          fontSize: '14.5px',
                           fontWeight: 400,
                           WebkitTextStroke: '0.35px currentColor',
                         }}
                       >
-                        {/* Centered Grading System Table */}
+                        {/* Centered Grading System Table (Single-Line Collapsed Borders matching Page 2 sample) */}
                         <div className="flex justify-center">
                           <table
                             data-testid="pt-grading-system-table"
-                            className="w-[310px] text-[12px] font-bold font-aptos text-black border border-black"
+                            className="w-[330px] text-[14.5px] font-bold font-aptos text-black border border-black"
                             style={{
-                              borderCollapse: 'separate',
-                              borderSpacing: '1.5px',
+                              borderCollapse: 'collapse',
                               fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                              fontSize: '12px',
+                              fontSize: '14.5px',
                             }}
                           >
                             <colgroup>
@@ -6613,10 +6921,10 @@ export default function SchoolErpPage() {
                         {/* Signatures Row - Symmetrically spaced across left, exact center, and right margins */}
                         <div
                           data-testid="pt-signatures-row"
-                          className="grid grid-cols-3 items-start w-full px-5 mt-32 text-center text-[12px] font-bold font-aptos text-black leading-snug"
+                          className="grid grid-cols-3 items-start w-full px-5 mt-28 text-center text-[14.5px] font-bold font-aptos text-black leading-snug"
                           style={{
                             fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                            fontSize: '12px',
+                            fontSize: '14.5px',
                           }}
                         >
                           <div className="justify-self-start text-center">
@@ -6635,370 +6943,542 @@ export default function SchoolErpPage() {
                       </div>
                     </div>
                   );
-                })() : activeStudentResult ? (
-                  <div
-                    style={{
-                      transform: reportZoom === '80%' ? 'scale(0.8)' : reportZoom === '90%' ? 'scale(0.9)' : 'scale(1)',
-                      transformOrigin: 'top center',
-                      transition: 'transform 0.2s ease',
-                      fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                    }}
-                    id="report-card-print-area"
-                    className="printable-report-card w-full max-w-[780px] bg-white border-2 border-slate-900 p-8 shadow-xl rounded-sm font-aptos text-slate-900 relative"
-                  >
-                    {/* Official SVA Header - Direct Image without enclosing div */}
-                    <div className="flex flex-col items-center text-center pb-4 border-b border-slate-200">
-                      <Image
-                        src={SCHOOL_LOGO_SRC}
-                        alt="Saraswati Vidya Academy Crest"
-                        width={72}
-                        height={72}
-                        className="w-[72px] h-[72px] object-contain mb-2"
-                        priority
-                      />
-                      <h2
-                        className="font-rockwell-eb text-[33.5px] leading-[1.12] tracking-normal text-[#27457B]"
+                })() : activeStudentResult ? (() => {
+                  const saProfile = getStudentPtProfile(activeStudentResult.student);
+                  const saPctStr = formatPtPercentage(
+                    activeStudentResult.totalObtained,
+                    activeStudentResult.totalMax
+                  );
+                  const saRemark =
+                    activeStudentResult.student.customRemarks ||
+                    getDefaultClassTeacherRemark(
+                      activeStudentResult.percentage,
+                      activeStudentResult.status
+                    );
+                  const saHeading = (
+                    currentExamConfig.name ||
+                    getPtExamHeading(selectedExam)
+                  ).toUpperCase();
+                  const showBreakdownCols =
+                    selectedExam === 'SA-1' ||
+                    selectedExam === 'SA-2' ||
+                    activeStudentResult.subjectDetails.some(
+                      (d) =>
+                        Boolean(d.internalMax && d.internalMax > 0) &&
+                        Boolean(d.breakdown)
+                    );
+
+                  return (
+                    <div
+                      style={{
+                        transform:
+                          reportZoom === '80%'
+                            ? 'scale(0.8)'
+                            : reportZoom === '90%'
+                            ? 'scale(0.9)'
+                            : 'scale(1)',
+                        transformOrigin: 'top center',
+                        transition: 'transform 0.2s ease',
+                        fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                      }}
+                      id="report-card-print-area"
+                      className="printable-report-card w-full max-w-[794px] flex flex-col gap-6 font-aptos text-black"
+                    >
+                      {/* =========================================================
+                          PAGE 1: OFFICIAL SVA REPORT CARD (SUMMATIVE ASSESSMENT)
+                         ========================================================= */}
+                      <div
+                        data-testid="sa-report-card-page-1"
+                        className="a4-report-card-sheet w-full bg-white border border-slate-300 shadow-xl px-12 pt-8 pb-14 text-black font-aptos"
+                        style={{ minHeight: '1040px' }}
+                      >
+                        {/* Header with Crest on Left and School Identity Centered */}
+                        <div className="relative pb-2.5 border-b-[1.5px] border-black text-center">
+                          <div className="absolute left-4 top-0.5">
+                            <Image
+                              src={SCHOOL_LOGO_SRC}
+                              alt="Saraswati Vidya Academy Crest"
+                              width={68}
+                              height={68}
+                              className="w-[54px] h-[54px] object-contain"
+                              priority
+                            />
+                          </div>
+                          <div className="pl-10">
+                            <h2
+                              className="font-rockwell-eb text-[33.5px] leading-[1.12] tracking-normal text-[#27457B] whitespace-nowrap"
+                              style={{
+                                fontFamily: "'Rockwell Extra Bold', 'Rockwell', Georgia, serif",
+                                fontWeight: 800,
+                                fontSynthesis: 'none',
+                              }}
+                            >
+                              {SVA_EXAM_INFO.schoolName}
+                            </h2>
+                            <p
+                              className="text-[11.25px] font-bold text-black mt-0.5 leading-snug"
+                              style={{
+                                fontFamily: "'Montserrat', 'Aptos', 'Calibri', sans-serif",
+                                fontWeight: 700,
+                              }}
+                            >
+                              CBSE Affiliation No. {SVA_EXAM_INFO.affiliationNo}, School Code. {SVA_EXAM_INFO.schoolCode}, UDISE No. {SVA_EXAM_INFO.udiseNo}
+                            </p>
+                            <p
+                              className="text-[14.5px] font-normal text-black leading-snug"
+                              style={{
+                                fontFamily: "'Calibri', 'Aptos', sans-serif",
+                              }}
+                            >
+                              Address: {SVA_EXAM_INFO.schoolAddress}
+                            </p>
+                            <p
+                              className="text-[14.5px] font-normal text-black leading-snug"
+                              style={{
+                                fontFamily: "'Calibri', 'Aptos', sans-serif",
+                              }}
+                            >
+                              Email Id:{' '}
+                              <a
+                                href={`mailto:${SVA_EXAM_INFO.schoolEmail}`}
+                                className="text-[#0000FF] underline"
+                              >
+                                {SVA_EXAM_INFO.schoolEmail}
+                              </a>
+                            </p>
+                          </div>
+                        </div>
+
+                        {/* SA Report Card Body Below Header: Aptos 11pt (14.5px) */}
+                        <div
+                          data-testid="sa-report-card-body"
+                          className="font-aptos text-[14.5px] text-black"
+                          style={{
+                            fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                            fontSize: '14.5px',
+                            fontWeight: 400,
+                            WebkitTextStroke: '0.35px currentColor',
+                          }}
+                        >
+                          {/* REPORT CARD & EXAM HEADING */}
+                          <div className="text-center mt-2.5 mb-2.5">
+                            <div className="text-[15px] font-bold font-aptos uppercase tracking-normal text-black leading-snug">
+                              REPORT CARD
+                            </div>
+                            <div
+                              data-testid="sa-report-card-heading"
+                              className="text-[20px] font-bold font-aptos uppercase tracking-normal text-black leading-snug mt-0.5"
+                            >
+                              {saHeading}
+                            </div>
+                          </div>
+
+                          {/* Table 1: Student Particulars Box (10-column double-bordered framed table) */}
+                          <table
+                            data-testid="sa-student-particulars-table"
+                            className="w-full text-[14.5px] font-bold font-aptos text-black border border-black mb-5"
+                            style={{
+                              borderCollapse: 'separate',
+                              borderSpacing: '1.5px',
+                              fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                              fontSize: '14.5px',
+                            }}
+                          >
+                            <colgroup>
+                              <col style={{ width: '11.5%' }} />
+                              <col style={{ width: '14.0%' }} />
+                              <col style={{ width: '15.0%' }} />
+                              <col style={{ width: '3.0%' }} />
+                              <col style={{ width: '11.0%' }} />
+                              <col style={{ width: '8.0%' }} />
+                              <col style={{ width: '7.0%' }} />
+                              <col style={{ width: '6.0%' }} />
+                              <col style={{ width: '8.0%' }} />
+                              <col style={{ width: '16.5%' }} />
+                            </colgroup>
+                            <tbody>
+                              <tr>
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
+                                  Roll No.
+                                </td>
+                                <td className="border border-black px-2 py-1.5 text-left">
+                                  {saProfile.rollNoDisplay}
+                                </td>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  Class &amp; Section:
+                                </td>
+                                <td
+                                  colSpan={3}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  {saProfile.classSectionDisplay}
+                                </td>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  DOB:
+                                </td>
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
+                                  {saProfile.dobDisplay}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  Name of the Student:
+                                </td>
+                                <td colSpan={8} className="border border-black px-2 py-1.5 text-left">
+                                  {activeStudentResult.student.name}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  Father’s Name:
+                                </td>
+                                <td colSpan={8} className="border border-black px-2 py-1.5 text-left">
+                                  {saProfile.fatherNameDisplay}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  Mother’s Name:
+                                </td>
+                                <td colSpan={8} className="border border-black px-2 py-1.5 text-left">
+                                  {saProfile.motherNameDisplay}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  House:
+                                </td>
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
+                                  {saProfile.house}
+                                </td>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  Height:
+                                </td>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  {saProfile.height}
+                                </td>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  Weight:
+                                </td>
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
+                                  {saProfile.weight}
+                                </td>
+                              </tr>
+                              <tr>
+                                <td
+                                  colSpan={2}
+                                  className="border border-black px-2 py-1.5 text-left whitespace-nowrap"
+                                >
+                                  Attendance:
+                                </td>
+                                <td colSpan={8} className="border border-black px-2 py-1.5 text-left">
+                                  {saProfile.attendance}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+
+                          {/* Table 2: Scholastic Marks Table (Double-bordered framed table) */}
+                          <table
+                            data-testid="sa-subjects-table"
+                            className="w-full text-[13.5px] font-bold font-aptos text-black border border-black mb-7"
+                            style={{
+                              borderCollapse: 'separate',
+                              borderSpacing: '1.5px',
+                              fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                              fontSize: '13.5px',
+                            }}
+                          >
+                            <thead>
+                              <tr>
+                                <th className="border border-black px-1.5 py-1.5 text-center align-middle leading-tight whitespace-nowrap w-[8%]">
+                                  <div>SL.</div>
+                                  <div>NO.</div>
+                                </th>
+                                <th className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap w-[21%]">
+                                  NAME OF THE SUBJECT
+                                </th>
+                                {showBreakdownCols && (
+                                  <>
+                                    <th className="border border-black px-1.5 py-1.5 text-center align-middle whitespace-nowrap w-[10%]">
+                                      INTERNAL
+                                    </th>
+                                    <th className="border border-black px-1.5 py-1.5 text-center align-middle whitespace-nowrap w-[10%]">
+                                      EXAM
+                                    </th>
+                                  </>
+                                )}
+                                <th className="border border-black px-1.5 py-1.5 text-center align-middle whitespace-nowrap w-[8%]">
+                                  MAX
+                                </th>
+                                <th className="border border-black px-1.5 py-1.5 text-center align-middle whitespace-nowrap w-[11%]">
+                                  OBTAINED
+                                </th>
+                                <th className="border border-black px-1.5 py-1.5 text-center align-middle whitespace-nowrap w-[8%]">
+                                  GRADE
+                                </th>
+                                <th className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap">
+                                  REMARKS
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {activeStudentResult.subjectDetails.map((detail, idx) => {
+                                const internalLabel =
+                                  detail.internalMax && detail.internalMax > 0 && detail.breakdown
+                                    ? `${detail.internalObtained ?? '-'}/${detail.internalMax}`
+                                    : '-';
+                                const writtenLabel =
+                                  detail.mainMax && detail.mainMax > 0 && detail.breakdown
+                                    ? `${detail.mainObtained ?? '-'}/${detail.mainMax}`
+                                    : '-';
+                                const markStr =
+                                  detail.obtained === 'AB'
+                                    ? 'AB'
+                                    : detail.obtained !== null && detail.obtained !== undefined
+                                    ? String(detail.obtained)
+                                    : '-';
+                                const remarkText =
+                                  detail.remark ||
+                                  getDefaultSubjectRemark(detail.obtained, detail.maxMarks);
+
+                                return (
+                                  <tr key={detail.name}>
+                                    <td className="border border-black px-1.5 py-1.5 text-center align-middle font-bold">
+                                      {idx + 1}
+                                    </td>
+                                    <td className="border border-black px-2 py-1.5 text-center align-middle whitespace-nowrap font-bold">
+                                      {getPtSubjectDisplayName(detail.name)}
+                                    </td>
+                                    {showBreakdownCols && (
+                                      <>
+                                        <td className="border border-black px-1.5 py-1.5 text-center align-middle font-bold">
+                                          {internalLabel}
+                                        </td>
+                                        <td className="border border-black px-1.5 py-1.5 text-center align-middle font-bold">
+                                          {writtenLabel}
+                                        </td>
+                                      </>
+                                    )}
+                                    <td className="border border-black px-1.5 py-1.5 text-center align-middle font-bold">
+                                      {detail.maxMarks}
+                                    </td>
+                                    <td className="border border-black px-1.5 py-1.5 text-center align-middle font-bold">
+                                      {markStr}
+                                    </td>
+                                    <td className="border border-black px-1.5 py-1.5 text-center align-middle font-bold">
+                                      {detail.grade}
+                                    </td>
+                                    <td className="border border-black px-2 py-1.5 text-left align-middle font-bold">
+                                      {remarkText}
+                                    </td>
+                                  </tr>
+                                );
+                              })}
+                            </tbody>
+                          </table>
+
+                          {/* Table 3: Summary Strip (TOTAL, PERCENTAGE, GRADE) */}
+                          <table
+                            data-testid="sa-summary-table"
+                            className="w-full text-[14.5px] font-bold font-aptos text-black border border-black mb-7"
+                            style={{
+                              borderCollapse: 'separate',
+                              borderSpacing: '1.5px',
+                              fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                              fontSize: '14.5px',
+                            }}
+                          >
+                            <colgroup>
+                              <col style={{ width: '14%' }} />
+                              <col style={{ width: '13%' }} />
+                              <col style={{ width: '19%' }} />
+                              <col style={{ width: '24%' }} />
+                              <col style={{ width: '16%' }} />
+                              <col style={{ width: '14%' }} />
+                            </colgroup>
+                            <tbody>
+                              <tr>
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
+                                  TOTAL:
+                                </td>
+                                <td className="border border-black px-2 py-1.5 text-center whitespace-nowrap">
+                                  {activeStudentResult.totalObtained}/{activeStudentResult.totalMax}
+                                </td>
+                                <td className="border border-black px-2 py-1.5 text-center whitespace-nowrap">
+                                  PERCENTAGE:
+                                </td>
+                                <td className="border border-black px-2 py-1.5 text-center whitespace-nowrap">
+                                  {saPctStr}
+                                </td>
+                                <td className="border border-black px-2 py-1.5 text-left whitespace-nowrap">
+                                  GRADE:
+                                </td>
+                                <td className="border border-black px-2 py-1.5 text-center whitespace-nowrap">
+                                  {activeStudentResult.grade}
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+
+                          {/* Table 4: Class Teacher's Remarks Box */}
+                          <table
+                            data-testid="sa-remarks-table"
+                            className="w-full text-[14.5px] font-bold font-aptos text-black border border-black"
+                            style={{
+                              borderCollapse: 'separate',
+                              borderSpacing: '1.5px',
+                              fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                              fontSize: '14.5px',
+                            }}
+                          >
+                            <colgroup>
+                              <col style={{ width: '33%' }} />
+                              <col style={{ width: '67%' }} />
+                            </colgroup>
+                            <tbody>
+                              <tr>
+                                <td className="border border-black px-2 py-2.5 text-left align-middle whitespace-nowrap">
+                                  CLASS TEACHER’S REMARKS:
+                                </td>
+                                <td className="border border-black px-2.5 py-2 text-left align-middle leading-snug">
+                                  <div className="flex items-center justify-between gap-2">
+                                    <span>{saRemark}</span>
+                                    <button
+                                      type="button"
+                                      onClick={() => setActiveTab('remarks')}
+                                      className="shrink-0 text-[12px] font-medium text-blue-600 hover:text-blue-700 hover:underline print:hidden no-print"
+                                      style={{ WebkitTextStroke: '0px' }}
+                                    >
+                                      Edit Remarks →
+                                    </button>
+                                  </div>
+                                </td>
+                              </tr>
+                            </tbody>
+                          </table>
+                        </div>
+                      </div>
+
+                      {/* =========================================================
+                          PAGE 2: GRADING SYSTEM & SIGNATURES (MATCHING SAMPLE PDF)
+                         ========================================================= */}
+                      <div
+                        data-testid="sa-report-card-page-2"
+                        className="a4-report-card-sheet w-full bg-white border border-slate-300 shadow-xl px-12 pt-11 pb-20 text-black font-aptos text-[14.5px]"
                         style={{
-                          fontFamily: "'Rockwell Extra Bold', 'Rockwell', Georgia, serif",
-                          fontWeight: 800,
-                          fontSynthesis: 'none',
+                          minHeight: '960px',
+                          pageBreakBefore: 'always',
+                          fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                          fontSize: '14.5px',
+                          fontWeight: 400,
+                          WebkitTextStroke: '0.35px currentColor',
                         }}
                       >
-                        {SVA_EXAM_INFO.schoolName}
-                      </h2>
-                      <p className="text-[11px] text-slate-500 max-w-md mt-0.5">
-                        {SVA_EXAM_INFO.schoolAddress}
-                      </p>
-                      <div className="text-[11px] text-slate-500 mt-1 flex items-center justify-center gap-2">
-                        <span>CBSE Affiliation No. {SVA_EXAM_INFO.affiliationNo}</span>
-                        <span>·</span>
-                        <span>School Code. {SVA_EXAM_INFO.schoolCode}</span>
-                        <span>·</span>
-                        <span>UDISE No. {SVA_EXAM_INFO.udiseNo}</span>
-                      </div>
-                      <div className="mt-2.5 inline-flex items-center gap-2 border-y border-slate-900/30 py-1 px-5 text-xs font-semibold tracking-widest uppercase text-slate-800">
-                        <span>{currentExamConfig.name || 'Progress Report Card'}</span>
-                        <span>·</span>
-                        <span className="font-normal text-slate-600">Session {SVA_EXAM_INFO.academicSession}</span>
-                      </div>
-                    </div>
-
-                    {/* SA Report Card Body Below Header: Aptos Font Size 12 */}
-                    <div
-                      data-testid="sa-report-card-body"
-                      className="font-aptos text-[12px]"
-                      style={{
-                        fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                        fontSize: '12px',
-                      }}
-                    >
-                      {/* Student Particulars Grid with Avatar Placeholder */}
-                      <div className="flex items-center gap-4 py-4 border-b border-slate-200 text-[12px]">
-                        {/* Avatar / Photo Box */}
-                        <div className="w-16 h-20 border border-slate-300 rounded bg-slate-50 flex flex-col items-center justify-center shrink-0 text-slate-400">
-                          <div className="text-[12px] font-bold text-slate-700">
-                            {activeStudentResult.student.rollNo}
-                          </div>
-                          <div className="text-[12px] text-slate-400">Photo</div>
-                        </div>
-
-                        {/* Information Columns */}
-                        <div className="grid grid-cols-2 gap-x-6 gap-y-2 flex-1 text-[12px]">
-                          <div>
-                            <span className="text-slate-500 font-medium">Student Name:</span>{' '}
-                            <strong className="font-bold text-slate-900">
-                              {activeStudentResult.student.name}
-                            </strong>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 font-medium">Class &amp; Section:</span>{' '}
-                            <strong className="font-semibold text-slate-900">
-                              {activeStudentResult.student.class} - {activeStudentResult.student.section}
-                            </strong>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 font-medium">Roll Number:</span>{' '}
-                            <span className="font-bold text-slate-900">
-                              {activeStudentResult.student.rollNo}
-                            </span>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 font-medium">Date of Birth:</span>{' '}
-                            <span className="text-slate-800">
-                              {activeStudentResult.student.dob || '2010-01-01'}
-                            </span>
-                          </div>
-                          <div>
-                            <span className="text-slate-500 font-medium">Parents:</span>{' '}
-                            <span className="text-slate-800">
-                              {activeStudentResult.student.fatherName} &amp; {activeStudentResult.student.motherName}
-                            </span>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Scholastic Marks Table */}
-                      <div className="pt-4">
-                        <div className="text-[12px] font-bold text-slate-900 uppercase tracking-wide mb-2 flex items-center justify-between">
-                          <span>Part 1: Scholastic Assessment</span>
-                          <span className="text-[12px] font-normal text-slate-500">
-                            Internal Assessment + Written Examination (Max 100)
-                          </span>
-                        </div>
-                        <table className="w-full text-[12px] border border-slate-300 border-collapse font-aptos">
-                          <thead>
-                            <tr className="bg-slate-100 text-slate-800 font-semibold border-b border-slate-300">
-                              <th className="py-2 px-2.5 text-left">Subject</th>
-                              {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
-                                <>
-                                  <th className="py-2 px-2 text-center w-24 bg-blue-50/50">Internal</th>
-                                  <th className="py-2 px-2 text-center w-20">Exam</th>
-                                </>
-                              )}
-                              <th className="py-2 px-1.5 text-center w-14">Max</th>
-                              <th className="py-2 px-1.5 text-center w-14">Pass</th>
-                              <th className="py-2 px-2 text-center w-20">Obtained</th>
-                              <th className="py-2 px-1.5 text-center w-14">Grade</th>
-                              <th className="py-2 px-2.5 text-center">Remark</th>
-                            </tr>
-                          </thead>
-                          <tbody className="divide-y divide-slate-200">
-                            {activeStudentResult.subjectDetails.map((detail) => {
-                              const bd = detail.breakdown;
-                              const isClass9 = isClass9Section(activeStudentResult.student.section);
-                              const isHindi = detail.name.toLowerCase() === 'hindi';
-
-                              let internalLabel = '-';
-                              let writtenLabel = '-';
-
-                              if (bd) {
-                                if (isClass9 && isHindi) {
-                                  const list = typeof bd.listening === 'number' ? bd.listening : 0;
-                                  const spk = typeof bd.speaking === 'number' ? bd.speaking : 0;
-                                  const prj = typeof bd.project === 'number' ? bd.project : 0;
-                                  const intTot = list + spk + prj;
-                                  internalLabel = `${intTot}/55`;
-                                  writtenLabel = `${bd.saExam ?? '-'}/45`;
-                                } else {
-                                  const pp = typeof bd.penPaper === 'number' ? bd.penPaper : 0;
-                                  const ma = typeof bd.multipleAssessment === 'number' ? bd.multipleAssessment : 0;
-                                  const se = typeof bd.subjectEnrichment === 'number' ? bd.subjectEnrichment : 0;
-                                  const pf = typeof bd.portfolio === 'number' ? bd.portfolio : 0;
-                                  const intTot =
-                                    bd.internalMarks !== undefined && bd.internalMarks !== null
-                                      ? bd.internalMarks
-                                      : pp + ma + se + pf;
-                                  internalLabel = `${intTot}/20`;
-                                  writtenLabel = `${bd.writtenExam ?? '-'}/80`;
-                                }
-                              }
-
-                              return (
-                                <tr key={detail.name} className="hover:bg-slate-50/50">
-                                  <td className="py-1.5 px-2.5 font-medium text-slate-900">
-                                    {detail.name}
-                                    {isClass9 && isHindi && (
-                                      <span className="ml-1 text-[12px] text-blue-700 bg-blue-50 px-1 py-0.2 rounded font-normal">
-                                        L+S+P+SA
-                                      </span>
-                                    )}
+                        {/* Centered Grading System Table (Single-Line Collapsed Borders) */}
+                        <div className="flex justify-center">
+                          <table
+                            data-testid="sa-grading-system-table"
+                            className="w-[330px] text-[14.5px] font-bold font-aptos text-black border border-black"
+                            style={{
+                              borderCollapse: 'collapse',
+                              fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                              fontSize: '14.5px',
+                            }}
+                          >
+                            <colgroup>
+                              <col style={{ width: '58%' }} />
+                              <col style={{ width: '42%' }} />
+                            </colgroup>
+                            <thead>
+                              <tr>
+                                <th colSpan={2} className="border border-black px-2 py-0.5 text-center">
+                                  Grading System
+                                </th>
+                              </tr>
+                              <tr>
+                                <th className="border border-black px-2 py-0.5 text-center">
+                                  Range of Marks
+                                </th>
+                                <th className="border border-black px-2 py-0.5 text-center">
+                                  Grade
+                                </th>
+                              </tr>
+                            </thead>
+                            <tbody>
+                              {REPORT_CARD_GRADING_SYSTEM.map((row) => (
+                                <tr key={row.grade}>
+                                  <td className="border border-black px-2 py-0.5 text-center">
+                                    {row.range}
                                   </td>
-                                  {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
-                                    <>
-                                      <td className="py-1.5 px-2 text-center text-[12px] text-slate-700 bg-blue-50/30">
-                                        {internalLabel}
-                                      </td>
-                                      <td className="py-1.5 px-2 text-center text-[12px] text-slate-700">
-                                        {writtenLabel}
-                                      </td>
-                                    </>
-                                  )}
-                                  <td className="py-1.5 px-1.5 text-center text-slate-600">
-                                    {detail.maxMarks}
-                                  </td>
-                                  <td className="py-1.5 px-1.5 text-center text-slate-600">
-                                    {detail.passMarks}
-                                  </td>
-                                  <td className="py-1.5 px-2 text-center font-bold text-slate-900">
-                                    {detail.obtained === 'AB' ? (
-                                      <span className="text-rose-600">AB</span>
-                                    ) : detail.obtained !== null ? (
-                                      detail.obtained
-                                    ) : (
-                                      '-'
-                                    )}
-                                  </td>
-                                  <td className="py-1.5 px-1.5 text-center font-semibold text-slate-800">
-                                    {detail.grade}
-                                  </td>
-                                  <td className="py-1.5 px-2.5 text-left text-[12px] text-slate-600 italic">
-                                    {detail.remark || getDefaultSubjectRemark(detail.obtained, detail.maxMarks)}
+                                  <td className="border border-black px-2 py-0.5 text-center">
+                                    {row.grade}
                                   </td>
                                 </tr>
-                              );
-                            })}
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
 
-                            {/* Grand Total Row */}
-                            <tr className="bg-slate-100 font-bold border-t-2 border-slate-300">
-                              <td className="py-2 px-2.5 text-slate-900">Grand Total</td>
-                              {(selectedExam === 'SA-1' || selectedExam === 'SA-2') && (
-                                <>
-                                  <td className="py-2 px-2 text-center text-[12px] text-slate-600 bg-blue-50/50">
-                                    Internal
-                                  </td>
-                                  <td className="py-2 px-2 text-center text-[12px] text-slate-600">
-                                    Written
-                                  </td>
-                                </>
-                              )}
-                              <td className="py-2 px-1.5 text-center">
-                                {activeStudentResult.totalMax}
-                              </td>
-                              <td className="py-2 px-1.5 text-center">
-                                {Math.round(activeStudentResult.totalMax * 0.32)}
-                              </td>
-                              <td className="py-2 px-2 text-center text-slate-900">
-                                {activeStudentResult.totalObtained}
-                              </td>
-                              <td className="py-2 px-1.5 text-center text-emerald-800">
-                                {activeStudentResult.grade}
-                              </td>
-                              <td className="py-2 px-2.5 text-left text-[12px] font-medium text-slate-600">
-                                Overall Result: {activeStudentResult.status === 'PASS' ? 'Passed' : 'Needs Improvement'}
-                              </td>
-                            </tr>
-                          </tbody>
-                        </table>
-                      </div>
-
-                      {/* Performance Summary Metrics */}
-                      <div className="grid grid-cols-4 gap-3 my-4 p-3 bg-slate-50 border border-slate-200 rounded text-center text-[12px]">
-                        <div>
-                          <div className="text-[12px] text-slate-500 font-medium">Percentage</div>
-                          <div className="text-[12px] font-bold text-slate-900">
-                            {activeStudentResult.percentage.toFixed(2)}%
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[12px] text-slate-500 font-medium">Overall Grade</div>
-                          <div className="text-[12px] font-bold text-emerald-700">
-                            {activeStudentResult.grade}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[12px] text-slate-500 font-medium">Class Rank</div>
-                          <div className="text-[12px] font-bold text-slate-900">
-                            {activeStudentResult.rank ? `#${activeStudentResult.rank}` : '-'}
-                          </div>
-                        </div>
-                        <div>
-                          <div className="text-[12px] text-slate-500 font-medium">Final Result</div>
-                          <div
-                            className={`text-[12px] font-bold ${
-                              activeStudentResult.status === 'PASS'
-                                ? 'text-emerald-700'
-                                : 'text-rose-600'
-                            }`}
-                          >
-                            {activeStudentResult.status === 'PASS' ? 'PASSED' : 'NEEDS RE-EXAM'}
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Part 2: Co-Scholastic & Life Skills Assessment */}
-                      <div className="mb-4">
-                        <div className="text-[12px] font-bold text-slate-900 uppercase tracking-wide mb-1.5">
-                          Part 2: Co-Scholastic &amp; Personality Assessment
-                        </div>
-                        <div className="grid grid-cols-4 gap-2 text-[12px]">
-                          <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                            <div className="text-[12px] text-slate-500">Work Education &amp; ICT</div>
-                            <div className="font-bold text-slate-800">Grade A</div>
-                          </div>
-                          <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                            <div className="text-[12px] text-slate-500">Art &amp; Expression</div>
-                            <div className="font-bold text-slate-800">Grade A</div>
-                          </div>
-                          <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                            <div className="text-[12px] text-slate-500">Health &amp; Physical</div>
-                            <div className="font-bold text-slate-800">Grade A</div>
-                          </div>
-                          <div className="p-2 border border-slate-200 rounded bg-slate-50/50">
-                            <div className="text-[12px] text-slate-500">Discipline &amp; Ethics</div>
-                            <div className="font-bold text-slate-800">Grade A</div>
-                          </div>
-                        </div>
-                      </div>
-
-                      {/* Teacher Remarks Display */}
-                      <div className="p-3 bg-white border border-slate-200 rounded text-[12px] mb-4 flex items-center justify-between gap-3">
-                        <div>
-                          <span className="font-bold text-slate-900">Class Teacher&apos;s Remark: </span>
-                          <span className="text-slate-700 italic">
-                            &ldquo;{activeStudentResult.student.customRemarks || getDefaultClassTeacherRemark(activeStudentResult.percentage, activeStudentResult.status)}&rdquo;
-                          </span>
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setActiveTab('remarks')}
-                          className="shrink-0 text-[12px] font-medium text-blue-600 hover:text-blue-700 hover:underline print:hidden"
+                        {/* Official Signatures Section - Symmetrically spaced across left, exact center, and right margins */}
+                        <div
+                          data-testid="sa-signatures-row"
+                          className="grid grid-cols-3 items-start w-full px-5 mt-28 text-center text-[14.5px] font-bold font-aptos text-black leading-snug"
+                          style={{
+                            fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                            fontSize: '14.5px',
+                          }}
                         >
-                          Edit Remarks →
-                        </button>
-                      </div>
-
-                      {/* Sitewide 9-Point Grading Scale Reference */}
-                      <div className="p-2 bg-slate-50 border border-slate-200 rounded text-[12px] text-slate-600 flex flex-wrap items-center justify-between gap-1 mb-6">
-                        <span><strong>Grading System:</strong> A1 (91–100)</span>
-                        <span>·</span>
-                        <span>A2 (81–90)</span>
-                        <span>·</span>
-                        <span>B1 (71–80)</span>
-                        <span>·</span>
-                        <span>B2 (61–70)</span>
-                        <span>·</span>
-                        <span>C1 (51–60)</span>
-                        <span>·</span>
-                        <span>C2 (41–50)</span>
-                        <span>·</span>
-                        <span>D (32–40)</span>
-                        <span>·</span>
-                        <span>E1 (20–31)</span>
-                        <span>·</span>
-                        <span>E2 (01–19)</span>
-                      </div>
-
-                      {/* Official Signatures Section - Evenly spaced across left, center, and right */}
-                      <div
-                        data-testid="sa-signatures-row"
-                        className="flex items-end justify-between w-full px-4 pt-6 border-t border-slate-200 text-center text-[12px] font-bold font-aptos text-slate-900"
-                        style={{
-                          fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                          fontSize: '12px',
-                        }}
-                      >
-                        <div className="w-44 text-center">
-                          <div className="h-10" />
-                          <div className="border-t border-slate-400 pt-1.5 font-bold text-slate-900">
-                            Signature of Class Teacher
+                          <div className="justify-self-start text-center">
+                            <div>Signature of</div>
+                            <div>Class Teacher</div>
                           </div>
-                        </div>
-                        <div className="w-48 text-center">
-                          <div className="h-10" />
-                          <div className="border-t border-slate-400 pt-1.5 font-bold text-slate-900">
-                            Signature of Principal with Seal
+                          <div className="justify-self-center text-center">
+                            <div>Signature of</div>
+                            <div>Principal with Seal</div>
                           </div>
-                        </div>
-                        <div className="w-44 text-center">
-                          <div className="h-10" />
-                          <div className="border-t border-slate-400 pt-1.5 font-bold text-slate-900">
-                            Signature of Parent / Guardian
+                          <div className="justify-self-end text-center">
+                            <div>Signature of</div>
+                            <div>Parent / Guardian</div>
                           </div>
                         </div>
                       </div>
                     </div>
+                  );
+                })() : (
+                  <div className="w-full max-w-[780px] bg-white border border-slate-200/90 rounded-xl p-12 text-center shadow-xs">
+                    <FileText className="w-8 h-8 text-slate-300 mx-auto mb-2" />
+                    <h3 className="text-sm font-semibold text-slate-800">No Student Selected</h3>
+                    <p className="text-xs text-slate-500 mt-1">No student record matches the current class or search filter. Select a student from the list on the left to preview their report card.</p>
                   </div>
-                ) : null}
+                )}
               </div>
             </div>
           </div>
@@ -7173,6 +7653,7 @@ export default function SchoolErpPage() {
             activeExamId={selectedExam}
             selectedClass={selectedClass}
             onUpdateExamConfig={(examId, updated, classScope) => {
+              if (!isStorageReadyRef.current) dirtyBeforeReadyRef.current = true;
               const prevExamCfg = examConfigs[examId] || INITIAL_EXAM_CONFIGS[examId];
               setExamConfigs((prev) => ({
                 ...prev,
@@ -7187,13 +7668,13 @@ export default function SchoolErpPage() {
                     ? { ...st.marks }
                     : currentStoreMarks[st.id]
                     ? { ...currentStoreMarks[st.id] }
-                    : { ...st.marks };
+                    : {};
                 const stSourceBds =
                   examId === selectedExam
                     ? { ...(st.breakdowns || {}) }
                     : currentStoreBds[st.id]
                     ? { ...currentStoreBds[st.id] }
-                    : { ...(st.breakdowns || {}) };
+                    : {};
 
                 if (
                   classScope &&
@@ -7224,20 +7705,37 @@ export default function SchoolErpPage() {
                   const newMax = sub.maxMarks || (isPtExam(examId) ? 25 : 100);
 
                   if (sub.components && sub.components.length > 1) {
-                    const bd =
-                      nextBreakdowns[sub.name] ||
-                      generateDefaultBreakdown(
+                    let bd: SubjectBreakdown | undefined = nextBreakdowns[sub.name];
+                    if (!bd || oldMax !== newMax) {
+                      bd = syncBreakdownWithTotal(
                         nextMarks[sub.name],
                         sub.name,
-                        st.section
+                        st.section,
+                        sub.components,
+                        oldMax === newMax ? bd : undefined
                       );
-                    nextBreakdowns[sub.name] = bd;
-                    nextMarks[sub.name] = computeSubjectTotalFromBreakdown(
-                      sub.name,
-                      st.section,
-                      bd,
-                      sub.components
-                    );
+                    } else {
+                      // Ensure any edited component maxMarks clamp individual component values safely
+                      const clamped: SubjectBreakdown = { ...bd };
+                      sub.components.forEach((c) => {
+                        const val = clamped[c.key];
+                        if (typeof val === 'number' && val > c.maxMarks) {
+                          clamped[c.key] = c.maxMarks;
+                        }
+                      });
+                      bd = clamped;
+                    }
+                    if (bd) {
+                      nextBreakdowns[sub.name] = bd;
+                      nextMarks[sub.name] = computeSubjectTotalFromBreakdown(
+                        sub.name,
+                        st.section,
+                        bd,
+                        sub.components
+                      );
+                    } else {
+                      delete nextBreakdowns[sub.name];
+                    }
                   } else {
                     const curVal = nextMarks[sub.name];
                     if (typeof curVal === 'number' && newMax > 0 && (oldMax !== newMax || curVal > newMax)) {
@@ -7259,11 +7757,14 @@ export default function SchoolErpPage() {
                       hasCsInPtExam(st.section)
                     ) {
                       const baseSt = ALL_SVA_STUDENTS.find((b) => b.id === st.id);
-                      const baseVal = baseSt?.marks[sub.name];
+                      const baseVal =
+                        (examId === selectedExam ? st.marks[sub.name] : undefined) ??
+                        baseSt?.marks[sub.name];
                       if (typeof baseVal === 'number') {
+                        const srcMax = baseVal > 50 ? 100 : baseVal > 25 ? 50 : 25;
                         nextMarks[sub.name] = Math.min(
                           newMax,
-                          Math.max(0, Math.round((baseVal / 100) * newMax))
+                          Math.max(0, Math.round((baseVal / srcMax) * newMax))
                         );
                       }
                     }
@@ -7282,6 +7783,27 @@ export default function SchoolErpPage() {
               if (examId === selectedExam) {
                 setStudents(updatedForStore);
                 triggerAutoSync(updatedForStore);
+                const validSubNames = new Set(updated.subjects.map((s) => s.name.toLowerCase()));
+                if (
+                  selectedSubject !== 'all' &&
+                  selectedSubject !== 'consolidated' &&
+                  !validSubNames.has(selectedSubject.toLowerCase())
+                ) {
+                  setSelectedSubject('all');
+                }
+                if (
+                  selectedRemarkScope !== 'all' &&
+                  selectedRemarkScope !== 'class_teacher' &&
+                  !validSubNames.has(selectedRemarkScope.toLowerCase())
+                ) {
+                  setSelectedRemarkScope('all');
+                }
+                if (
+                  !validSubNames.has(uploadTargetSubject.toLowerCase()) &&
+                  updated.subjects[0]
+                ) {
+                  setUploadTargetSubject(updated.subjects[0].name);
+                }
               }
               showToast(
                 `Updated ${updated.name}${
@@ -7297,12 +7819,27 @@ export default function SchoolErpPage() {
               const sourceStore = examMarksStore[linkedExamId] || {};
               const sourceExamCfg = examConfigs[linkedExamId];
               const baseTargetCfg = examConfigs[targetExamId];
+              const targetStoreMarks = examMarksStore[targetExamId] || {};
+              const targetStoreBds = examBreakdownsStore[targetExamId] || {};
               const targetSubNames =
                 targetSubjectScope === 'ALL' || targetSubjectScope === '__ALL__'
                   ? (baseTargetCfg?.subjects || []).map((s) => s.name)
                   : [targetSubjectScope];
 
-              const updatedStudents = students.map((st) => {
+              const updatedTargetRoster = students.map((st) => {
+                const stTargetMarks =
+                  targetExamId === selectedExam
+                    ? { ...st.marks }
+                    : targetStoreMarks[st.id]
+                    ? { ...targetStoreMarks[st.id] }
+                    : {};
+                const stTargetBds =
+                  targetExamId === selectedExam
+                    ? { ...(st.breakdowns || {}) }
+                    : targetStoreBds[st.id]
+                    ? { ...targetStoreBds[st.id] }
+                    : {};
+
                 if (
                   classScope &&
                   classScope !== 'ALL' &&
@@ -7310,29 +7847,38 @@ export default function SchoolErpPage() {
                   st.class !== classScope &&
                   getClassGradeFromSection(st.section) !== classScope
                 ) {
-                  return st;
+                  return {
+                    ...st,
+                    marks: stTargetMarks,
+                    breakdowns: stTargetBds,
+                  };
                 }
-                const stSourceMarks = sourceStore[st.id] || {};
-                const nextBreakdowns = { ...(st.breakdowns || {}) };
-                const nextMarks = { ...st.marks };
+                const stSourceMarks =
+                  linkedExamId === selectedExam ? st.marks : sourceStore[st.id] || {};
+                const nextBreakdowns = { ...stTargetBds };
+                const nextMarks = { ...stTargetMarks };
+                const effectiveSourceCfg = sourceExamCfg
+                  ? getEffectiveExamConfigForClass(sourceExamCfg, st.section)
+                  : undefined;
                 const effectiveTargetCfg = baseTargetCfg
                   ? getEffectiveExamConfigForClass(baseTargetCfg, st.section)
                   : undefined;
 
                 targetSubNames.forEach((subName) => {
                   const srcMax =
-                    sourceExamCfg?.subjects.find((s) => s.name === subName)?.maxMarks || 20;
+                    effectiveSourceCfg?.subjects.find((s) => s.name === subName)?.maxMarks || 20;
                   const rawSrcMark = stSourceMarks[subName];
+                  const currentBd =
+                    nextBreakdowns[subName] ||
+                    generateDefaultBreakdown(nextMarks[subName], subName, st.section);
+
                   const scaledVal: number | 'AB' | null =
                     rawSrcMark === 'AB'
                       ? 'AB'
                       : typeof rawSrcMark === 'number'
                       ? Math.min(maxMarks, Math.max(0, Math.round((rawSrcMark / srcMax) * maxMarks)))
-                      : Math.round(maxMarks * 0.8);
+                      : currentBd[compKey] ?? null;
 
-                  const currentBd =
-                    nextBreakdowns[subName] ||
-                    generateDefaultBreakdown(nextMarks[subName], subName, st.section);
                   const updatedBd: SubjectBreakdown = {
                     ...currentBd,
                     [compKey]: scaledVal,
@@ -7356,26 +7902,70 @@ export default function SchoolErpPage() {
                 };
               });
 
-              setStudents(updatedStudents);
-              syncStoresForExam(targetExamId, updatedStudents);
-              triggerAutoSync(updatedStudents);
+              syncStoresForExam(targetExamId, updatedTargetRoster);
+              if (targetExamId === selectedExam) {
+                setStudents(updatedTargetRoster);
+                triggerAutoSync(updatedTargetRoster);
+              }
+            }}
+            onRenameSubject={(examId, oldName, newName) => {
+              if (!isStorageReadyRef.current) dirtyBeforeReadyRef.current = true;
+              const migrated = migrateRenamedSubjectInStudents({
+                students,
+                examMarksStore,
+                examBreakdownsStore,
+                examId,
+                activeExamId: selectedExam,
+                oldName,
+                newName,
+              });
+              setStudents(migrated.students);
+              setExamMarksStore(migrated.examMarksStore);
+              setExamBreakdownsStore(migrated.examBreakdownsStore);
+              if (selectedSubject === oldName) {
+                setSelectedSubject(newName);
+              }
+              if (selectedRemarkScope === oldName) {
+                setSelectedRemarkScope(newName);
+              }
+              if (exportSubjectScope === oldName) {
+                setExportSubjectScope(newName);
+              }
+              if (uploadTargetSubject === oldName) {
+                setUploadTargetSubject(newName);
+              }
             }}
             onCreateNewExam={(newExam) => {
-              setExamConfigs((prev) => ({
-                ...prev,
+              if (!isStorageReadyRef.current) dirtyBeforeReadyRef.current = true;
+              const nextConfigs = {
+                ...examConfigs,
                 [newExam.id]: newExam,
-              }));
-              handleExamChange(newExam.id);
+              };
+              setExamConfigs(nextConfigs);
+              handleExamChange(newExam.id, newExam);
               showToast(`Created new test ${newExam.name}`);
             }}
             onDeleteExam={(examId) => {
-              setExamConfigs((prev) => {
+              if (!isStorageReadyRef.current) dirtyBeforeReadyRef.current = true;
+              const nextConfigs = { ...examConfigs };
+              delete nextConfigs[examId];
+              const remainingIds = Object.keys(nextConfigs);
+              const fallbackExamId = remainingIds[0] || '';
+              setExamConfigs(nextConfigs);
+              setExamMarksStore((prev) => {
                 const next = { ...prev };
                 delete next[examId];
                 return next;
               });
-              if (selectedExam === examId) {
-                handleExamChange('SA-1');
+              setExamBreakdownsStore((prev) => {
+                const next = { ...prev };
+                delete next[examId];
+                return next;
+              });
+              if (selectedExam === examId && fallbackExamId) {
+                handleExamChange(fallbackExamId, nextConfigs[fallbackExamId]);
+              } else if (exportExam === examId && fallbackExamId) {
+                setExportExam(fallbackExamId);
               }
               showToast(`Deleted test ${examId}`);
             }}
@@ -7383,10 +7973,55 @@ export default function SchoolErpPage() {
               handleExamChange(examId);
               showToast(`Activated test ${examId}`);
             }}
-            onResetDefaults={() => {
-              setExamConfigs(INITIAL_EXAM_CONFIGS);
-              handleExamChange('SA-1');
-              showToast('Reset exam configurations to default CBSE structure');
+            onResetDefaults={async () => {
+              if (serverSaveTimerRef.current) {
+                clearTimeout(serverSaveTimerRef.current);
+                serverSaveTimerRef.current = null;
+              }
+              if (autoSyncTimerRef.current) {
+                clearTimeout(autoSyncTimerRef.current);
+                autoSyncTimerRef.current = null;
+              }
+              const fresh = createDefaultErpState(
+                INITIAL_EXAM_CONFIGS,
+                ALL_SVA_STUDENTS,
+                getClassNumberForSection
+              );
+              if (typeof window !== 'undefined') {
+                try {
+                  Object.values(SVA_STORAGE_KEYS).forEach((k) => localStorage.removeItem(k));
+                } catch {}
+              }
+              lastSyncedSnapshotRef.current = {
+                selectedClass: fresh.selectedClass,
+                selectedExam: fresh.selectedExam,
+                examConfigs: fresh.examConfigs,
+                students: fresh.students,
+                examMarksStore: fresh.examMarksStore,
+                examBreakdownsStore: fresh.examBreakdownsStore,
+              };
+              dirtyBeforeReadyRef.current = false;
+              userPickedExamBeforeReadyRef.current = null;
+              userPickedClassBeforeReadyRef.current = null;
+              stateUpdatedAtRef.current = 0;
+              setExamConfigs(fresh.examConfigs);
+              setStudents(fresh.students);
+              setExamMarksStore(fresh.examMarksStore);
+              setExamBreakdownsStore(fresh.examBreakdownsStore);
+              setSelectedExam(fresh.selectedExam);
+              setExportExam(fresh.selectedExam);
+              setSelectedClass(fresh.selectedClass);
+              setExportClass(fresh.selectedClass);
+              setSelectedSubject('all');
+              setSelectedRemarkScope('all');
+              setExportSubjectScope('all_consolidated');
+              setUploadTargetSubject('Science');
+              setUndoStack([]);
+              setRedoStack([]);
+              try {
+                await fetch('/api/erp-state', { method: 'DELETE' });
+              } catch {}
+              showToast('Reset exam configurations and storage to defaults');
             }}
             showToast={showToast}
             spreadsheetId={LOCKED_SPREADSHEET_ID}
@@ -7920,6 +8555,7 @@ export default function SchoolErpPage() {
       {/* INTERNAL ASSESSMENT BREAKDOWN MODAL (Supports CBSE 80+20 and Class 9 Hindi Listening/Speaking/Project/SA) */}
       {internalModalData && (
         <InternalAssessmentModal
+          key={`${internalModalData.student.id}-${internalModalData.subjectName}`}
           data={internalModalData}
           selectedExam={selectedExam}
           components={

@@ -202,23 +202,39 @@ export function getStudentPtProfile(student: StudentReportRow): {
     }
   }
 
-  let fatherNameDisplay = student.fatherName || '';
-  if (isAayushSample && (!fatherNameDisplay || fatherNameDisplay === 'Satish Nalawade')) {
+  const nameParts = student.name.trim().split(/\s+/);
+  const studentLastName = nameParts.length >= 2 ? nameParts[nameParts.length - 1] : '';
+  const defaultSeedFatherName =
+    nameParts.length >= 3 ? `${nameParts[1]} ${nameParts[nameParts.length - 1]}` : '';
+  const defaultSeedMotherName = studentLastName ? `Mrs. ${studentLastName}` : '';
+
+  let fatherNameDisplay = (student.fatherName || '').trim();
+  if (
+    isAayushSample &&
+    (!fatherNameDisplay || fatherNameDisplay.toLowerCase() === 'satish nalawade')
+  ) {
     fatherNameDisplay = 'Satish';
-  } else if (fatherNameDisplay) {
-    const parts = fatherNameDisplay.trim().split(/\s+/);
-    if (parts.length === 2 && student.name.trim().toLowerCase().endsWith(parts[1].toLowerCase())) {
-      fatherNameDisplay = parts[0];
-    }
-  } else {
-    const nameParts = student.name.trim().split(/\s+/);
+  } else if (
+    fatherNameDisplay &&
+    defaultSeedFatherName &&
+    fatherNameDisplay.toLowerCase() === defaultSeedFatherName.toLowerCase()
+  ) {
+    fatherNameDisplay = nameParts[1];
+  } else if (!fatherNameDisplay) {
     fatherNameDisplay = nameParts.length >= 3 ? nameParts[1] : 'Parent';
   }
 
-  let motherNameDisplay = student.motherName || '';
-  if (isAayushSample && (!motherNameDisplay || motherNameDisplay.startsWith('Mrs.'))) {
+  let motherNameDisplay = (student.motherName || '').trim();
+  if (
+    isAayushSample &&
+    (!motherNameDisplay || motherNameDisplay.toLowerCase() === 'mrs. nalawade')
+  ) {
     motherNameDisplay = 'Reshma';
-  } else if (!motherNameDisplay || motherNameDisplay.startsWith('Mrs.')) {
+  } else if (
+    !motherNameDisplay ||
+    (defaultSeedMotherName &&
+      motherNameDisplay.toLowerCase() === defaultSeedMotherName.toLowerCase())
+  ) {
     const idx = (!isNaN(numericRoll) ? Math.max(0, numericRoll - 1) : 0) % DEFAULT_MOTHER_NAMES.length;
     const picked = DEFAULT_MOTHER_NAMES[idx];
     motherNameDisplay = picked.charAt(0).toUpperCase() + picked.slice(1);
@@ -261,8 +277,8 @@ export function getStudentPtProfile(student: StudentReportRow): {
 
   const cleanHeight = rawHeight.trim().replace(/\s*cm$/i, '');
   const cleanWeight = rawWeight.trim().replace(/\s*kg$/i, '');
-  const height = cleanHeight ? `${cleanHeight} cm` : '';
-  const weight = cleanWeight ? `${cleanWeight} kg` : '';
+  const height = cleanHeight;
+  const weight = cleanWeight;
   const attendance = student.attendance || '31/31';
 
   return {
@@ -447,9 +463,114 @@ export interface ComputedStudentResult {
     grade: string;
     status: 'PASS' | 'FAIL' | 'ABSENT' | 'INCOMPLETE';
     appliedGraceMarks?: number;
+    includedInTotal?: boolean;
+    internalObtained?: number | 'AB' | '-';
+    internalMax?: number;
+    mainObtained?: number | 'AB' | '-';
+    mainMax?: number;
     breakdown?: SubjectBreakdown;
     remark?: string;
   }>;
+}
+
+export function computeSubjectComponentSummary(
+  subjectName: string,
+  components: InternalComponentConfig[] | undefined,
+  breakdown: SubjectBreakdown | undefined,
+  examCode: string = 'SA-1'
+): {
+  internalObtained: number | 'AB' | '-';
+  internalMax: number;
+  mainObtained: number | 'AB' | '-';
+  mainMax: number;
+  hasInternalSplit: boolean;
+} {
+  const comps =
+    components && components.length > 0
+      ? components
+      : getDefaultSubjectComponents(subjectName, examCode);
+  const mainComp = comps.find((c) => c.isMainExam) || comps[comps.length - 1];
+  const intComps = comps.filter((c) => c !== mainComp);
+  const intMax = intComps.reduce((sum, c) => sum + (c.maxMarks || 0), 0);
+  const mainMax = mainComp?.maxMarks ?? 0;
+
+  if (!breakdown || intComps.length === 0) {
+    return {
+      internalObtained: '-',
+      internalMax: intMax,
+      mainObtained: '-',
+      mainMax,
+      hasInternalSplit: intComps.length > 0,
+    };
+  }
+
+  let internalObtained: number | 'AB' | '-' = '-';
+  if (intComps.some((c) => c.key === 'listening')) {
+    const allAb =
+      breakdown.listening === 'AB' &&
+      breakdown.speaking === 'AB' &&
+      breakdown.project === 'AB';
+    const hasAnyVal =
+      breakdown.listening !== undefined ||
+      breakdown.speaking !== undefined ||
+      breakdown.project !== undefined;
+    if (allAb) {
+      internalObtained = 'AB';
+    } else if (hasAnyVal) {
+      const list = typeof breakdown.listening === 'number' ? breakdown.listening : 0;
+      const spk = typeof breakdown.speaking === 'number' ? breakdown.speaking : 0;
+      const prj = typeof breakdown.project === 'number' ? breakdown.project : 0;
+      internalObtained = list + spk + prj;
+    }
+  } else {
+    const usesExplicitInternalMarks = intComps.some((c) => c.key === 'internalMarks');
+    const hasAnyIntCompVal = intComps.some(
+      (c) => breakdown[c.key] !== undefined && breakdown[c.key] !== null
+    );
+    const allIntCompAB =
+      hasAnyIntCompVal &&
+      intComps.some((c) => breakdown[c.key] === 'AB') &&
+      intComps.every(
+        (c) =>
+          breakdown[c.key] === 'AB' ||
+          breakdown[c.key] === undefined ||
+          breakdown[c.key] === null
+      );
+
+    if (usesExplicitInternalMarks) {
+      internalObtained = breakdown.internalMarks ?? '-';
+    } else if (hasAnyIntCompVal) {
+      internalObtained = allIntCompAB
+        ? 'AB'
+        : intComps.reduce<number>(
+            (sum, c) =>
+              sum + (typeof breakdown[c.key] === 'number' ? Number(breakdown[c.key]) : 0),
+            0
+          );
+    } else if (breakdown.internalMarks !== undefined && breakdown.internalMarks !== null) {
+      internalObtained = breakdown.internalMarks;
+    }
+  }
+
+  const rawMain = mainComp ? breakdown[mainComp.key] : undefined;
+  const fallbackMain =
+    rawMain !== undefined
+      ? rawMain
+      : mainComp?.key === 'saExam'
+      ? breakdown.writtenExam
+      : mainComp?.key === 'writtenExam'
+      ? breakdown.saExam
+      : undefined;
+  const mainObtained =
+    fallbackMain !== undefined && fallbackMain !== null ? fallbackMain : '-';
+
+  return {
+    internalObtained,
+    internalMax: intMax,
+    mainObtained,
+    mainMax,
+    hasInternalSplit: intComps.length > 0,
+  };
 }
 
 export function computeGrade(percentage: number): string {
@@ -836,7 +957,9 @@ export function computeStudentResult(
   resultCriteria?: ResultCriteriaConfig
 ): ComputedStudentResult {
   let failedSubjectsCount = 0;
-  let isAllAbsent = true;
+  let hasAnyNumericMark = false;
+  let hasAnyAbsentMark = false;
+  const hasAnyIncludedSubject = subjects.some((s) => s.includedInTotal !== false);
 
   const graceMarksAvailable = resultCriteria?.graceMarks ?? 0;
   const passThresholdPct = resultCriteria?.passPercentage ?? 33;
@@ -860,17 +983,23 @@ export function computeStudentResult(
     let grade = 'E2';
     let status: 'PASS' | 'FAIL' | 'ABSENT' | 'INCOMPLETE' = 'PASS';
     let appliedGraceMarks = 0;
+    const isCountedSubject = sub.includedInTotal !== false || !hasAnyIncludedSubject;
 
     if (raw === 'AB') {
       obtained = 'AB';
       status = 'ABSENT';
-      failedSubjectsCount++;
+      if (isCountedSubject) {
+        hasAnyAbsentMark = true;
+        failedSubjectsCount++;
+      }
     } else if (raw === null || raw === undefined || (raw as any) === '') {
       obtained = null;
       grade = '-';
       status = 'INCOMPLETE';
     } else {
-      isAllAbsent = false;
+      if (isCountedSubject) {
+        hasAnyNumericMark = true;
+      }
       let num = Number(raw);
 
       // Check if grace marks can save a borderline fail
@@ -888,7 +1017,9 @@ export function computeStudentResult(
 
       if (num < sub.passMarks) {
         status = 'FAIL';
-        failedSubjectsCount++;
+        if (isCountedSubject) {
+          failedSubjectsCount++;
+        }
       }
     }
 
@@ -898,6 +1029,12 @@ export function computeStudentResult(
       (sub.maxMarks === 100 || (sub.components && sub.components.length > 1))
         ? syncBreakdownWithTotal(obtained, sub.name, student.section, sub.components)
         : undefined);
+
+    const compSummary = computeSubjectComponentSummary(
+      sub.name,
+      sub.components,
+      resolvedBreakdown
+    );
 
     return {
       name: sub.name,
@@ -909,6 +1046,10 @@ export function computeStudentResult(
       weight: sub.weight ?? 1,
       includedInTotal: sub.includedInTotal !== false,
       appliedGraceMarks,
+      internalObtained: compSummary.internalObtained,
+      internalMax: compSummary.internalMax,
+      mainObtained: compSummary.mainObtained,
+      mainMax: compSummary.mainMax,
       breakdown: resolvedBreakdown,
       remark: student.subjectRemarks?.[sub.name],
     };
@@ -986,8 +1127,9 @@ export function computeStudentResult(
   const percentage = totalMax > 0 ? (totalObtained / totalMax) * 100 : 0;
   const overallGrade = computeGrade(percentage);
 
+  const isAllAbsent = hasAnyAbsentMark && !hasAnyNumericMark && subjects.length > 0;
   let status: 'PASS' | 'FAIL' | 'COMPARTMENT' | 'ABSENT' = 'PASS';
-  if (isAllAbsent && subjects.length > 0) {
+  if (isAllAbsent) {
     status = 'ABSENT';
   } else if (failedSubjectsCount > 0) {
     if (failedSubjectsCount <= maxAllowedFails && maxAllowedFails > 0) {
@@ -1526,6 +1668,14 @@ export function syncBreakdownWithTotal(
           if (diff <= 0) break;
         }
       }
+    }
+
+    // Ensure aggregate internalMarks stays synchronized with actual internal sub-components
+    if (!intComps.some((ic) => ic.key === 'internalMarks') && intComps.length > 0) {
+      baseBd.internalMarks = intComps.reduce(
+        (sum, ic) => sum + (typeof baseBd[ic.key] === 'number' ? (baseBd[ic.key] as number) : 0),
+        0
+      );
     }
   }
 

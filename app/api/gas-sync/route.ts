@@ -159,9 +159,18 @@ function normalizeStudentList(rawData: any): any[] {
 
     return {
       id: String(item.id || `sheet_${section}_${rollNo}`),
-      rollNo,
+      rollNo: String(rollNo).padStart(2, '0'),
       name,
       section,
+      admissionNo: item.admissionNo ? String(item.admissionNo) : undefined,
+      dob: item.dob ? String(item.dob) : undefined,
+      fatherName: item.fatherName ? String(item.fatherName) : undefined,
+      motherName: item.motherName ? String(item.motherName) : undefined,
+      house: item.house ? String(item.house) : undefined,
+      height: item.height ? String(item.height) : undefined,
+      weight: item.weight ? String(item.weight) : undefined,
+      attendance: item.attendance ? String(item.attendance) : undefined,
+      customRemarks: item.customRemarks ? String(item.customRemarks) : undefined,
       marks,
       breakdowns: item.breakdowns || undefined,
       subjectRemarks: item.subjectRemarks || undefined,
@@ -201,6 +210,7 @@ export async function GET(req: NextRequest) {
       },
       redirect: 'follow',
       cache: 'no-store',
+      signal: AbortSignal.timeout(12000),
     });
 
     const resText = await gasRes.text();
@@ -272,6 +282,7 @@ export async function POST(req: NextRequest) {
         timestamp: new Date().toISOString(),
       }),
       redirect: 'follow',
+      signal: AbortSignal.timeout(12000),
     });
 
     const resText = await gasRes.text();

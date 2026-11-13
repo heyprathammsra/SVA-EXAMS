@@ -10,151 +10,464 @@ import {
   getPtSubjectDisplayName,
   getStudentPtProfile,
   hasCsInPtExam,
+  isClass9Section,
   isPtExam,
 } from './report-card-types';
+import {
+  getDefaultClassTeacherRemark,
+  getDefaultSubjectRemark,
+} from './remarks-utils';
 import { ROCKWELL_EXTRABOLD_BASE64 } from './rockwell-font';
+import {
+  APTOS_COMPLETE_BASE64,
+  CALIBRI_SUBSET_BASE64,
+  MONTSERRAT_BOLD_BASE64,
+  SCHOOL_LOGO_BASE64,
+} from './pdf-assets';
 
-function ensureRockwellFont(doc: jsPDF) {
+function ensureReportCardFonts(doc: jsPDF) {
   try {
-    const fontList = doc.getFontList();
-    if (!fontList || !fontList['RockwellExtraBold']) {
+    const fontList = doc.getFontList() || {};
+    if (!fontList['RockwellExtraBold']) {
       doc.addFileToVFS('Rockwell-ExtraBold.ttf', ROCKWELL_EXTRABOLD_BASE64);
       doc.addFont('Rockwell-ExtraBold.ttf', 'RockwellExtraBold', 'normal');
     }
+    if (!fontList['Aptos']) {
+      doc.addFileToVFS('Aptos-Complete.ttf', APTOS_COMPLETE_BASE64);
+      doc.addFont('Aptos-Complete.ttf', 'Aptos', 'normal');
+      doc.addFont('Aptos-Complete.ttf', 'Aptos', 'bold');
+    }
+    if (!fontList['Calibri']) {
+      doc.addFileToVFS('Calibri-Subset.ttf', CALIBRI_SUBSET_BASE64);
+      doc.addFont('Calibri-Subset.ttf', 'Calibri', 'normal');
+    }
+    if (!fontList['MontserratBold']) {
+      doc.addFileToVFS('Montserrat-Bold.ttf', MONTSERRAT_BOLD_BASE64);
+      doc.addFont('Montserrat-Bold.ttf', 'MontserratBold', 'normal');
+      doc.addFont('Montserrat-Bold.ttf', 'MontserratBold', 'bold');
+    }
   } catch {
-    // Fallback to helvetica if font registration fails
+    // Fallback to standard PDF fonts if custom VFS registration fails
   }
 }
 
+function setFontSafe(doc: jsPDF, fontName: string, fontStyle: string = 'normal') {
+  try {
+    const fontList = doc.getFontList() || {};
+    if (fontList[fontName]) {
+      doc.setFont(fontName, fontStyle);
+      return;
+    }
+  } catch {
+    // ignore
+  }
+  doc.setFont('helvetica', fontStyle === 'bold' ? 'bold' : 'normal');
+}
+
 /**
- * Renders the exact 2-page PT Report Card matching PT_report_card_sample_5cddbf65.pdf
- * Page 1: School Header, REPORT CARD, PERIODIC TEST - X, Student Particulars Table,
- *         Subject Marks Table (6 subjects for Classes 6-8; 7 subjects with CS for Class 9),
- *         Summary Strip (TOTAL / PERCENTAGE / GRADE), and Class Teacher's Remarks Box.
- * Page 2: Centered 9-point Grading System Table (A1..E2) and 3-column Signatures.
+ * Draws text with a subtle 0.08mm stroke in addition to fill (`2 Tr`),
+ * matching the browser's `-webkit-text-stroke: 0.35px currentColor` on Aptos 12px.
+ */
+function drawAptosBoldText(
+  doc: jsPDF,
+  text: string,
+  x: number,
+  y: number,
+  options?: { align?: 'left' | 'center' | 'right' }
+) {
+  setFontSafe(doc, 'Aptos', 'normal');
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(0.06);
+  doc.text(text, x, y, {
+    ...(options || {}),
+    renderingMode: 'fillThenStroke',
+  } as any);
+}
+
+/**
+ * Renders the official Saraswati Vidya Academy A4 header with the school crest logo,
+ * Rockwell Extra Bold #27457B title, Montserrat Bold affiliation line, Calibri address
+ * and blue underlined email, and horizontal black divider line.
+ */
+function renderOfficialSvaHeader(doc: jsPDF, exam: ExamInfo): number {
+  const pageWidth = doc.internal.pageSize.getWidth(); // 210mm on A4
+  ensureReportCardFonts(doc);
+
+  // 1. Official School Crest Logo on Left (matching HTML preview position & proportions)
+  try {
+    doc.addImage(
+      `data:image/png;base64,${SCHOOL_LOGO_BASE64}`,
+      'PNG',
+      17.5,
+      9.2,
+      14.5,
+      18.0,
+      'SVA_CREST_LOGO',
+      'FAST'
+    );
+  } catch {
+    // Fallback crest ring if image decode fails in headless env
+    doc.setDrawColor(39, 69, 123);
+    doc.setLineWidth(0.6);
+    doc.circle(24.5, 18, 6.2, 'S');
+  }
+
+  const headerCenterX = pageWidth / 2 + 4.5;
+
+  // 2. School Name in #27457B using exact Rockwell Extra Bold font
+  setFontSafe(doc, 'RockwellExtraBold', 'normal');
+  doc.setFontSize(25.2);
+  doc.setTextColor(39, 69, 123); // #27457B
+  doc.text(exam.schoolName || 'Saraswati Vidya Academy', headerCenterX, 15.8, {
+    align: 'center',
+  });
+
+  // 3. Affiliation / School Code / UDISE Line in Montserrat Bold
+  setFontSafe(doc, 'MontserratBold', 'normal');
+  doc.setFontSize(8.4);
+  doc.setTextColor(0, 0, 0);
+  const udiseNo = exam.udiseNo || '2724100374';
+  doc.text(
+    `CBSE Affiliation No. ${exam.affiliationNo || '1131575'}, School Code. ${exam.schoolCode || '31572'}, UDISE No. ${udiseNo}`,
+    headerCenterX,
+    20.8,
+    { align: 'center' }
+  );
+
+  // 4. Address Line in Calibri
+  setFontSafe(doc, 'Calibri', 'normal');
+  doc.setFontSize(10.8);
+  doc.setTextColor(0, 0, 0);
+  doc.text(
+    `Address: ${exam.schoolAddress || 'Village Shilatne, Maval Dist. Pune, Maharashtra 410405'}`,
+    headerCenterX,
+    25.5,
+    { align: 'center' }
+  );
+
+  // 5. Email Line with blue underlined email address in Calibri
+  const emailAddress = exam.schoolEmail || 'principal@saraswatividya.academy';
+  const emailLabel = 'Email Id: ';
+  setFontSafe(doc, 'Calibri', 'normal');
+  doc.setFontSize(10.8);
+  const labelW = doc.getTextWidth(emailLabel);
+  const emailW = doc.getTextWidth(emailAddress);
+  const totalEmailW = labelW + emailW;
+  const emailStartX = headerCenterX - totalEmailW / 2;
+
+  doc.setTextColor(0, 0, 0);
+  doc.text(emailLabel, emailStartX, 30.2);
+  doc.setTextColor(0, 0, 255);
+  doc.text(emailAddress, emailStartX + labelW, 30.2);
+  doc.setDrawColor(0, 0, 255);
+  doc.setLineWidth(0.24);
+  doc.line(emailStartX + labelW, 30.9, emailStartX + totalEmailW, 30.9);
+
+  // 6. Horizontal Black Rule below Header
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(0.42);
+  doc.line(14, 33.8, pageWidth - 14, 33.8);
+
+  return 33.8;
+}
+
+/**
+ * Renders a double-bordered table matching CSS `border-collapse: separate; border-spacing: 1.5px; border: 1px solid black`
+ * with Aptos font size 12 (`9.2pt` on A4 = `12px` at 96 DPI) and subtle medium-bold text stroke.
+ */
+function renderDoubleBorderedAptosTable(
+  doc: jsPDF,
+  options: {
+    startY: number;
+    marginX: number;
+    tableWidth: number;
+    head?: any[][];
+    body: any[][];
+    columnStyles?: Record<number, any>;
+    cellPadding?: { top: number; bottom: number; left: number; right: number };
+    fontSizePt?: number;
+  }
+): number {
+  const gap = 0.22; // half of 0.44mm (~1.5px) inter-cell spacing
+  const fontSizePt = options.fontSizePt ?? 9.2; // 9.2pt = 12.2px on A4
+
+  const origText = doc.text.bind(doc);
+  (doc as any).text = (text: any, x: number, y: number, opts?: any, transform?: any) => {
+    doc.setDrawColor(0, 0, 0);
+    doc.setLineWidth(0.06);
+    return origText(
+      text,
+      x,
+      y,
+      { ...(opts || {}), renderingMode: 'fillThenStroke' },
+      transform
+    );
+  };
+
+  try {
+    autoTable(doc, {
+      startY: options.startY,
+      margin: { left: options.marginX, right: options.marginX },
+      tableWidth: options.tableWidth,
+      theme: 'plain',
+      head: options.head,
+      body: options.body,
+      styles: {
+        font: 'Aptos',
+        fontStyle: 'normal',
+        fontSize: fontSizePt,
+        textColor: [0, 0, 0],
+        lineColor: [255, 255, 255],
+        lineWidth: 0,
+        cellPadding: options.cellPadding || {
+          top: 1.55,
+          bottom: 1.55,
+          left: 2.1,
+          right: 2.1,
+        },
+        valign: 'middle',
+      },
+      headStyles: {
+        fillColor: [255, 255, 255],
+        textColor: [0, 0, 0],
+        fontStyle: 'normal',
+        fontSize: fontSizePt,
+        halign: 'center',
+        valign: 'middle',
+      },
+      columnStyles: options.columnStyles,
+      didDrawCell: (data) => {
+        const { x, y, width, height } = data.cell;
+        doc.setDrawColor(0, 0, 0);
+        doc.setLineWidth(0.26);
+        doc.rect(
+          x + gap,
+          y + gap,
+          Math.max(0.1, width - gap * 2),
+          Math.max(0.1, height - gap * 2),
+          'S'
+        );
+      },
+    });
+  } finally {
+    (doc as any).text = origText;
+  }
+  const endY = (doc as any).lastAutoTable?.finalY || options.startY + 20;
+
+  // Outer table frame around all inset cell borders
+  doc.setDrawColor(0, 0, 0);
+  doc.setLineWidth(0.32);
+  doc.rect(
+    options.marginX - gap,
+    options.startY - gap,
+    options.tableWidth + gap * 2,
+    endY - options.startY + gap * 2,
+    'S'
+  );
+
+  return endY;
+}
+
+/**
+ * Renders a single-bordered collapsed table matching CSS `border-collapse: collapse; border: 1px solid black`
+ * used for the centered Grading System table on Page 2 of the official report card.
+ */
+function renderSingleBorderedAptosTable(
+  doc: jsPDF,
+  options: {
+    startY: number;
+    marginX: number;
+    tableWidth: number;
+    head?: any[][];
+    body: any[][];
+    columnStyles?: Record<number, any>;
+    cellPadding?: { top: number; bottom: number; left: number; right: number };
+    fontSizePt?: number;
+  }
+): number {
+  const fontSizePt = options.fontSizePt ?? 10.8;
+
+  const origText = doc.text.bind(doc);
+  (doc as any).text = (text: any, x: number, y: number, opts?: any, transform?: any) => {
+    doc.setDrawColor(0, 0, 0);
+    doc.setLineWidth(0.06);
+    return origText(
+      text,
+      x,
+      y,
+      { ...(opts || {}), renderingMode: 'fillThenStroke' },
+      transform
+    );
+  };
+
+  try {
+    autoTable(doc, {
+      startY: options.startY,
+      margin: { left: options.marginX, right: options.marginX },
+      tableWidth: options.tableWidth,
+      theme: 'grid',
+      head: options.head,
+      body: options.body,
+      styles: {
+        font: 'Aptos',
+        fontStyle: 'normal',
+        fontSize: fontSizePt,
+        textColor: [0, 0, 0],
+        lineColor: [0, 0, 0],
+        lineWidth: 0.26,
+        cellPadding: options.cellPadding || {
+          top: 1.45,
+          bottom: 1.45,
+          left: 2.2,
+          right: 2.2,
+        },
+        valign: 'middle',
+      },
+      headStyles: {
+        fillColor: [255, 255, 255],
+        textColor: [0, 0, 0],
+        fontStyle: 'normal',
+        fontSize: fontSizePt,
+        lineColor: [0, 0, 0],
+        lineWidth: 0.26,
+        halign: 'center',
+        valign: 'middle',
+      },
+      columnStyles: options.columnStyles,
+    });
+  } finally {
+    (doc as any).text = origText;
+  }
+
+  return (doc as any).lastAutoTable?.finalY || options.startY + 20;
+}
+
+/**
+ * Renders the 3-column symmetrical Signatures row on Page 2 of the report card.
+ */
+function renderThreeSignaturesRow(doc: jsPDF, sigTopY: number) {
+  const pageWidth = doc.internal.pageSize.getWidth();
+  doc.setTextColor(0, 0, 0);
+  doc.setFontSize(10.8);
+
+  // Left: Signature of Class Teacher
+  drawAptosBoldText(doc, 'Signature of', 36, sigTopY, { align: 'center' });
+  drawAptosBoldText(doc, 'Class Teacher', 36, sigTopY + 5.0, { align: 'center' });
+
+  // Center: Signature of Principal with Seal
+  drawAptosBoldText(doc, 'Signature of', pageWidth / 2, sigTopY, { align: 'center' });
+  drawAptosBoldText(doc, 'Principal with Seal', pageWidth / 2, sigTopY + 5.0, {
+    align: 'center',
+  });
+
+  // Right: Signature of Parent / Guardian
+  drawAptosBoldText(doc, 'Signature of', pageWidth - 36, sigTopY, { align: 'center' });
+  drawAptosBoldText(doc, 'Parent / Guardian', pageWidth - 36, sigTopY + 5.0, {
+    align: 'center',
+  });
+}
+
+/**
+ * Renders Page 2 of the official Saraswati Vidya Academy Report Card:
+ * Centered 9-point Grading System table (single-bordered) and 3-column Signatures.
+ */
+function renderGradingAndSignaturesSecondPage(doc: jsPDF) {
+  doc.addPage();
+  const pageWidth = doc.internal.pageSize.getWidth();
+  const gradingTableWidth = 86;
+  const gradingMarginX = (pageWidth - gradingTableWidth) / 2;
+
+  const gradingTableEndY = renderSingleBorderedAptosTable(doc, {
+    startY: 18,
+    marginX: gradingMarginX,
+    tableWidth: gradingTableWidth,
+    fontSizePt: 10.8,
+    cellPadding: { top: 1.45, bottom: 1.45, left: 2.2, right: 2.2 },
+    columnStyles: {
+      0: { cellWidth: 48.0, halign: 'center' },
+      1: { cellWidth: 38.0, halign: 'center' },
+    },
+    body: [
+      [{ content: 'Grading System', colSpan: 2, styles: { halign: 'center' } }],
+      [
+        { content: 'Range of Marks', styles: { halign: 'center' } },
+        { content: 'Grade', styles: { halign: 'center' } },
+      ],
+      ...REPORT_CARD_GRADING_SYSTEM.map((row) => [
+        { content: row.range, styles: { halign: 'center' } },
+        { content: row.grade, styles: { halign: 'center' } },
+      ]),
+    ],
+  });
+
+  const sigTopY = Math.max(gradingTableEndY + 26, 108);
+  renderThreeSignaturesRow(doc, sigTopY);
+}
+
+/**
+ * Formats SA exam heading cleanly in uppercase (e.g. SUMMATIVE ASSESSMENT - 1).
+ */
+function getSaExamHeading(examIdOrName?: string): string {
+  const norm = (examIdOrName || 'SA-1').trim().toUpperCase();
+  const match =
+    norm.match(/SA[\s-]*(\d+)/i) || norm.match(/SUMMATIVE\s+ASSESSMENT[\s-]*(\d+)/i);
+  if (match) {
+    return `SUMMATIVE ASSESSMENT - ${match[1]}`;
+  }
+  return norm;
+}
+
+/**
+ * Renders the complete 2-Page A4 PT Report Card (210mm x 297mm)
+ * matching the official PT Report Card sample PDF and images 1:1.
  */
 export function renderPtReportCardPages(
   doc: jsPDF,
   exam: ExamInfo,
   result: ComputedStudentResult
 ) {
-  const pageWidth = doc.internal.pageSize.getWidth();
+  const pageWidth = doc.internal.pageSize.getWidth(); // 210mm
   const student = result.student;
   const profile = getStudentPtProfile(student);
 
-  // =========================================================================
-  // PAGE 1: PT REPORT CARD
-  // =========================================================================
+  // 1. Official School Header with Crest Logo
+  const headerBottomY = renderOfficialSvaHeader(doc, exam);
 
-  // Crest emblem placeholder on the left (x=22, y=14, r=7)
-  doc.setDrawColor(39, 69, 123);
-  doc.setLineWidth(0.6);
-  doc.circle(26, 21, 6.2, 'S');
-  doc.setDrawColor(212, 160, 23);
-  doc.setLineWidth(0.35);
-  doc.circle(26, 21, 5.1, 'S');
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(6.5);
-  doc.setTextColor(39, 69, 123);
-  doc.text('SVA', 26, 21.8, { align: 'center' });
-
-  // School Name in #27457B using exact Rockwell Extra Bold font
-  ensureRockwellFont(doc);
-  try {
-    doc.setFont('RockwellExtraBold', 'normal');
-  } catch {
-    doc.setFont('helvetica', 'bold');
-  }
-  doc.setFontSize(25.3);
-  doc.setTextColor(39, 69, 123); // #27457B
-  doc.text('Saraswati Vidya Academy', pageWidth / 2 + 4, 18.5, { align: 'center' });
-
-  // Affiliation / School Code / UDISE Line
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(8.5);
+  // 2. REPORT CARD (11.5pt) & PERIODIC TEST - X (14.5pt) Titles
   doc.setTextColor(0, 0, 0);
-  const udiseNo = exam.udiseNo || '2724100374';
-  doc.text(
-    `CBSE Affiliation No. ${exam.affiliationNo || '1131575'}, School Code. ${exam.schoolCode || '31572'}, UDISE No. ${udiseNo}`,
-    pageWidth / 2 + 4,
-    24,
-    { align: 'center' }
-  );
+  doc.setFontSize(11.5);
+  drawAptosBoldText(doc, 'REPORT CARD', pageWidth / 2, headerBottomY + 6.5, {
+    align: 'center',
+  });
 
-  // Address Line
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(10.5);
-  doc.setTextColor(0, 0, 0);
-  doc.text(
-    `Address: ${exam.schoolAddress || 'Village Shilatne, Maval Dist. Pune, Maharashtra 410405'}`,
-    pageWidth / 2 + 4,
-    29.5,
-    { align: 'center' }
-  );
-
-  // Email Line with blue underlined email address
-  const emailAddress = exam.schoolEmail || 'principal@saraswatividya.academy';
-  const emailLabel = 'Email Id: ';
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(10.5);
-  const labelW = doc.getTextWidth(emailLabel);
-  const emailW = doc.getTextWidth(emailAddress);
-  const totalEmailW = labelW + emailW;
-  const emailStartX = (pageWidth + 8 - totalEmailW) / 2;
-
-  doc.setTextColor(0, 0, 0);
-  doc.text(emailLabel, emailStartX, 35);
-  doc.setTextColor(0, 0, 255);
-  doc.text(emailAddress, emailStartX + labelW, 35);
-  doc.setDrawColor(0, 0, 255);
-  doc.setLineWidth(0.25);
-  doc.line(emailStartX + labelW, 35.8, emailStartX + totalEmailW, 35.8);
-
-  // Horizontal Black Rule below Header
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.5);
-  doc.line(16, 40, pageWidth - 19, 40);
-
-  // REPORT CARD & PERIODIC TEST - X Headings (Font Size 12)
-  doc.setTextColor(0, 0, 0);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(12);
-  doc.text('REPORT CARD', pageWidth / 2, 47, { align: 'center' });
-
-  doc.setFontSize(12);
   const ptHeading = getPtExamHeading(exam.examCode || exam.examName);
-  doc.text(ptHeading, pageWidth / 2, 53.5, { align: 'center' });
+  doc.setFontSize(14.5);
+  drawAptosBoldText(doc, ptHeading, pageWidth / 2, headerBottomY + 12.8, {
+    align: 'center',
+  });
 
-  const tableMarginX = 18;
-  const tableWidth = pageWidth - tableMarginX * 2; // 174mm
+  const tableMarginX = 14;
+  const tableWidth = pageWidth - tableMarginX * 2; // 182mm
 
-  // Table 1: Student Particulars Box (6 rows, 10-column framed black grid, Font Size 12)
-  autoTable(doc, {
-    startY: 57,
-    margin: { left: tableMarginX, right: tableMarginX },
+  // 3. Table 1: Student Particulars Box (6 rows, 10-column double-bordered table)
+  const studentTableStartY = headerBottomY + 16.2;
+  const studentTableEndY = renderDoubleBorderedAptosTable(doc, {
+    startY: studentTableStartY,
+    marginX: tableMarginX,
     tableWidth,
-    theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontStyle: 'bold',
-      fontSize: 12,
-      textColor: [0, 0, 0],
-      lineColor: [0, 0, 0],
-      lineWidth: 0.35,
-      cellPadding: { top: 2.0, bottom: 2.0, left: 2.0, right: 2.0 },
-      valign: 'middle',
-    },
+    fontSizePt: 10.8,
+    cellPadding: { top: 2.0, bottom: 2.0, left: 2.2, right: 2.2 },
     columnStyles: {
-      0: { cellWidth: 23 },
-      1: { cellWidth: 25 },
-      2: { cellWidth: 31 },
-      3: { cellWidth: 7 },
-      4: { cellWidth: 15 },
-      5: { cellWidth: 12 },
-      6: { cellWidth: 12 },
-      7: { cellWidth: 9 },
-      8: { cellWidth: 12 },
-      9: { cellWidth: 28 },
+      0: { cellWidth: 21.0, halign: 'left' },
+      1: { cellWidth: 25.5, halign: 'left' },
+      2: { cellWidth: 27.3, halign: 'left' },
+      3: { cellWidth: 5.5, halign: 'left' },
+      4: { cellWidth: 20.0, halign: 'left' },
+      5: { cellWidth: 14.5, halign: 'left' },
+      6: { cellWidth: 12.7, halign: 'left' },
+      7: { cellWidth: 11.0, halign: 'left' },
+      8: { cellWidth: 14.5, halign: 'left' },
+      9: { cellWidth: 30.0, halign: 'left' },
     },
     body: [
       [
@@ -187,23 +500,12 @@ export function renderPtReportCardPages(
       ],
       [
         { content: 'Attendance:', colSpan: 2 },
-        { content: `   ${profile.attendance}`, colSpan: 8 },
+        { content: profile.attendance, colSpan: 8 },
       ],
     ],
   });
-  const studentTableEndY = (doc as any).lastAutoTable?.finalY || 105;
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.45);
-  doc.rect(
-    tableMarginX - 0.6,
-    57 - 0.6,
-    tableWidth + 1.2,
-    studentTableEndY - 57 + 1.2
-  );
 
-  const afterStudentTableY = studentTableEndY + 6.5;
-
-  // Class 9 has Computer Science paper in PT exams; Classes 6-8 do not
+  // 4. Table 2: Subject Marks Table (6 subjects for Classes 6-8; 7 subjects with CS for Class 9)
   const includeCs = hasCsInPtExam(student.section || student.class);
   const ptSubjectRows = result.subjectDetails
     .filter((s) => {
@@ -212,98 +514,58 @@ export function renderPtReportCardPages(
       return lower !== 'computer science' && lower !== 'cs';
     })
     .map((sub, idx) => {
+      const markStr =
+        sub.obtained === 'AB'
+          ? 'AB'
+          : sub.obtained !== null && sub.obtained !== undefined
+          ? String(sub.obtained)
+          : '-';
       const subRemark =
         sub.remark && sub.remark.trim().length > 0
           ? sub.remark.trim()
-          : sub.obtained === 'AB'
-          ? 'Absent'
-          : typeof sub.obtained === 'number' && sub.maxMarks > 0
-          ? (sub.obtained / sub.maxMarks) * 100 >= 90
-            ? 'Outstanding! Strong conceptual understanding.'
-            : (sub.obtained / sub.maxMarks) * 100 >= 75
-            ? 'Excellent performance keep it up.'
-            : (sub.obtained / sub.maxMarks) * 100 >= 50
-            ? 'Good.Keep it up!'
-            : 'Needs regular practice.'
-          : '';
+          : getDefaultSubjectRemark(sub.obtained, sub.maxMarks);
 
       return [
         String(idx + 1),
         getPtSubjectDisplayName(sub.name),
-        sub.obtained === 'AB' ? 'AB' : sub.obtained !== null ? String(sub.obtained) : '',
+        markStr,
         subRemark,
       ];
     });
 
-  // Table 2: Subject Marks Table (Font Size 12)
-  autoTable(doc, {
-    startY: afterStudentTableY,
-    margin: { left: tableMarginX, right: tableMarginX },
+  const marksTableStartY = studentTableEndY + 6.2;
+  const marksTableEndY = renderDoubleBorderedAptosTable(doc, {
+    startY: marksTableStartY,
+    marginX: tableMarginX,
     tableWidth,
-    theme: 'grid',
+    fontSizePt: 11.2,
+    cellPadding: { top: 2.3, bottom: 2.3, left: 2.2, right: 2.2 },
     head: [['SL.\nNO.', 'NAME OF THE SUBJECT', 'MARKS\nOBTAINED', 'REMARKS']],
     body: ptSubjectRows,
-    styles: {
-      font: 'helvetica',
-      fontStyle: 'bold',
-      fontSize: 12,
-      textColor: [0, 0, 0],
-      lineColor: [0, 0, 0],
-      lineWidth: 0.35,
-      cellPadding: { top: 2.0, bottom: 2.0, left: 2.0, right: 2.0 },
-      valign: 'middle',
-    },
-    headStyles: {
-      fillColor: [255, 255, 255],
-      textColor: [0, 0, 0],
-      fontStyle: 'bold',
-      fontSize: 12,
-      halign: 'center',
-      valign: 'middle',
-    },
     columnStyles: {
-      0: { cellWidth: 18, halign: 'center' },
-      1: { cellWidth: 48, halign: 'center' },
-      2: { cellWidth: 28, halign: 'center' },
-      3: { cellWidth: 80, halign: 'left' },
+      0: { cellWidth: 20.9, halign: 'center' },
+      1: { cellWidth: 52.8, halign: 'center' },
+      2: { cellWidth: 40.1, halign: 'center' },
+      3: { cellWidth: 68.2, halign: 'left' },
     },
   });
-  const marksTableEndY = (doc as any).lastAutoTable?.finalY || 165;
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.45);
-  doc.rect(
-    tableMarginX - 0.6,
-    afterStudentTableY - 0.6,
-    tableWidth + 1.2,
-    marksTableEndY - afterStudentTableY + 1.2
-  );
 
-  const afterMarksTableY = marksTableEndY + 6.5;
-
-  // Table 3: Summary Strip (TOTAL / PERCENTAGE / GRADE, Font Size 12)
+  // 5. Table 3: Summary Strip (TOTAL / PERCENTAGE / GRADE)
   const pctFormatted = formatPtPercentage(result.totalObtained, result.totalMax);
-  autoTable(doc, {
-    startY: afterMarksTableY,
-    margin: { left: tableMarginX, right: tableMarginX },
+  const summaryTableStartY = marksTableEndY + 6.2;
+  const summaryTableEndY = renderDoubleBorderedAptosTable(doc, {
+    startY: summaryTableStartY,
+    marginX: tableMarginX,
     tableWidth,
-    theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontStyle: 'bold',
-      fontSize: 12,
-      textColor: [0, 0, 0],
-      lineColor: [0, 0, 0],
-      lineWidth: 0.35,
-      cellPadding: { top: 2.0, bottom: 2.0, left: 2.0, right: 2.0 },
-      valign: 'middle',
-    },
+    fontSizePt: 10.8,
+    cellPadding: { top: 2.0, bottom: 2.0, left: 2.2, right: 2.2 },
     columnStyles: {
-      0: { cellWidth: 24, halign: 'left' },
-      1: { cellWidth: 24, halign: 'center' },
-      2: { cellWidth: 36, halign: 'center' },
-      3: { cellWidth: 40, halign: 'center' },
-      4: { cellWidth: 26, halign: 'left' },
-      5: { cellWidth: 24, halign: 'center' },
+      0: { cellWidth: 25.5, halign: 'left' },
+      1: { cellWidth: 23.7, halign: 'center' },
+      2: { cellWidth: 34.6, halign: 'center' },
+      3: { cellWidth: 43.7, halign: 'center' },
+      4: { cellWidth: 29.1, halign: 'left' },
+      5: { cellWidth: 25.4, halign: 'center' },
     },
     body: [
       [
@@ -316,120 +578,40 @@ export function renderPtReportCardPages(
       ],
     ],
   });
-  const summaryTableEndY = (doc as any).lastAutoTable?.finalY || 182;
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.45);
-  doc.rect(
-    tableMarginX - 0.6,
-    afterMarksTableY - 0.6,
-    tableWidth + 1.2,
-    summaryTableEndY - afterMarksTableY + 1.2
+
+  // 6. Table 4: Class Teacher's Remarks Box
+  const hasAnyMarks = result.subjectDetails.some(
+    (s) => s.obtained !== null && s.obtained !== undefined
   );
-
-  const afterSummaryY = summaryTableEndY + 6.5;
-
-  // Table 4: Class Teacher's Remarks Box (Font Size 12)
-  const defaultPtRemark =
-    'Excellent and consistent performance with strong understanding and commendable effort.';
   const teacherRemarkText =
     student.customRemarks && student.customRemarks.trim().length > 0
       ? student.customRemarks.trim()
-      : defaultPtRemark;
+      : hasAnyMarks
+      ? getDefaultClassTeacherRemark(result.percentage, result.status)
+      : '';
 
-  autoTable(doc, {
-    startY: afterSummaryY,
-    margin: { left: tableMarginX, right: tableMarginX },
+  const remarksTableStartY = summaryTableEndY + 6.2;
+  renderDoubleBorderedAptosTable(doc, {
+    startY: remarksTableStartY,
+    marginX: tableMarginX,
     tableWidth,
-    theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontStyle: 'bold',
-      fontSize: 12,
-      textColor: [0, 0, 0],
-      lineColor: [0, 0, 0],
-      lineWidth: 0.35,
-      cellPadding: { top: 2.0, bottom: 2.0, left: 2.0, right: 2.0 },
-      valign: 'middle',
-    },
+    fontSizePt: 10.8,
+    cellPadding: { top: 2.3, bottom: 2.3, left: 2.2, right: 2.2 },
     columnStyles: {
-      0: { cellWidth: 64, halign: 'left' },
-      1: { cellWidth: 110, halign: 'left' },
+      0: { cellWidth: 60.0, halign: 'left' },
+      1: { cellWidth: 122.0, halign: 'left' },
     },
     body: [['CLASS TEACHER’S REMARKS:', teacherRemarkText]],
   });
-  const remarksTableEndY = (doc as any).lastAutoTable?.finalY || 200;
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.45);
-  doc.rect(
-    tableMarginX - 0.6,
-    afterSummaryY - 0.6,
-    tableWidth + 1.2,
-    remarksTableEndY - afterSummaryY + 1.2
-  );
 
-  // =========================================================================
-  // PAGE 2: GRADING SYSTEM & SIGNATURES (Font Size 12)
-  // =========================================================================
-  doc.addPage();
-
-  const gradingTableWidth = 92;
-  const gradingMarginLeft = (pageWidth - gradingTableWidth) / 2;
-
-  autoTable(doc, {
-    startY: 18,
-    margin: { left: gradingMarginLeft, right: gradingMarginLeft },
-    tableWidth: gradingTableWidth,
-    theme: 'grid',
-    styles: {
-      font: 'helvetica',
-      fontStyle: 'bold',
-      fontSize: 12,
-      textColor: [0, 0, 0],
-      lineColor: [0, 0, 0],
-      lineWidth: 0.35,
-      cellPadding: { top: 1.5, bottom: 1.5, left: 2, right: 2 },
-      halign: 'center',
-      valign: 'middle',
-    },
-    columnStyles: {
-      0: { cellWidth: 54, halign: 'center' },
-      1: { cellWidth: 38, halign: 'center' },
-    },
-    body: [
-      [{ content: 'Grading System', colSpan: 2 }],
-      ['Range of Marks', 'Grade'],
-      ...REPORT_CARD_GRADING_SYSTEM.map((row) => [row.range.replace('–', '-'), row.grade]),
-    ],
-  });
-  const gradingTableEndY = (doc as any).lastAutoTable?.finalY || 78;
-  doc.setDrawColor(0, 0, 0);
-  doc.setLineWidth(0.45);
-  doc.rect(
-    gradingMarginLeft - 0.5,
-    18 - 0.5,
-    gradingTableWidth + 1,
-    gradingTableEndY - 18 + 1
-  );
-
-  // 3 Signature labels evenly spaced across Left, Center, and Right (Font Size 12)
-  const sigTopY = 122;
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(12);
-  doc.setTextColor(0, 0, 0);
-
-  // Left: Signature of Class Teacher
-  doc.text('Signature of', 34, sigTopY, { align: 'center' });
-  doc.text('Class Teacher', 34, sigTopY + 5.5, { align: 'center' });
-
-  // Center: Signature of Principal with Seal
-  doc.text('Signature of', pageWidth / 2, sigTopY, { align: 'center' });
-  doc.text('Principal with Seal', pageWidth / 2, sigTopY + 5.5, { align: 'center' });
-
-  // Right: Signature of Parent / Guardian
-  doc.text('Signature of', pageWidth - 34, sigTopY, { align: 'center' });
-  doc.text('Parent / Guardian', pageWidth - 34, sigTopY + 5.5, { align: 'center' });
+  // 7. Page 2: Centered Grading System Table & Symmetrical 3-Column Signatures Row
+  renderGradingAndSignaturesSecondPage(doc);
 }
 
+/**
+ * Renders the 2-Page A4 Summative Assessment (SA-1 / SA-2) Report Card
+ * matching the official Saraswati Vidya Academy report card layout 1:1.
+ */
 export function renderReportCardPage(
   doc: jsPDF,
   exam: ExamInfo,
@@ -440,287 +622,248 @@ export function renderReportCardPage(
     return;
   }
 
-  const pageWidth = doc.internal.pageSize.getWidth();
-  const pageHeight = doc.internal.pageSize.getHeight();
+  const pageWidth = doc.internal.pageSize.getWidth(); // 210mm
   const student = result.student;
+  const profile = getStudentPtProfile(student);
 
-  // Outer Border
-  doc.setLineWidth(0.6);
-  doc.setDrawColor(30, 41, 59); // slate-800
-  doc.rect(8, 8, pageWidth - 16, pageHeight - 16);
+  // 1. Official SVA Header with Crest Logo
+  const headerBottomY = renderOfficialSvaHeader(doc, exam);
 
-  // Inner Border
-  doc.setLineWidth(0.2);
-  doc.rect(9.5, 9.5, pageWidth - 19, pageHeight - 19);
-
-  // Header Title
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(16);
-  doc.setTextColor(15, 23, 42); // slate-900
-  doc.text(exam.schoolName.toUpperCase(), pageWidth / 2, 18, { align: 'center' });
-
-  doc.setFont('helvetica', 'normal');
-  doc.setFontSize(8.5);
-  doc.setTextColor(71, 85, 105); // slate-600
-  doc.text(exam.schoolAddress, pageWidth / 2, 23, { align: 'center' });
-  doc.text(
-    `Affiliation No: ${exam.affiliationNo} | School Code: ${exam.schoolCode} | Session: ${exam.academicSession}`,
-    pageWidth / 2,
-    27,
-    { align: 'center' }
-  );
-
-  // Divider
-  doc.setLineWidth(0.4);
-  doc.setDrawColor(203, 213, 225);
-  doc.line(12, 30, pageWidth - 12, 30);
-
-  // Banner
-  doc.setFillColor(30, 41, 59);
-  doc.rect(12, 32, pageWidth - 24, 7.5, 'F');
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(9.5);
-  doc.setTextColor(255, 255, 255);
-  doc.text(`ANNUAL PROGRESS REPORT CARD — ${exam.academicSession}`, pageWidth / 2, 37, {
+  // 2. REPORT CARD & SA Examination Heading
+  doc.setTextColor(0, 0, 0);
+  doc.setFontSize(11.5);
+  drawAptosBoldText(doc, 'REPORT CARD', pageWidth / 2, headerBottomY + 6.5, {
     align: 'center',
   });
 
-  // Student Info Box
-  const startY = 43;
-  doc.setFillColor(248, 250, 252); // slate-50
-  doc.rect(12, startY, pageWidth - 24, 26, 'F');
-  doc.setDrawColor(203, 213, 225);
-  doc.rect(12, startY, pageWidth - 24, 26, 'S');
+  const saHeading = getSaExamHeading(exam.examCode || exam.examName);
+  doc.setFontSize(14.5);
+  drawAptosBoldText(doc, saHeading, pageWidth / 2, headerBottomY + 12.8, {
+    align: 'center',
+  });
 
-  doc.setFontSize(8.5);
-  doc.setTextColor(15, 23, 42);
+  const tableMarginX = 14;
+  const tableWidth = pageWidth - tableMarginX * 2; // 182mm
 
-  // Column 1
-  doc.setFont('helvetica', 'bold');
-  doc.text('Student Name:', 15, startY + 5.5);
-  doc.setFont('helvetica', 'normal');
-  doc.text(student.name, 42, startY + 5.5);
+  // 3. Table 1: Student Particulars Box (matching PT particulars layout)
+  const studentTableEndY = renderDoubleBorderedAptosTable(doc, {
+    startY: headerBottomY + 16.2,
+    marginX: tableMarginX,
+    tableWidth,
+    fontSizePt: 10.5,
+    cellPadding: { top: 1.85, bottom: 1.85, left: 2.2, right: 2.2 },
+    columnStyles: {
+      0: { cellWidth: 21.0, halign: 'left' },
+      1: { cellWidth: 25.5, halign: 'left' },
+      2: { cellWidth: 27.3, halign: 'left' },
+      3: { cellWidth: 5.5, halign: 'left' },
+      4: { cellWidth: 20.0, halign: 'left' },
+      5: { cellWidth: 14.5, halign: 'left' },
+      6: { cellWidth: 12.7, halign: 'left' },
+      7: { cellWidth: 11.0, halign: 'left' },
+      8: { cellWidth: 14.5, halign: 'left' },
+      9: { cellWidth: 30.0, halign: 'left' },
+    },
+    body: [
+      [
+        'Roll No.',
+        profile.rollNoDisplay,
+        { content: 'Class & Section:', colSpan: 2 },
+        { content: profile.classSectionDisplay, colSpan: 3 },
+        { content: 'DOB:', colSpan: 2 },
+        profile.dobDisplay,
+      ],
+      [
+        { content: 'Name of the Student:', colSpan: 2 },
+        { content: student.name, colSpan: 8 },
+      ],
+      [
+        { content: 'Father’s Name:', colSpan: 2 },
+        { content: profile.fatherNameDisplay, colSpan: 8 },
+      ],
+      [
+        { content: 'Mother’s Name:', colSpan: 2 },
+        { content: profile.motherNameDisplay, colSpan: 8 },
+      ],
+      [
+        { content: 'House:', colSpan: 2 },
+        profile.house,
+        { content: 'Height:', colSpan: 2 },
+        { content: profile.height, colSpan: 2 },
+        { content: 'Weight:', colSpan: 2 },
+        profile.weight,
+      ],
+      [
+        { content: 'Attendance:', colSpan: 2 },
+        { content: profile.attendance, colSpan: 8 },
+      ],
+    ],
+  });
 
-  doc.setFont('helvetica', 'bold');
-  doc.text('Roll Number:', 15, startY + 12);
-  doc.setFont('helvetica', 'normal');
-  doc.text(student.rollNo, 42, startY + 12);
+  // 4. Table 2: Scholastic Marks Table (with Internal, Exam, Max, Obtained, Grade, Remarks)
+  const isClass9 = isClass9Section(student.section || student.class);
+  const saRows = result.subjectDetails.map((detail, idx) => {
+    const bd = detail.breakdown;
+    const isHindi = detail.name.toLowerCase() === 'hindi';
+    let internalLabel = '-';
+    let writtenLabel = '-';
 
-  doc.setFont('helvetica', 'bold');
-  doc.text('Date of Birth:', 15, startY + 18.5);
-  doc.setFont('helvetica', 'normal');
-  doc.text(student.dob || 'N/A', 42, startY + 18.5);
-
-  // Column 2
-  const col2X = pageWidth / 2 + 5;
-  doc.setFont('helvetica', 'bold');
-  doc.text('Class & Section:', col2X, startY + 5.5);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`${student.class} - ${student.section}`, col2X + 28, startY + 5.5);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text("Father's Name:", col2X, startY + 11.5);
-  doc.setFont('helvetica', 'normal');
-  doc.text(student.fatherName || 'N/A', col2X + 28, startY + 11.5);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text("Mother's Name:", col2X, startY + 17.5);
-  doc.setFont('helvetica', 'normal');
-  doc.text(student.motherName || 'N/A', col2X + 28, startY + 17.5);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Examination:', col2X, startY + 23);
-  doc.setFont('helvetica', 'normal');
-  doc.text(exam.examName, col2X + 28, startY + 23);
-
-  // Determine if this exam has internal breakdown components (SA-1, SA-2 out of 100)
-  const hasBreakdown = result.subjectDetails.some((s) => s.breakdown && s.maxMarks === 100);
-  const isC9 = (student.section || '').toLowerCase().includes('ruby') ||
-               (student.section || '').toLowerCase().includes('diamond') ||
-               (student.section || '').toLowerCase().includes('9');
-
-  const tableHead = hasBreakdown
-    ? [['#', 'Subject Name', 'Internal (IA)', 'Theory Exam', 'Total (100)', 'Grade', 'Result', 'Subject Teacher Remark']]
-    : [['#', 'Subject Name', 'Max', 'Pass', 'Obtained', 'Grade', 'Result', 'Subject Teacher Remark']];
-
-  const tableBody = result.subjectDetails.map((sub, idx) => {
-    const subRemark =
-      sub.remark && sub.remark.trim().length > 0
-        ? sub.remark.trim()
-        : sub.obtained === 'AB'
-        ? 'Absent'
-        : typeof sub.obtained === 'number' && sub.maxMarks > 0
-        ? (sub.obtained / sub.maxMarks) * 100 >= 75
-          ? 'Very good performance'
-          : (sub.obtained / sub.maxMarks) * 100 >= 50
-          ? 'Good progress'
-          : (sub.obtained / sub.maxMarks) * 100 >= 32
-          ? 'Needs regular practice'
-          : 'Needs remedial attention'
-        : '-';
-
-    if (hasBreakdown) {
-      const b = sub.breakdown;
-      const isHindi = sub.name.toLowerCase() === 'hindi';
-      let iaText = '-';
-      let theoryText = '-';
-
-      if (b) {
-        if (isC9 && isHindi) {
-          const l = b.listening ?? 0;
-          const s = b.speaking ?? 0;
-          const p = b.project ?? 0;
-          const iaSum = (typeof l === 'number' ? l : 0) + (typeof s === 'number' ? s : 0) + (typeof p === 'number' ? p : 0);
-          iaText = `${iaSum} / 55`;
-          theoryText = `${b.saExam ?? '-'} / 45`;
-        } else {
-          const pp = b.penPaper ?? 0;
-          const ma = b.multipleAssessment ?? 0;
-          const se = b.subjectEnrichment ?? 0;
-          const pf = b.portfolio ?? 0;
-          const fallbackSum = (typeof pp === 'number' ? pp : 0) + (typeof ma === 'number' ? ma : 0) + (typeof se === 'number' ? se : 0) + (typeof pf === 'number' ? pf : 0);
-          const iaSum = b.internalMarks !== undefined && b.internalMarks !== null ? b.internalMarks : fallbackSum;
-          iaText = `${iaSum} / 20`;
-          theoryText = `${b.writtenExam ?? '-'} / 80`;
-        }
+    if (
+      detail.internalObtained !== undefined &&
+      detail.internalMax &&
+      detail.internalMax > 0
+    ) {
+      internalLabel = `${detail.internalObtained}/${detail.internalMax}`;
+      writtenLabel = `${detail.mainObtained ?? '-'}/${detail.mainMax || detail.maxMarks}`;
+    } else if (bd) {
+      if (isClass9 && isHindi) {
+        const allAb = bd.listening === 'AB' && bd.speaking === 'AB' && bd.project === 'AB';
+        const list = typeof bd.listening === 'number' ? bd.listening : 0;
+        const spk = typeof bd.speaking === 'number' ? bd.speaking : 0;
+        const prj = typeof bd.project === 'number' ? bd.project : 0;
+        const intTot = allAb ? 'AB' : list + spk + prj;
+        internalLabel = `${intTot}/${detail.internalMax || 55}`;
+        writtenLabel = `${bd.saExam ?? '-'}/${detail.mainMax || 45}`;
+      } else {
+        const isCs =
+          detail.name.toLowerCase() === 'computer science' ||
+          detail.name.toLowerCase() === 'cs';
+        const hasAny4Part =
+          bd.penPaper !== undefined ||
+          bd.multipleAssessment !== undefined ||
+          bd.subjectEnrichment !== undefined ||
+          bd.portfolio !== undefined;
+        const all4PartAB =
+          bd.penPaper === 'AB' &&
+          bd.multipleAssessment === 'AB' &&
+          bd.subjectEnrichment === 'AB' &&
+          bd.portfolio === 'AB';
+        const pp = typeof bd.penPaper === 'number' ? bd.penPaper : 0;
+        const ma = typeof bd.multipleAssessment === 'number' ? bd.multipleAssessment : 0;
+        const se = typeof bd.subjectEnrichment === 'number' ? bd.subjectEnrichment : 0;
+        const pf = typeof bd.portfolio === 'number' ? bd.portfolio : 0;
+        const sum4Part = pp + ma + se + pf;
+        const intTot =
+          !isCs && hasAny4Part
+            ? all4PartAB
+              ? 'AB'
+              : sum4Part
+            : bd.internalMarks !== undefined && bd.internalMarks !== null
+            ? bd.internalMarks
+            : sum4Part;
+        internalLabel = `${intTot}/${detail.internalMax || 20}`;
+        writtenLabel = `${bd.writtenExam ?? '-'}/${detail.mainMax || 80}`;
       }
-
-      return [
-        (idx + 1).toString(),
-        sub.name,
-        iaText,
-        theoryText,
-        sub.obtained === 'AB' ? 'AB' : sub.obtained !== null ? sub.obtained.toString() : '-',
-        sub.grade,
-        sub.status,
-        subRemark,
-      ];
     }
 
+    const markStr =
+      detail.obtained === 'AB'
+        ? 'AB'
+        : detail.obtained !== null && detail.obtained !== undefined
+        ? String(detail.obtained)
+        : '-';
+    const remarkText =
+      detail.remark && detail.remark.trim().length > 0
+        ? detail.remark.trim()
+        : getDefaultSubjectRemark(detail.obtained, detail.maxMarks);
+
     return [
-      (idx + 1).toString(),
-      sub.name,
-      sub.maxMarks.toString(),
-      sub.passMarks.toString(),
-      sub.obtained === 'AB' ? 'AB (Absent)' : sub.obtained !== null ? sub.obtained.toString() : '-',
-      sub.grade,
-      sub.status,
-      subRemark,
+      String(idx + 1),
+      getPtSubjectDisplayName(detail.name),
+      internalLabel,
+      writtenLabel,
+      String(detail.maxMarks),
+      markStr,
+      detail.grade,
+      remarkText,
     ];
   });
 
-  autoTable(doc, {
-    startY: startY + 30,
-    margin: { left: 12, right: 12 },
-    head: tableHead,
-    body: tableBody,
-    theme: 'grid',
-    headStyles: {
-      fillColor: [30, 41, 59],
-      textColor: [255, 255, 255],
-      fontStyle: 'bold',
-      fontSize: 7.5,
-      halign: 'center',
+  const marksTableEndY = renderDoubleBorderedAptosTable(doc, {
+    startY: studentTableEndY + 5.5,
+    marginX: tableMarginX,
+    tableWidth,
+    fontSizePt: 10.0,
+    cellPadding: { top: 2.0, bottom: 2.0, left: 1.5, right: 1.5 },
+    head: [
+      [
+        'SL.\nNO.',
+        'NAME OF THE SUBJECT',
+        'INTERNAL',
+        'EXAM',
+        'MAX',
+        'OBTAINED',
+        'GRADE',
+        'REMARKS',
+      ],
+    ],
+    body: saRows,
+    columnStyles: {
+      0: { cellWidth: 11.0, halign: 'center' },
+      1: { cellWidth: 38.0, halign: 'center' },
+      2: { cellWidth: 18.0, halign: 'center' },
+      3: { cellWidth: 16.0, halign: 'center' },
+      4: { cellWidth: 12.0, halign: 'center' },
+      5: { cellWidth: 19.0, halign: 'center' },
+      6: { cellWidth: 14.0, halign: 'center' },
+      7: { cellWidth: 54.0, halign: 'left' },
     },
-    bodyStyles: {
-      fontSize: 7.5,
-      textColor: [15, 23, 42],
-    },
-    columnStyles: hasBreakdown
-      ? {
-          0: { halign: 'center', cellWidth: 7 },
-          1: { halign: 'left', cellWidth: 28 },
-          2: { halign: 'center', cellWidth: 20 },
-          3: { halign: 'center', cellWidth: 20 },
-          4: { halign: 'center', cellWidth: 18, fontStyle: 'bold' },
-          5: { halign: 'center', cellWidth: 13, fontStyle: 'bold' },
-          6: { halign: 'center', cellWidth: 16 },
-          7: { halign: 'left' },
-        }
-      : {
-          0: { halign: 'center', cellWidth: 8 },
-          1: { halign: 'left', cellWidth: 30 },
-          2: { halign: 'center', cellWidth: 15 },
-          3: { halign: 'center', cellWidth: 15 },
-          4: { halign: 'center', cellWidth: 20, fontStyle: 'bold' },
-          5: { halign: 'center', cellWidth: 14, fontStyle: 'bold' },
-          6: { halign: 'center', cellWidth: 18 },
-          7: { halign: 'left' },
-        },
   });
 
-  // Summary box
-  const finalY = (doc as any).lastAutoTable.finalY + 5;
+  // 5. Table 3: Summary Strip (TOTAL / PERCENTAGE / GRADE)
+  const pctFormatted = formatPtPercentage(result.totalObtained, result.totalMax);
+  const summaryTableEndY = renderDoubleBorderedAptosTable(doc, {
+    startY: marksTableEndY + 5.5,
+    marginX: tableMarginX,
+    tableWidth,
+    fontSizePt: 10.5,
+    cellPadding: { top: 1.9, bottom: 1.9, left: 2.2, right: 2.2 },
+    columnStyles: {
+      0: { cellWidth: 25.5, halign: 'left' },
+      1: { cellWidth: 23.7, halign: 'center' },
+      2: { cellWidth: 34.6, halign: 'center' },
+      3: { cellWidth: 43.7, halign: 'center' },
+      4: { cellWidth: 29.1, halign: 'left' },
+      5: { cellWidth: 25.4, halign: 'center' },
+    },
+    body: [
+      [
+        'TOTAL:',
+        `${result.totalObtained}/${result.totalMax}`,
+        'PERCENTAGE:',
+        pctFormatted,
+        'GRADE:',
+        result.grade,
+      ],
+    ],
+  });
 
-  doc.setFillColor(241, 245, 249);
-  doc.rect(12, finalY, pageWidth - 24, 22, 'F');
-  doc.setDrawColor(203, 213, 225);
-  doc.rect(12, finalY, pageWidth - 24, 22, 'S');
+  // 6. Table 4: Class Teacher's Remarks Box
+  const hasAnyMarks = result.subjectDetails.some(
+    (s) => s.obtained !== null && s.obtained !== undefined
+  );
+  const teacherRemarkText =
+    student.customRemarks && student.customRemarks.trim().length > 0
+      ? student.customRemarks.trim()
+      : hasAnyMarks
+      ? getDefaultClassTeacherRemark(result.percentage, result.status)
+      : '';
 
-  doc.setFontSize(8.5);
-  doc.setFont('helvetica', 'bold');
-  doc.text('Total Marks Obtained:', 16, finalY + 6);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`${result.totalObtained} / ${result.totalMax}`, 56, finalY + 6);
+  renderDoubleBorderedAptosTable(doc, {
+    startY: summaryTableEndY + 5.5,
+    marginX: tableMarginX,
+    tableWidth,
+    fontSizePt: 10.5,
+    cellPadding: { top: 2.1, bottom: 2.1, left: 2.2, right: 2.2 },
+    columnStyles: {
+      0: { cellWidth: 60.0, halign: 'left' },
+      1: { cellWidth: 122.0, halign: 'left' },
+    },
+    body: [['CLASS TEACHER’S REMARKS:', teacherRemarkText]],
+  });
 
-  doc.setFont('helvetica', 'bold');
-  doc.text('Overall Percentage:', 16, finalY + 12);
-  doc.setFont('helvetica', 'normal');
-  doc.text(`${result.percentage.toFixed(2)}%`, 56, finalY + 12);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Overall Grade:', 16, finalY + 18);
-  doc.setFont('helvetica', 'normal');
-  doc.text(result.grade, 56, finalY + 18);
-
-  const sumCol2 = pageWidth / 2 + 10;
-  doc.setFont('helvetica', 'bold');
-  doc.text('Result Status:', sumCol2, finalY + 6);
-
-  const isPass = result.status === 'PASS';
-  doc.setTextColor(isPass ? 34 : 220, isPass ? 197 : 38, isPass ? 94 : 38);
-  doc.text(result.status, sumCol2 + 25, finalY + 6);
-  doc.setTextColor(15, 23, 42);
-
-  doc.setFont('helvetica', 'bold');
-  doc.text('Class Rank:', sumCol2, finalY + 12);
-  doc.setFont('helvetica', 'normal');
-  doc.text(result.rank ? `#${result.rank}` : 'N/A', sumCol2 + 25, finalY + 12);
-
-  // Class Teacher's Remarks
-  const remarkY = finalY + 28;
-  doc.setFont('helvetica', 'bold');
-  doc.text("Class Teacher's Remarks:", 12, remarkY);
-  doc.setFont('helvetica', 'italic');
-  doc.setFontSize(8);
-  const defaultRemark =
-    result.status === 'PASS'
-      ? 'Consistent academic progress and sincere effort demonstrated throughout the term.'
-      : 'Satisfactory effort. Needs focused attention on core subjects.';
-  doc.text(student.customRemarks || defaultRemark, 52, remarkY);
-
-  // Signatures - Evenly spaced across Left, Center, and Right (Font Size 12)
-  const sigY = pageHeight - 28;
-  doc.setLineWidth(0.4);
-  doc.setDrawColor(100, 116, 139);
-  doc.setFont('helvetica', 'bold');
-  doc.setFontSize(12);
-  doc.setTextColor(15, 23, 42);
-
-  // Left: Signature of Class Teacher
-  doc.line(16, sigY, 60, sigY);
-  doc.text('Signature of', 38, sigY + 5, { align: 'center' });
-  doc.text('Class Teacher', 38, sigY + 10, { align: 'center' });
-
-  // Center: Signature of Principal with Seal
-  doc.line(pageWidth / 2 - 24, sigY, pageWidth / 2 + 24, sigY);
-  doc.text('Signature of', pageWidth / 2, sigY + 5, { align: 'center' });
-  doc.text('Principal with Seal', pageWidth / 2, sigY + 10, { align: 'center' });
-
-  // Right: Signature of Parent / Guardian
-  doc.line(pageWidth - 60, sigY, pageWidth - 16, sigY);
-  doc.text('Signature of', pageWidth - 38, sigY + 5, { align: 'center' });
-  doc.text('Parent / Guardian', pageWidth - 38, sigY + 10, { align: 'center' });
+  // 7. Page 2: Centered Grading System Table & Symmetrical 3-Column Signatures Row
+  renderGradingAndSignaturesSecondPage(doc);
 }
 
 export function generateSingleReportCardPDF(
@@ -744,7 +887,7 @@ export function downloadSinglePDF(exam: ExamInfo, result: ComputedStudentResult)
 
 /**
  * Generates a SINGLE combined multi-page PDF containing all student report cards.
- * Easy for printing all report cards in one continuous print job!
+ * Easy for printing all report cards in one continuous A4 print job!
  */
 export function downloadAllReportCardsSinglePDF(
   exam: ExamInfo,
@@ -767,7 +910,9 @@ export function downloadAllReportCardsSinglePDF(
   });
 
   const fileName = customPdfName
-    ? `${customPdfName}.pdf`
+    ? customPdfName.endsWith('.pdf')
+      ? customPdfName
+      : `${customPdfName}.pdf`
     : `All_ReportCards_${exam.examName.replace(/\s+/g, '_')}_${results.length}_Students.pdf`;
 
   doc.save(fileName);
@@ -792,7 +937,11 @@ export async function downloadAllPDFsAsZip(
   const url = URL.createObjectURL(zipBlob);
   const a = document.createElement('a');
   a.href = url;
-  a.download = customZipName ? `${customZipName}.zip` : `ReportCards_${exam.examName.replace(/\s+/g, '_')}.zip`;
+  a.download = customZipName
+    ? customZipName.endsWith('.zip')
+      ? customZipName
+      : `${customZipName}.zip`
+    : `ReportCards_${exam.examName.replace(/\s+/g, '_')}.zip`;
   document.body.appendChild(a);
   a.click();
   document.body.removeChild(a);

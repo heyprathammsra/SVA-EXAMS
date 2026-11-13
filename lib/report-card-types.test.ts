@@ -113,9 +113,26 @@ test('PT report card helpers format PT exams, Class 6-8 (6 subjects) vs Class 9 
   assert.equal(profile.fatherNameDisplay, 'Satish');
   assert.equal(profile.motherNameDisplay, 'Reshma');
   assert.equal(profile.house, 'Sinhagad');
-  assert.equal(profile.height, '129 cm');
-  assert.equal(profile.weight, '21 kg');
+  assert.equal(profile.height, '129');
+  assert.equal(profile.weight, '21');
   assert.equal(profile.attendance, '31/31');
+
+  // Verify user-edited fatherName and motherName (even starting with Mrs.) are preserved on the report card
+  const editedProfile = getStudentPtProfile({
+    id: 'STU-2026-0031',
+    rollNo: '01',
+    name: 'Aayush Satish Nalawade',
+    admissionNo: 'ADM-031',
+    class: 'Class 6',
+    section: 'Twinkle',
+    fatherName: 'Ramesh Nalawade',
+    motherName: 'Mrs. Sunita Nalawade',
+    dob: '2014-08-15',
+    marks: {},
+  });
+  assert.equal(editedProfile.fatherNameDisplay, 'Ramesh Nalawade');
+  assert.equal(editedProfile.motherNameDisplay, 'Mrs. Sunita Nalawade');
+  assert.equal(editedProfile.dobDisplay, '15/08/2014');
 });
 
 test('evaluateCustomFormula handles standard SUM and custom alias expressions', () => {
@@ -568,6 +585,44 @@ test('all formula presets (SUM, BEST_5, BEST(5), BEST(6), SUM_MAIN, excluded sub
   );
   assert.equal(res6Sub.totalObtained, 645 - 92);
   assert.equal(res6Sub.totalMax, 600);
+});
+
+test('excluded subject fails or AB do not mark student FAIL/ABSENT, and component summaries compute dynamic denominators', async () => {
+  const { computeSubjectComponentSummary } = await import('./report-card-types');
+  const subjects: SubjectConfig[] = [
+    { name: 'English', maxMarks: 50, passMarks: 17, includedInTotal: true, components: [
+      { key: 'internalMarks', label: 'Internal', maxMarks: 15, isMainExam: false },
+      { key: 'writtenExam', label: 'Written', maxMarks: 35, isMainExam: true },
+    ]},
+    { name: 'Optional GK', maxMarks: 50, passMarks: 17, includedInTotal: false },
+  ];
+  const student: StudentReportRow = {
+    id: 'STU-EX-1',
+    rollNo: '01',
+    name: 'Test Student',
+    admissionNo: 'ADM-EX',
+    class: 'Class 6',
+    section: 'Sparkle',
+    marks: { English: 42, 'Optional GK': 'AB' },
+    breakdowns: { English: { internalMarks: 13, writtenExam: 29 } },
+  };
+  const res = computeStudentResult(student, subjects, 'SUM');
+  assert.equal(res.status, 'PASS');
+  assert.equal(res.totalObtained, 42);
+  assert.equal(res.totalMax, 50);
+  assert.equal(res.subjectDetails[0].internalObtained, 13);
+  assert.equal(res.subjectDetails[0].internalMax, 15);
+  assert.equal(res.subjectDetails[0].mainObtained, 29);
+  assert.equal(res.subjectDetails[0].mainMax, 35);
+
+  const summary = computeSubjectComponentSummary('English', subjects[0].components, student.breakdowns?.English);
+  assert.deepEqual(summary, {
+    internalObtained: 13,
+    internalMax: 15,
+    mainObtained: 29,
+    mainMax: 35,
+    hasInternalSplit: true,
+  });
 });
 
 

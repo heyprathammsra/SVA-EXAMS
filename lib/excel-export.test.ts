@@ -235,5 +235,115 @@ describe('Reference Sheet Format Excel Export (1FuU-gS2AxSG81nDnwSOL5NFlV4PlZ99t
     const stylesXml = await zip.file('xl/styles.xml')!.async('string');
     assert.ok(stylesXml.includes('<left style="thin"><color rgb="FF000000"/></left>'));
   });
+
+  it('uses ONLY ONE header row for PT Consolidated sheets (no redundant 2-row header)', async () => {
+    const { generateConsolidatedWorkbookBytes } = await import('./excel-export');
+    const ptExamConfig: ExamConfig = {
+      id: 'PT-1',
+      name: 'PT-1 (Periodic Test 1)',
+      code: 'PT-1',
+      totalFormula: 'SUM',
+      subjects: [
+        'English',
+        'Hindi',
+        'Marathi',
+        'Maths',
+        'Science',
+        'Social Science',
+        'Computer Science',
+      ].map((name) => ({
+        name,
+        maxMarks: 25,
+        passMarks: 9,
+      })),
+    };
+
+    const { bytes } = await generateConsolidatedWorkbookBytes({
+      students: ALL_SVA_STUDENTS,
+      examConfig: ptExamConfig,
+      examId: 'PT-1',
+      classScope: 'Diamond',
+    });
+
+    const wb = XLSX.read(bytes, { type: 'array', cellFormula: true });
+    const conWs = wb.Sheets['Consolidated'];
+    const conAoa = XLSX.utils.sheet_to_json(conWs, { header: 1, defval: '' }) as (string | number)[][];
+
+    // Row 4 (index 3) is the ONLY header row
+    assert.deepEqual(conAoa[3], [
+      'ROLL NO',
+      'NAME OF THE STUDENTS',
+      'ENGLISH (25)',
+      'HINDI (25)',
+      'MARATHI (25)',
+      'MATHS (25)',
+      'SCIENCE (25)',
+      'SOCIAL SCIENCE (25)',
+      'COMPUTER SCIENCE (25)',
+      'TOTAL (175)',
+      'PCT (%)',
+      'GRADE',
+    ]);
+    // Row 5 (index 4) is immediately the first student row!
+    assert.equal(conAoa[4][0], 1);
+    assert.equal(conAoa[4][1], 'Anjali Sandip Chavan');
+    assert.equal(conWs['J5']?.f, 'SUM(C5,D5,E5,F5,G5,H5,I5)');
+  });
+
+  it('emits dynamic formulas for BEST_5, subset brackets, and numeric-only for SUM_MAIN without invalid SUM', async () => {
+    const { generateConsolidatedWorkbookBytes } = await import('./excel-export');
+
+    // 1. BEST_5 uses LARGE formulas & 500 max denominator
+    const best5Cfg: ExamConfig = {
+      ...TEST_EXAM_CONFIG,
+      totalFormula: 'BEST_5',
+    };
+    const { bytes: best5Bytes } = await generateConsolidatedWorkbookBytes({
+      students: ALL_SVA_STUDENTS,
+      examConfig: best5Cfg,
+      examId: 'SA-1',
+      classScope: 'Diamond',
+    });
+    const best5Wb = XLSX.read(best5Bytes, { type: 'array', cellFormula: true });
+    const best5Res = best5Wb.Sheets['Result Analysis'];
+    assert.ok(best5Res['J2']?.f?.includes('LARGE(C2:I2,1)'));
+    assert.equal(best5Res['K2']?.f, 'ROUND(J2/500*100,2)');
+
+    // 2. Bracket subset excludes CS from SUM
+    const subsetCfg: ExamConfig = {
+      ...TEST_EXAM_CONFIG,
+      totalFormula: 'CUSTOM',
+      customFormula: '[English] + [Hindi] + [Marathi] + [Maths] + [Science] + [Social Science]',
+    };
+    const { bytes: subBytes } = await generateConsolidatedWorkbookBytes({
+      students: ALL_SVA_STUDENTS,
+      examConfig: subsetCfg,
+      examId: 'SA-1',
+      classScope: 'Diamond',
+    });
+    const subWb = XLSX.read(subBytes, { type: 'array', cellFormula: true });
+    const subCon = subWb.Sheets['Consolidated'];
+    const subConAoa = XLSX.utils.sheet_to_json(subCon, { header: 1, defval: '' }) as (string | number)[][];
+    assert.equal(subConAoa[4][47], 'GRAND TOTAL 600');
+    assert.equal(subCon['AV6']?.f, 'SUM(H6,N6,U6,AB6,AI6,AP6)');
+    assert.equal(subCon['AW6']?.f, 'AV6/6');
+
+    // 3. Complex SUM_MAIN omits misleading SUM() formula while preserving exact computed numeric value
+    const mainOnlyCfg: ExamConfig = {
+      ...TEST_EXAM_CONFIG,
+      totalFormula: 'CUSTOM',
+      customFormula: 'SUM_MAIN',
+    };
+    const { bytes: mainBytes } = await generateConsolidatedWorkbookBytes({
+      students: ALL_SVA_STUDENTS,
+      examConfig: mainOnlyCfg,
+      examId: 'SA-1',
+      classScope: 'Diamond',
+    });
+    const mainWb = XLSX.read(mainBytes, { type: 'array', cellFormula: true });
+    const mainCon = mainWb.Sheets['Consolidated'];
+    assert.equal(mainCon['AV6']?.f, undefined);
+    assert.ok(typeof mainCon['AV6']?.v === 'number' && mainCon['AV6'].v > 0);
+  });
 });
 

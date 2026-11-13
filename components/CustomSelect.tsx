@@ -42,36 +42,59 @@ export default function CustomSelect({
   const selectedOption =
     options.find((opt) => String(opt.value) === String(value)) || options[0];
 
+  const optionsRef = useRef(options);
+  const onChangeRef = useRef(onChange);
+  const hoveredIndexRef = useRef(hoveredIndex);
+
   useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
+    optionsRef.current = options;
+    onChangeRef.current = onChange;
+    hoveredIndexRef.current = hoveredIndex;
+  }, [options, onChange, hoveredIndex]);
+
+  useEffect(() => {
+    if (!isOpen) return;
+
+    const handleOutsideInteraction = (e: Event) => {
       if (wrapperRef.current && !wrapperRef.current.contains(e.target as Node)) {
         setIsOpen(false);
       }
     };
+
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') {
+      const opts = optionsRef.current;
+      const hIdx = hoveredIndexRef.current;
+      if (e.key === 'Escape' || e.key === 'Tab') {
         setIsOpen(false);
-      } else if (e.key === 'ArrowDown') {
+      } else if (e.key === 'ArrowDown' && opts.length > 0) {
         e.preventDefault();
-        setHoveredIndex((prev) => (prev + 1) % options.length);
-      } else if (e.key === 'ArrowUp') {
+        setHoveredIndex((prev) => (prev + 1) % opts.length);
+      } else if (e.key === 'ArrowUp' && opts.length > 0) {
         e.preventDefault();
-        setHoveredIndex((prev) => (prev - 1 + options.length) % options.length);
-      } else if (e.key === 'Enter' && hoveredIndex >= 0 && hoveredIndex < options.length) {
+        setHoveredIndex((prev) => (prev - 1 + opts.length) % opts.length);
+      } else if (e.key === 'Enter' && hIdx >= 0 && hIdx < opts.length) {
         e.preventDefault();
-        onChange(String(options[hoveredIndex].value));
+        onChangeRef.current(String(opts[hIdx].value));
         setIsOpen(false);
       }
     };
-    if (isOpen) {
-      document.addEventListener('mousedown', handleClickOutside);
-      document.addEventListener('keydown', handleKeyDown);
-    }
+
+    document.addEventListener('pointerdown', handleOutsideInteraction, true);
+    document.addEventListener('mousedown', handleOutsideInteraction, true);
+    document.addEventListener('click', handleOutsideInteraction, true);
+    document.addEventListener('contextmenu', handleOutsideInteraction, true);
+    document.addEventListener('focusin', handleOutsideInteraction, true);
+    document.addEventListener('keydown', handleKeyDown);
+
     return () => {
-      document.removeEventListener('mousedown', handleClickOutside);
+      document.removeEventListener('pointerdown', handleOutsideInteraction, true);
+      document.removeEventListener('mousedown', handleOutsideInteraction, true);
+      document.removeEventListener('click', handleOutsideInteraction, true);
+      document.removeEventListener('contextmenu', handleOutsideInteraction, true);
+      document.removeEventListener('focusin', handleOutsideInteraction, true);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [isOpen, hoveredIndex, options, onChange]);
+  }, [isOpen]);
 
   return (
     <div

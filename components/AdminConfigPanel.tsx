@@ -31,12 +31,19 @@ import {
   getEffectiveExamConfigForClass,
   getClassGradeFromSection,
 } from '@/lib/report-card-types';
+import { scaleComponentsToMaxMarks } from '@/lib/erp-persistence';
 
 interface AdminConfigPanelProps {
   examConfigs: Record<string, ExamConfig>;
   activeExamId: string;
   selectedClass?: string;
   onUpdateExamConfig: (examId: string, updated: ExamConfig, classScope?: string) => void;
+  onRenameSubject?: (
+    examId: string,
+    oldName: string,
+    newName: string,
+    classScope?: string
+  ) => void;
   onCreateNewExam: (newExam: ExamConfig) => void;
   onDeleteExam: (examId: string) => void;
   onSetActiveExam: (examId: string) => void;
@@ -102,6 +109,7 @@ export default function AdminConfigPanel({
   activeExamId,
   selectedClass,
   onUpdateExamConfig,
+  onRenameSubject,
   onCreateNewExam,
   onDeleteExam,
   onSetActiveExam,
@@ -125,18 +133,48 @@ export default function AdminConfigPanel({
   const [editingExamId, setEditingExamId] = useState<string>(activeExamId);
   const [selectedSplitSubject, setSelectedSplitSubject] = useState<string>('ALL');
 
+  const [draftSubjectNames, setDraftSubjectNames] = useState<Record<number, string>>({});
+  const [draftNumbers, setDraftNumbers] = useState<Record<string, string>>({});
+
+  // Keep editingExamId synchronized if activeExamId changes in other tabs
+  const [prevActiveExamId, setPrevActiveExamId] = useState<string>(activeExamId);
+  if (prevActiveExamId !== activeExamId) {
+    setPrevActiveExamId(activeExamId);
+    setEditingExamId(activeExamId);
+    setDraftSubjectNames({});
+    setDraftNumbers({});
+  }
+
   // Class Scope state: 'ALL' (All Classes) vs 'SPECIFIC' (Specific Class)
   const [classScopeMode, setClassScopeMode] = useState<'ALL' | 'SPECIFIC'>('ALL');
   const [selectedSpecificClass, setSelectedSpecificClass] = useState<string>(
     selectedClass && selectedClass !== 'all' ? selectedClass : 'Diamond'
   );
+
+  const [prevSelectedClass, setPrevSelectedClass] = useState<string | undefined>(selectedClass);
+  if (prevSelectedClass !== selectedClass) {
+    setPrevSelectedClass(selectedClass);
+    if (selectedClass && selectedClass !== 'all') {
+      setSelectedSpecificClass(selectedClass);
+    }
+  }
+
   const activeClassScope = classScopeMode === 'ALL' ? 'ALL' : selectedSpecificClass;
+
+  const [prevScopeResetKey, setPrevScopeResetKey] = useState<string>(`${editingExamId}::${activeClassScope}`);
+  const currentScopeResetKey = `${editingExamId}::${activeClassScope}`;
+  if (prevScopeResetKey !== currentScopeResetKey) {
+    setPrevScopeResetKey(currentScopeResetKey);
+    setDraftSubjectNames({});
+    setDraftNumbers({});
+  }
 
   // Create New Exam Modal state
   const [isCreatingNew, setIsCreatingNew] = useState<boolean>(false);
   const [newExamTitle, setNewExamTitle] = useState<string>('');
   const [newExamCode, setNewExamCode] = useState<string>('');
   const [newExamDefaultMax, setNewExamDefaultMax] = useState<number>(100);
+  const [newExamMaxInput, setNewExamMaxInput] = useState<string>('100');
   const [newExamWithInternals, setNewExamWithInternals] = useState<boolean>(true);
 
   const baseConfig: ExamConfig =
@@ -146,6 +184,13 @@ export default function AdminConfigPanel({
     () => getEffectiveExamConfigForClass(baseConfig, activeClassScope),
     [baseConfig, activeClassScope]
   );
+
+  if (
+    selectedSplitSubject !== 'ALL' &&
+    !currentConfig.subjects.some((s) => s.name === selectedSplitSubject)
+  ) {
+    setSelectedSplitSubject('ALL');
+  }
 
   const handleSelectExamToEdit = (examId: string) => {
     setEditingExamId(examId);
@@ -552,21 +597,31 @@ export default function AdminConfigPanel({
     field: keyof SubjectConfig,
     value: any
   ) => {
+    const previousName = currentConfig.subjects[index]?.name;
     handleConfigChange((prev) => {
       const nextSubjects = [...prev.subjects];
       const currentSub = { ...nextSubjects[index], [field]: value };
 
       if (field === 'maxMarks' && typeof value === 'number') {
         currentSub.passMarks = Math.round(value * 0.33);
-        if (currentSub.components && currentSub.components.length === 1) {
-          currentSub.components = [
-            { ...currentSub.components[0], maxMarks: value },
-          ];
+        if (currentSub.components && currentSub.components.length > 0) {
+          currentSub.components = scaleComponentsToMaxMarks(
+            currentSub.components,
+            value
+          );
         }
       }
       nextSubjects[index] = currentSub;
       return { ...prev, subjects: nextSubjects };
     });
+    if (
+      field === 'name' &&
+      typeof value === 'string' &&
+      previousName &&
+      previousName !== value
+    ) {
+      onRenameSubject?.(baseConfig.id, previousName, value, activeClassScope);
+    }
   };
 
   const handleAddSubject = () => {
@@ -609,6 +664,8 @@ export default function AdminConfigPanel({
       showToast('Exam must have at least one subject');
       return;
     }
+    setDraftSubjectNames({});
+    setDraftNumbers({});
     handleConfigChange((prev) => ({
       ...prev,
       subjects: prev.subjects.filter((_, idx) => idx !== index),
@@ -652,28 +709,39 @@ export default function AdminConfigPanel({
       return;
     }
 
-    const pass = Math.round(newExamDefaultMax * 0.33);
+    const parsedMax = parseInt(newExamMaxInput, 10);
+    const safeDefaultMax =
+      !isNaN(parsedMax) && parsedMax > 0
+        ? Math.min(500, Math.max(5, parsedMax))
+        : Math.min(500, Math.max(5, newExamDefaultMax || 100));
+    const pass = Math.round(safeDefaultMax * 0.33);
     const newExam: ExamConfig = {
       id: code,
       code,
       name: title.includes(code) ? title : `${code} (${title})`,
       totalFormula: 'SUM',
-      subjects: PRESET_SUBJECTS.map((name) => ({
-        name,
-        maxMarks: newExamDefaultMax,
-        passMarks: pass,
-        includedInTotal: true,
-        components: newExamWithInternals
-          ? getDefaultSubjectComponents(name, code)
+      subjects: PRESET_SUBJECTS.map((name) => {
+        const baseComps = getDefaultSubjectComponents(name, code);
+        const components = newExamWithInternals
+          ? safeDefaultMax === 100
+            ? baseComps
+            : scaleComponentsToMaxMarks(baseComps, safeDefaultMax)
           : [
               {
                 key: 'writtenExam',
                 label: `${code} Main Exam`,
-                maxMarks: newExamDefaultMax,
+                maxMarks: safeDefaultMax,
                 isMainExam: true,
               },
-            ],
-      })),
+            ];
+        return {
+          name,
+          maxMarks: safeDefaultMax,
+          passMarks: pass,
+          includedInTotal: true,
+          components,
+        };
+      }),
     };
 
     onCreateNewExam(newExam);
@@ -681,6 +749,8 @@ export default function AdminConfigPanel({
     setIsCreatingNew(false);
     setNewExamTitle('');
     setNewExamCode('');
+    setNewExamDefaultMax(100);
+    setNewExamMaxInput('100');
   };
 
   const otherExams = Object.values(examConfigs).filter(
@@ -1025,12 +1095,29 @@ export default function AdminConfigPanel({
                         type="number"
                         min={1}
                         max={200}
-                        value={comp.maxMarks}
-                        onChange={(e) =>
-                          handleEditSplitRow(idx, {
-                            maxMarks: Math.max(1, parseInt(e.target.value, 10) || 0),
-                          })
-                        }
+                        value={draftNumbers[`comp-${idx}`] ?? String(comp.maxMarks)}
+                        onChange={(e) => {
+                          const raw = e.target.value;
+                          setDraftNumbers((prev) => ({ ...prev, [`comp-${idx}`]: raw }));
+                          const parsed = parseInt(raw, 10);
+                          if (raw !== '' && !isNaN(parsed) && parsed >= 1) {
+                            handleEditSplitRow(idx, {
+                              maxMarks: Math.min(200, parsed),
+                            });
+                          }
+                        }}
+                        onBlur={(e) => {
+                          const parsed = parseInt(e.target.value, 10);
+                          setDraftNumbers((prev) => {
+                            const next = { ...prev };
+                            delete next[`comp-${idx}`];
+                            return next;
+                          });
+                          const clamped = !isNaN(parsed) ? Math.min(200, Math.max(1, parsed)) : Math.max(1, comp.maxMarks || 1);
+                          if (clamped !== comp.maxMarks) {
+                            handleEditSplitRow(idx, { maxMarks: clamped });
+                          }
+                        }}
                         className="w-14 px-1.5 py-1 text-center font-mono font-medium text-slate-900 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:bg-white focus:border-slate-400"
                       />
                       <span className="text-[11px] text-slate-400">m</span>
@@ -1162,10 +1249,31 @@ export default function AdminConfigPanel({
                 >
                   <input
                     type="text"
-                    value={sub.name}
+                    value={draftSubjectNames[idx] ?? sub.name}
                     onChange={(e) =>
-                      handleSubjectChange(idx, 'name', e.target.value)
+                      setDraftSubjectNames((prev) => ({
+                        ...prev,
+                        [idx]: e.target.value,
+                      }))
                     }
+                    onBlur={() => {
+                      const rawDraft = draftSubjectNames[idx];
+                      setDraftSubjectNames((prev) => {
+                        const next = { ...prev };
+                        delete next[idx];
+                        return next;
+                      });
+                      if (rawDraft === undefined) return;
+                      const trimmed = rawDraft.trim();
+                      if (!trimmed || trimmed === sub.name) return;
+                      handleSubjectChange(idx, 'name', trimmed);
+                    }}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') {
+                        e.preventDefault();
+                        e.currentTarget.blur();
+                      }
+                    }}
                     className="flex-1 font-medium text-slate-900 bg-transparent focus:outline-none focus:bg-white px-1.5 py-1 rounded border border-transparent focus:border-slate-300"
                   />
 
@@ -1173,14 +1281,27 @@ export default function AdminConfigPanel({
                     type="number"
                     min={1}
                     max={500}
-                    value={sub.maxMarks}
-                    onChange={(e) =>
-                      handleSubjectChange(
-                        idx,
-                        'maxMarks',
-                        parseInt(e.target.value, 10) || 0
-                      )
-                    }
+                    value={draftNumbers[`sub-max-${idx}`] ?? String(sub.maxMarks)}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      setDraftNumbers((prev) => ({ ...prev, [`sub-max-${idx}`]: raw }));
+                      const parsed = parseInt(raw, 10);
+                      if (raw !== '' && !isNaN(parsed) && parsed >= 1) {
+                        handleSubjectChange(idx, 'maxMarks', Math.min(500, parsed));
+                      }
+                    }}
+                    onBlur={(e) => {
+                      const parsed = parseInt(e.target.value, 10);
+                      setDraftNumbers((prev) => {
+                        const next = { ...prev };
+                        delete next[`sub-max-${idx}`];
+                        return next;
+                      });
+                      const clamped = !isNaN(parsed) ? Math.min(500, Math.max(1, parsed)) : Math.max(1, sub.maxMarks || 100);
+                      if (clamped !== sub.maxMarks) {
+                        handleSubjectChange(idx, 'maxMarks', clamped);
+                      }
+                    }}
                     className="w-16 px-1.5 py-1 text-center font-mono font-medium text-slate-900 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:bg-white"
                   />
 
@@ -1188,14 +1309,29 @@ export default function AdminConfigPanel({
                     type="number"
                     min={0}
                     max={sub.maxMarks}
-                    value={sub.passMarks}
-                    onChange={(e) =>
-                      handleSubjectChange(
-                        idx,
-                        'passMarks',
-                        parseInt(e.target.value, 10) || 0
-                      )
-                    }
+                    value={draftNumbers[`sub-pass-${idx}`] ?? String(sub.passMarks)}
+                    onChange={(e) => {
+                      const raw = e.target.value;
+                      setDraftNumbers((prev) => ({ ...prev, [`sub-pass-${idx}`]: raw }));
+                      const parsed = parseInt(raw, 10);
+                      if (raw !== '' && !isNaN(parsed) && parsed >= 0) {
+                        handleSubjectChange(idx, 'passMarks', Math.min(sub.maxMarks, parsed));
+                      }
+                    }}
+                    onBlur={(e) => {
+                      const parsed = parseInt(e.target.value, 10);
+                      setDraftNumbers((prev) => {
+                        const next = { ...prev };
+                        delete next[`sub-pass-${idx}`];
+                        return next;
+                      });
+                      const clamped = !isNaN(parsed)
+                        ? Math.min(sub.maxMarks, Math.max(0, parsed))
+                        : Math.min(sub.maxMarks, Math.max(0, sub.passMarks || 0));
+                      if (clamped !== sub.passMarks) {
+                        handleSubjectChange(idx, 'passMarks', clamped);
+                      }
+                    }}
                     className="w-16 px-1.5 py-1 text-center font-mono font-medium text-slate-900 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:bg-white"
                   />
 
@@ -1312,11 +1448,21 @@ export default function AdminConfigPanel({
                   type="number"
                   min={5}
                   max={500}
-                  value={newExamDefaultMax}
+                  value={newExamMaxInput}
                   onChange={(e) => {
-                    const val = parseInt(e.target.value, 10) || 100;
-                    setNewExamDefaultMax(val);
-                    setNewExamWithInternals(val === 100);
+                    const raw = e.target.value;
+                    setNewExamMaxInput(raw);
+                    const val = parseInt(raw, 10);
+                    if (raw !== '' && !isNaN(val) && val >= 5 && val <= 500) {
+                      setNewExamDefaultMax(val);
+                      setNewExamWithInternals(val === 100);
+                    }
+                  }}
+                  onBlur={(e) => {
+                    const val = parseInt(e.target.value, 10);
+                    const clamped = !isNaN(val) ? Math.min(500, Math.max(5, val)) : 100;
+                    setNewExamDefaultMax(clamped);
+                    setNewExamMaxInput(String(clamped));
                   }}
                   className="w-full px-2.5 py-1.5 bg-slate-50 border border-slate-200 rounded-lg font-mono font-medium text-slate-900 focus:outline-none focus:bg-white focus:border-slate-900"
                 />

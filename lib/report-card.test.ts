@@ -87,3 +87,48 @@ test('computeClassResults assigns correct ranks', () => {
   assert.equal(results.find((r) => r.student.id === '3')?.rank, 2);
   assert.equal(results.find((r) => r.student.id === '2')?.rank, 3);
 });
+
+test('generateSingleReportCardPDF produces a 2-page A4 portrait PDF (210mm x 297mm) matching the official report card layout', async () => {
+  const { generateSingleReportCardPDF } = await import('./fast-pdf');
+  const { getPtSubjectsForClass } = await import('./report-card-types');
+
+  const student: StudentReportRow = {
+    id: 'STU-2026-0031',
+    rollNo: '01',
+    name: 'Aayush Satish Nalawade',
+    admissionNo: 'ADM-031',
+    class: 'Class 6',
+    section: 'Twinkle',
+    marks: {
+      English: 25,
+      Hindi: 25,
+      Marathi: 24,
+      Maths: 22,
+      Science: 25,
+      'Social Science': 24,
+    },
+  };
+
+  const ptResult = computeStudentResult(student, getPtSubjectsForClass('Twinkle', 25, 8));
+  const ptDoc = generateSingleReportCardPDF(
+    {
+      schoolName: 'Saraswati Vidya Academy',
+      schoolAddress: 'Village Shilatne, Maval Dist. Pune, Maharashtra 410405',
+      schoolCode: '31572',
+      affiliationNo: '1131575',
+      udiseNo: '2724100374',
+      schoolEmail: 'principal@saraswatividya.academy',
+      examName: 'PT-1',
+      examCode: 'PT-1',
+      academicSession: '2026-2027',
+      principalName: 'Principal',
+      classTeacherName: 'Class Teacher',
+    },
+    ptResult
+  );
+
+  assert.equal(ptDoc.getNumberOfPages(), 2);
+  assert.equal(Math.round(ptDoc.internal.pageSize.getWidth()), 210);
+  assert.equal(Math.round(ptDoc.internal.pageSize.getHeight()), 297);
+});
+

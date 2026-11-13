@@ -55,12 +55,13 @@
   font-display: block;
 }
 
-/* Exact Aptos font extracted from reference report card PDF */
+/* Exact Aptos font extracted from reference report card PDF with full ASCII glyph coverage */
 @font-face {
   font-family: 'Aptos';
   src: local('Aptos'),
        local('Aptos Regular'),
        local('Aptos Display'),
+       url('/fonts/aptos-complete.ttf') format('truetype'),
        url('/fonts/aptos-subset.ttf') format('truetype');
   font-weight: 100 900;
   font-style: normal;
@@ -70,6 +71,7 @@
 .font-aptos {
   font-family: 'Aptos', 'Carlito', 'Calibri', 'Segoe UI', -apple-system, sans-serif !important;
   font-synthesis: none;
+  word-spacing: 1.5px;
 }
 
 .font-aptos.font-bold,
@@ -80,10 +82,23 @@
 .font-aptos strong {
   font-weight: 400 !important;
   -webkit-text-stroke: 0.35px currentColor;
+  word-spacing: 1.5px;
 }
 
-/* Print specific styles */
+/* Print specific styles for exact A4 portrait (210mm x 297mm) */
 @media print {
+  @page {
+    size: A4 portrait;
+    margin: 0;
+  }
+  html, body {
+    width: 210mm;
+    margin: 0 !important;
+    padding: 0 !important;
+    background: #ffffff !important;
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
   body * {
     visibility: hidden;
   }
@@ -94,17 +109,33 @@
     position: absolute;
     left: 0;
     top: 0;
-    width: 100%;
-    margin: 0;
-    padding: 0;
+    width: 210mm !important;
+    max-width: 210mm !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    gap: 0 !important;
+    transform: none !important;
     box-shadow: none !important;
+  }
+  .a4-report-card-sheet {
+    width: 210mm !important;
+    height: 297mm !important;
+    min-height: 297mm !important;
+    max-height: 297mm !important;
+    box-sizing: border-box !important;
+    overflow: hidden !important;
+    box-shadow: none !important;
+    border: none !important;
+    margin: 0 !important;
+    page-break-after: always;
+    break-after: page;
+  }
+  .a4-report-card-sheet:last-child {
+    page-break-after: auto;
+    break-after: auto;
   }
   .no-print {
     display: none !important;
-  }
-  @page {
-    size: A4 portrait;
-    margin: 10mm;
   }
 }
 
