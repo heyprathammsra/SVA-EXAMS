@@ -40,6 +40,7 @@ export default function AuthGateShell() {
 
   return (
     <SchoolErpApp
+      key={`${session.role}-${session.username}`}
       userRole={session.role}
       initialTeacherProfile={session.teacherProfile}
     />

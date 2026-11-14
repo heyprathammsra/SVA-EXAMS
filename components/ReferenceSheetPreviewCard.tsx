@@ -19,6 +19,7 @@ import {
   computeCbseGrade,
   getReferenceSubjectTabName,
 } from '@/lib/excel-export';
+import { subjectsMatch } from '@/lib/teacher-permissions';
 
 interface ReferenceSheetPreviewCardProps {
   students: StudentReportRow[];
@@ -28,6 +29,8 @@ interface ReferenceSheetPreviewCardProps {
   classGrade?: string;
   subjectScope: string;
   onSubjectScopeChange?: (val: string) => void;
+  allowedSubjectNames?: string[];
+  allowConsolidated?: boolean;
 }
 
 export default function ReferenceSheetPreviewCard({
@@ -38,6 +41,8 @@ export default function ReferenceSheetPreviewCard({
   classGrade,
   subjectScope,
   onSubjectScopeChange,
+  allowedSubjectNames,
+  allowConsolidated = true,
 }: ReferenceSheetPreviewCardProps) {
   const effectiveConfig = useMemo(
     () =>
@@ -48,23 +53,37 @@ export default function ReferenceSheetPreviewCard({
   );
 
   const allReferenceSubjects = useMemo(() => {
-    return orderSubjectsLikeReferenceSheet(effectiveConfig.subjects);
-  }, [effectiveConfig.subjects]);
+    const ordered = orderSubjectsLikeReferenceSheet(effectiveConfig.subjects);
+    if (!allowedSubjectNames) return ordered;
+    return ordered.filter((s) =>
+      allowedSubjectNames.some((allowed) => subjectsMatch(allowed, s.name))
+    );
+  }, [effectiveConfig.subjects, allowedSubjectNames]);
 
   const [localTab, setLocalTab] = React.useState<string | null>(null);
 
   // Derive active preview tab directly without cascading setState in useEffect
   const activeTab = useMemo(() => {
+    if (!allowConsolidated) {
+      const fromScope = allReferenceSubjects.find(
+        (s) => s.name.toLowerCase() === (subjectScope || '').toLowerCase()
+      );
+      if (fromScope) return fromScope.name;
+      const fromLocal = allReferenceSubjects.find(
+        (s) => s.name.toLowerCase() === (localTab || '').toLowerCase()
+      );
+      return fromLocal ? fromLocal.name : allReferenceSubjects[0]?.name || '';
+    }
     if (localTab === 'result_analysis' && (subjectScope === 'consolidated' || subjectScope === 'all_consolidated' || !subjectScope)) {
       return 'result_analysis';
     }
     if (subjectScope === 'consolidated') return 'consolidated';
     if (subjectScope && subjectScope !== 'all_consolidated') return subjectScope;
     return localTab || 'consolidated';
-  }, [subjectScope, localTab]);
+  }, [allowConsolidated, allReferenceSubjects, subjectScope, localTab]);
 
-  const isConsolidated = activeTab === 'consolidated';
-  const isResultAnalysis = activeTab === 'result_analysis';
+  const isConsolidated = allowConsolidated && activeTab === 'consolidated';
+  const isResultAnalysis = allowConsolidated && activeTab === 'result_analysis';
 
   const currentSubject = useMemo(() => {
     if (isConsolidated || isResultAnalysis) return allReferenceSubjects[0];
@@ -170,7 +189,13 @@ export default function ReferenceSheetPreviewCard({
     studentResultsMap,
   ]);
 
-  if (!currentSubject) return null;
+  if (!currentSubject) {
+    return (
+      <div className="bg-white border border-slate-200/80 rounded-xl shadow-xs p-8 text-center text-xs text-slate-500">
+        No mapped subjects are available to preview for the selected class.
+      </div>
+    );
+  }
 
   const sheetRow3Title = isConsolidated
     ? 'CONSOLIDATED SHEET'
@@ -198,35 +223,39 @@ export default function ReferenceSheetPreviewCard({
 
         {/* Workbook Sheet Tabs */}
         <div className="flex items-center flex-wrap gap-1.5">
-          <button
-            type="button"
-            onClick={() => {
-              setLocalTab('consolidated');
-              onSubjectScopeChange?.('consolidated');
-            }}
-            className={`px-3 py-1 text-xs font-semibold rounded-md border transition-colors cursor-pointer ${
-              activeTab === 'consolidated'
-                ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
-                : 'bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 border-slate-200'
-            }`}
-          >
-            Consolidated Sheet
-          </button>
+          {allowConsolidated && (
+            <>
+              <button
+                type="button"
+                onClick={() => {
+                  setLocalTab('consolidated');
+                  onSubjectScopeChange?.('consolidated');
+                }}
+                className={`px-3 py-1 text-xs font-semibold rounded-md border transition-colors cursor-pointer ${
+                  activeTab === 'consolidated'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                    : 'bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 border-slate-200'
+                }`}
+              >
+                Consolidated Sheet
+              </button>
 
-          <button
-            type="button"
-            onClick={() => {
-              setLocalTab('result_analysis');
-              onSubjectScopeChange?.('consolidated');
-            }}
-            className={`px-3 py-1 text-xs font-semibold rounded-md border transition-colors cursor-pointer ${
-              activeTab === 'result_analysis'
-                ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
-                : 'bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 border-slate-200'
-            }`}
-          >
-            Result Analysis
-          </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setLocalTab('result_analysis');
+                  onSubjectScopeChange?.('consolidated');
+                }}
+                className={`px-3 py-1 text-xs font-semibold rounded-md border transition-colors cursor-pointer ${
+                  activeTab === 'result_analysis'
+                    ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                    : 'bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 border-slate-200'
+                }`}
+              >
+                Result Analysis
+              </button>
+            </>
+          )}
 
           {allReferenceSubjects.map((sub) => {
             const isSubActive =

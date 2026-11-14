@@ -27,6 +27,7 @@ interface TeacherAccessManagerProps {
   classes: ClassDefinition[];
   subjects: string[];
   showToast?: (msg: string) => void;
+  refreshTrigger?: number;
 }
 
 const DEFAULT_SUBJECT_LIST = [
@@ -49,6 +50,7 @@ export default function TeacherAccessManager({
   classes,
   subjects,
   showToast,
+  refreshTrigger = 0,
 }: TeacherAccessManagerProps) {
   const subjectOptions = useMemo(() => {
     const merged = Array.from(new Set([...DEFAULT_SUBJECT_LIST, ...subjects])).filter(Boolean);
@@ -141,7 +143,7 @@ export default function TeacherAccessManager({
     return () => {
       active = false;
     };
-  }, []);
+  }, [refreshTrigger]);
 
   const activeTeacher = useMemo(
     () =>
@@ -566,7 +568,12 @@ export default function TeacherAccessManager({
           }}
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4 animate-in fade-in duration-150"
         >
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-[440px] p-5 space-y-4 animate-in zoom-in-95 duration-150">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label={userModalMode === 'create' ? 'New Teacher User' : 'Edit Teacher User'}
+            className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-[500px] p-5 space-y-4 animate-in zoom-in-95 duration-150"
+          >
             {/* Minimal Header */}
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <h3 className="text-sm font-semibold text-slate-900 tracking-tight">
@@ -740,7 +747,7 @@ export default function TeacherAccessManager({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-[168px] overflow-y-auto pr-0.5">
+                <div className="grid grid-cols-3 gap-2 max-h-[168px] overflow-y-auto pr-0.5">
                   {classes.map((cls) => {
                     const checked = assignedClassesInput.some(
                       (c) => c.toLowerCase() === cls.section.toLowerCase()
@@ -816,7 +823,12 @@ export default function TeacherAccessManager({
           }}
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4 animate-in fade-in duration-150"
         >
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-[440px] p-5 space-y-4 animate-in zoom-in-95 duration-150">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Map Teacher with Assigned Classes"
+            className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-[500px] p-5 space-y-4 animate-in zoom-in-95 duration-150"
+          >
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <h3 className="text-sm font-semibold text-slate-900 tracking-tight">
                 Map Teacher with Assigned Classes
@@ -903,7 +915,7 @@ export default function TeacherAccessManager({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-[168px] overflow-y-auto pr-0.5">
+                <div className="grid grid-cols-3 gap-2 max-h-[168px] overflow-y-auto pr-0.5">
                   {classes.map((cls) => {
                     const checked = mapClasses.some(
                       (c) => c.toLowerCase() === cls.section.toLowerCase()
@@ -993,7 +1005,12 @@ export default function TeacherAccessManager({
           }}
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4 animate-in fade-in duration-150"
         >
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-sm p-5 space-y-4 animate-in zoom-in-95 duration-150">
+          <div
+            role="dialog"
+            aria-modal="true"
+            aria-label="Remove Teacher User"
+            className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-sm p-5 space-y-4 animate-in zoom-in-95 duration-150"
+          >
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
               <h3 className="text-sm font-semibold text-slate-900">Remove Teacher User</h3>
               <button

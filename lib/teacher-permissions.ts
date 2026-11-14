@@ -297,3 +297,302 @@ export function canUserViewSection(
     isClassTeacherForSection(section, 'teacher', profile)
   );
 }
+
+export function renameSectionInTeacherProfile(
+  profile: TeacherProfile,
+  oldSection: string,
+  newSection: string
+): TeacherProfile {
+  const cleanOld = (oldSection || '').trim();
+  const cleanNew = (newSection || '').trim();
+  if (!cleanOld || !cleanNew || sectionsMatch(cleanOld, cleanNew)) {
+    return profile;
+  }
+
+  let changed = false;
+  const nextAssignedClasses: string[] = [];
+  const seenClasses = new Set<string>();
+  for (const cls of profile.assignedClasses || []) {
+    const mapped = sectionsMatch(cls, cleanOld) ? cleanNew : cls;
+    if (mapped !== cls) changed = true;
+    const key = mapped.toLowerCase();
+    if (!seenClasses.has(key)) {
+      seenClasses.add(key);
+      nextAssignedClasses.push(mapped);
+    }
+  }
+
+  const nextAssignments: TeacherClassSubjectAssignment[] = [];
+  const seenAssign = new Set<string>();
+  for (const assign of profile.assignments || []) {
+    const mappedSection = sectionsMatch(assign.section, cleanOld) ? cleanNew : assign.section;
+    if (mappedSection !== assign.section) changed = true;
+    const key = `${mappedSection.toLowerCase()}::${normalizeSubjectKey(assign.subject)}`;
+    if (!seenAssign.has(key)) {
+      seenAssign.add(key);
+      nextAssignments.push({
+        section: mappedSection,
+        subject: assign.subject,
+      });
+    }
+  }
+
+  let nextClassTeacherOf = profile.classTeacherOf;
+  if (profile.classTeacherOf && sectionsMatch(profile.classTeacherOf, cleanOld)) {
+    nextClassTeacherOf = cleanNew;
+    changed = true;
+  }
+
+  if (!changed) return profile;
+
+  return {
+    ...profile,
+    assignedClasses: nextAssignedClasses,
+    assignments: nextAssignments,
+    classTeacherOf: nextClassTeacherOf,
+    updatedAt: Date.now(),
+  };
+}
+
+export function removeSectionFromTeacherProfile(
+  profile: TeacherProfile,
+  sectionToRemove: string
+): TeacherProfile {
+  const cleanTarget = (sectionToRemove || '').trim();
+  if (!cleanTarget) return profile;
+
+  const nextAssignedClasses = (profile.assignedClasses || []).filter(
+    (cls) => !sectionsMatch(cls, cleanTarget)
+  );
+  const nextAssignments = (profile.assignments || []).filter(
+    (assign) => !sectionsMatch(assign.section, cleanTarget)
+  );
+  const nextClassTeacherOf =
+    profile.classTeacherOf && sectionsMatch(profile.classTeacherOf, cleanTarget)
+      ? null
+      : profile.classTeacherOf;
+
+  const changed =
+    nextAssignedClasses.length !== (profile.assignedClasses || []).length ||
+    nextAssignments.length !== (profile.assignments || []).length ||
+    nextClassTeacherOf !== profile.classTeacherOf;
+
+  if (!changed) return profile;
+
+  return {
+    ...profile,
+    assignedClasses: nextAssignedClasses,
+    assignments: nextAssignments,
+    classTeacherOf: nextClassTeacherOf,
+    updatedAt: Date.now(),
+  };
+}
+
+export function renameSubjectInTeacherProfile(
+  profile: TeacherProfile,
+  oldSubject: string,
+  newSubject: string
+): TeacherProfile {
+  const cleanOld = (oldSubject || '').trim();
+  const cleanNew = (newSubject || '').trim();
+  if (!cleanOld || !cleanNew || cleanOld.toLowerCase() === cleanNew.toLowerCase()) {
+    return profile;
+  }
+
+  let changed = false;
+  let nextAssignedSubject = profile.assignedSubject;
+  if (profile.assignedSubject.trim().toLowerCase() === cleanOld.toLowerCase()) {
+    nextAssignedSubject = cleanNew;
+    changed = true;
+  }
+
+  const nextAssignments: TeacherClassSubjectAssignment[] = [];
+  const seenAssign = new Set<string>();
+  for (const assign of profile.assignments || []) {
+    const mappedSubject =
+      assign.subject.trim().toLowerCase() === cleanOld.toLowerCase()
+        ? cleanNew
+        : assign.subject;
+    if (mappedSubject !== assign.subject) changed = true;
+    const key = `${assign.section.toLowerCase()}::${normalizeSubjectKey(mappedSubject)}`;
+    if (!seenAssign.has(key)) {
+      seenAssign.add(key);
+      nextAssignments.push({
+        section: assign.section,
+        subject: mappedSubject,
+      });
+    }
+  }
+
+  if (!changed) return profile;
+
+  return {
+    ...profile,
+    assignedSubject: nextAssignedSubject,
+    assignments: nextAssignments,
+    updatedAt: Date.now(),
+  };
+}
+
+export interface StudentMarksShape {
+  id: string;
+  section: string;
+  marks: Record<string, number | 'AB' | null>;
+  breakdowns?: Record<string, Record<string, number | 'AB' | null | undefined>>;
+}
+
+/**
+ * Ensures client-side bulk imports / pastes never mutate marks or breakdowns
+ * for subjects/classes that the active teacher is not permitted to edit.
+ */
+export function filterImportedStudentsForRole<T extends StudentMarksShape>(params: {
+  previousStudents: T[];
+  candidateStudents: T[];
+  role: 'admin' | 'teacher';
+  teacherProfile?: TeacherProfile | null;
+}): { students: T[]; appliedMarkUpdates: number; blockedUpdates: number } {
+  const { previousStudents, candidateStudents, role, teacherProfile } = params;
+  if (role === 'admin') {
+    return {
+      students: candidateStudents,
+      appliedMarkUpdates: candidateStudents.length,
+      blockedUpdates: 0,
+    };
+  }
+
+  const candidateMap = new Map<string, T>();
+  for (const stu of candidateStudents) {
+    candidateMap.set(stu.id, stu);
+  }
+
+  let appliedMarkUpdates = 0;
+  let blockedUpdates = 0;
+
+  const students = previousStudents.map((prevStu) => {
+    const incoming = candidateMap.get(prevStu.id);
+    if (!incoming) return prevStu;
+
+    const nextMarks: Record<string, number | 'AB' | null> = { ...prevStu.marks };
+    const nextBreakdowns = prevStu.breakdowns ? { ...prevStu.breakdowns } : {};
+    let rowChanged = false;
+
+    const allSubjects = new Set([
+      ...Object.keys(prevStu.marks || {}),
+      ...Object.keys(incoming.marks || {}),
+      ...Object.keys(prevStu.breakdowns || {}),
+      ...Object.keys(incoming.breakdowns || {}),
+    ]);
+
+    for (const subName of allSubjects) {
+      const incomingMark = incoming.marks?.[subName];
+      const prevMark = prevStu.marks?.[subName];
+      const incomingBd = incoming.breakdowns?.[subName];
+      const prevBd = prevStu.breakdowns?.[subName];
+
+      const markChanged = incomingMark !== prevMark;
+      const bdChanged = JSON.stringify(incomingBd ?? null) !== JSON.stringify(prevBd ?? null);
+      if (!markChanged && !bdChanged) continue;
+
+      if (!canUserEditSubjectInClass(prevStu.section, subName, 'teacher', teacherProfile)) {
+        blockedUpdates++;
+        continue;
+      }
+
+      if (markChanged) {
+        nextMarks[subName] = incomingMark ?? null;
+        rowChanged = true;
+      }
+      if (bdChanged) {
+        if (incomingBd) {
+          nextBreakdowns[subName] = incomingBd;
+        } else {
+          delete nextBreakdowns[subName];
+        }
+        rowChanged = true;
+      }
+      appliedMarkUpdates++;
+    }
+
+    if (!rowChanged) return prevStu;
+    return {
+      ...prevStu,
+      marks: nextMarks,
+      breakdowns: Object.keys(nextBreakdowns).length > 0 ? nextBreakdowns : prevStu.breakdowns,
+    };
+  });
+
+  return { students, appliedMarkUpdates, blockedUpdates };
+}
+
+/**
+ * Resolves the initial class section for a teacher session:
+ * 1. Keeps candidateSection if the teacher can edit at least one subject in it.
+ * 2. Otherwise prefers the first section where the teacher has editable mapped subjects.
+ * 3. Otherwise keeps candidateSection if viewable (Class Teacher view-only).
+ * 4. Otherwise falls back to the first viewable section, or '__NONE__' if unmapped.
+ */
+export function resolveInitialTeacherSection(
+  allSections: string[],
+  candidateSection: string | null | undefined,
+  profile: TeacherProfile | null | undefined,
+  subjectNames: string[]
+): string {
+  const visible = getVisibleSectionsForUser(allSections, 'teacher', profile);
+  if (visible.length === 0) return '__NONE__';
+
+  const editable = visible.filter(
+    (sec) => getEditableSubjectsForClass(subjectNames, sec, 'teacher', profile).length > 0
+  );
+
+  if (candidateSection && candidateSection !== 'all') {
+    const matchingEditable = editable.find((sec) => sectionsMatch(sec, candidateSection));
+    if (matchingEditable) return matchingEditable;
+  }
+
+  if (editable.length > 0) {
+    return editable[0];
+  }
+
+  if (candidateSection && candidateSection !== 'all') {
+    const matchingVisible = visible.find((sec) => sectionsMatch(sec, candidateSection));
+    if (matchingVisible) return matchingVisible;
+  }
+
+  return visible[0];
+}
+
+/**
+ * Computes default subject, remark, and export scopes for a teacher in a given class section.
+ * - Class Teacher division -> defaults to 'all' / 'all_consolidated' (all-subject view).
+ * - Subject Teacher division -> defaults to their first mapped visible subject name.
+ */
+export function getDefaultTeacherScopesForSection(params: {
+  section: string;
+  profile?: TeacherProfile | null;
+  visibleSubjectNames: string[];
+}): {
+  selectedSubject: string;
+  internalActiveSubject: string;
+  selectedRemarkScope: string;
+  exportSubjectScope: string;
+} {
+  const { section, profile, visibleSubjectNames } = params;
+  const firstSub = visibleSubjectNames[0] || '';
+  const isCt = isClassTeacherForSection(section, 'teacher', profile);
+
+  if (isCt) {
+    return {
+      selectedSubject: 'all',
+      internalActiveSubject: firstSub,
+      selectedRemarkScope: 'all',
+      exportSubjectScope: 'all_consolidated',
+    };
+  }
+
+  return {
+    selectedSubject: firstSub,
+    internalActiveSubject: firstSub,
+    selectedRemarkScope: firstSub,
+    exportSubjectScope: firstSub,
+  };
+}

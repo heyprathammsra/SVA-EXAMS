@@ -2,6 +2,9 @@ import { NextRequest, NextResponse } from 'next/server';
 import {
   deleteTeacherUser,
   listTeacherUsers,
+  syncTeacherMappingsOnClassDelete,
+  syncTeacherMappingsOnClassRename,
+  syncTeacherMappingsOnSubjectRename,
   upsertTeacherUser,
 } from '@/lib/auth';
 import { getRequestAuthSession } from '@/lib/auth-server';
@@ -101,5 +104,41 @@ export async function DELETE(req: NextRequest) {
     });
   } catch {
     return NextResponse.json({ error: 'Failed to delete teacher user' }, { status: 500 });
+  }
+}
+
+export async function PATCH(req: NextRequest) {
+  const auth = requireAdmin(req);
+  if (!auth.ok) return auth.response;
+
+  try {
+    const body = await req.json().catch(() => null);
+    if (!body || typeof body !== 'object') {
+      return NextResponse.json({ error: 'Invalid sync payload' }, { status: 400 });
+    }
+
+    if (body.action === 'renameClass') {
+      const oldSection = typeof body.oldSection === 'string' ? body.oldSection : '';
+      const newSection = typeof body.newSection === 'string' ? body.newSection : '';
+      const teachers = syncTeacherMappingsOnClassRename(oldSection, newSection);
+      return NextResponse.json({ success: true, teachers });
+    }
+
+    if (body.action === 'deleteClass') {
+      const section = typeof body.section === 'string' ? body.section : '';
+      const teachers = syncTeacherMappingsOnClassDelete(section);
+      return NextResponse.json({ success: true, teachers });
+    }
+
+    if (body.action === 'renameSubject') {
+      const oldSubject = typeof body.oldSubject === 'string' ? body.oldSubject : '';
+      const newSubject = typeof body.newSubject === 'string' ? body.newSubject : '';
+      const teachers = syncTeacherMappingsOnSubjectRename(oldSubject, newSubject);
+      return NextResponse.json({ success: true, teachers });
+    }
+
+    return NextResponse.json({ error: 'Unsupported sync action' }, { status: 400 });
+  } catch {
+    return NextResponse.json({ error: 'Failed to sync teacher mappings' }, { status: 500 });
   }
 }

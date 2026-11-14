@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
 import {
   authenticateUserCredentials,
   checkLoginRateLimit,
@@ -7,11 +9,17 @@ import {
   createSessionToken,
   DEFAULT_ADMIN_PASSWORD,
   DEFAULT_TEACHER_PASSWORD,
+  deleteTeacherUser,
   extractBearerToken,
   getConfiguredAdminPassword,
   getConfiguredTeacherPassword,
+  getTeacherProfileByUsername,
   recordLoginFailure,
   resetAllLoginRateLimits,
+  syncTeacherMappingsOnClassDelete,
+  syncTeacherMappingsOnClassRename,
+  syncTeacherMappingsOnSubjectRename,
+  upsertTeacherUser,
   verifyAdminPassword,
   verifySessionToken,
 } from './auth';
@@ -351,5 +359,54 @@ test('sanitizeAndValidateErpState enforces per-class subject mapping and Class T
   assert.equal(result.students[1].marks.Maths, 22);
   assert.equal(result.students[1].subjectRemarks?.Science, 'Twinkle Sci');
   assert.equal(result.students[1].remarks, 'Twinkle CT Remark');
+});
+
+test('upsertTeacherUser, deleteTeacherUser, and Admin class/subject rename/delete sync persist cleanly', () => {
+  const usersFile = path.join(process.cwd(), '.data', 'erp-users.json');
+  const hadBackup = fs.existsSync(usersFile);
+  const backupContent = hadBackup ? fs.readFileSync(usersFile, 'utf8') : null;
+
+  try {
+    const created = upsertTeacherUser({
+      name: 'Temp Teacher',
+      username: 'tempteacher_unit',
+      password: 'temp#2026',
+      assignedSubject: 'Maths',
+      assignedClasses: ['Sparkle', 'Topaz'],
+      classTeacherOf: 'Sparkle',
+    });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+
+    assert.equal(created.teacher.classTeacherOf, 'Sparkle');
+    assert.deepEqual(created.teacher.assignedClasses, ['Sparkle', 'Topaz']);
+
+    const renamedClass = syncTeacherMappingsOnClassRename('Sparkle', 'LotusTemp');
+    const updated1 = renamedClass.find((t) => t.username === 'tempteacher_unit');
+    assert.ok(updated1);
+    assert.equal(updated1.classTeacherOf, 'LotusTemp');
+    assert.deepEqual(updated1.assignedClasses, ['LotusTemp', 'Topaz']);
+
+    const renamedSub = syncTeacherMappingsOnSubjectRename('Maths', 'Mathematics');
+    const updated2 = renamedSub.find((t) => t.username === 'tempteacher_unit');
+    assert.ok(updated2);
+    assert.equal(updated2.assignedSubject, 'Mathematics');
+
+    const deletedClass = syncTeacherMappingsOnClassDelete('LotusTemp');
+    const updated3 = deletedClass.find((t) => t.username === 'tempteacher_unit');
+    assert.ok(updated3);
+    assert.equal(updated3.classTeacherOf, null);
+    assert.deepEqual(updated3.assignedClasses, ['Topaz']);
+
+    const removed = deleteTeacherUser('tempteacher_unit');
+    assert.equal(removed.ok, true);
+    assert.equal(getTeacherProfileByUsername('tempteacher_unit'), null);
+  } finally {
+    if (hadBackup && backupContent !== null) {
+      fs.writeFileSync(usersFile, backupContent, 'utf8');
+    } else if (fs.existsSync(usersFile)) {
+      fs.unlinkSync(usersFile);
+    }
+  }
 });
 

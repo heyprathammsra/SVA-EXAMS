@@ -4,6 +4,9 @@ import path from 'node:path';
 import {
   DEFAULT_TEACHER_PRATHAM_PROFILE,
   normalizeTeacherProfile,
+  removeSectionFromTeacherProfile,
+  renameSectionInTeacherProfile,
+  renameSubjectInTeacherProfile,
   TeacherClassSubjectAssignment,
   TeacherProfile,
 } from './teacher-permissions';
@@ -354,6 +357,68 @@ export function deleteTeacherUser(
     ok: true,
     teachers: filtered.map(stripPasswordHash),
   };
+}
+
+export function syncTeacherMappingsOnClassRename(
+  oldSection: string,
+  newSection: string,
+  env: NodeJS.ProcessEnv = process.env
+): TeacherProfile[] {
+  const accounts = loadStoredTeacherAccounts(env);
+  let anyChanged = false;
+  const nextAccounts = accounts.map((acc) => {
+    const synced = renameSectionInTeacherProfile(acc, oldSection, newSection);
+    if (synced !== acc) {
+      anyChanged = true;
+      return { ...synced, passwordHashHex: acc.passwordHashHex };
+    }
+    return acc;
+  });
+  if (anyChanged) {
+    saveStoredTeacherAccounts(nextAccounts);
+  }
+  return nextAccounts.map(stripPasswordHash);
+}
+
+export function syncTeacherMappingsOnClassDelete(
+  sectionToRemove: string,
+  env: NodeJS.ProcessEnv = process.env
+): TeacherProfile[] {
+  const accounts = loadStoredTeacherAccounts(env);
+  let anyChanged = false;
+  const nextAccounts = accounts.map((acc) => {
+    const synced = removeSectionFromTeacherProfile(acc, sectionToRemove);
+    if (synced !== acc) {
+      anyChanged = true;
+      return { ...synced, passwordHashHex: acc.passwordHashHex };
+    }
+    return acc;
+  });
+  if (anyChanged) {
+    saveStoredTeacherAccounts(nextAccounts);
+  }
+  return nextAccounts.map(stripPasswordHash);
+}
+
+export function syncTeacherMappingsOnSubjectRename(
+  oldSubject: string,
+  newSubject: string,
+  env: NodeJS.ProcessEnv = process.env
+): TeacherProfile[] {
+  const accounts = loadStoredTeacherAccounts(env);
+  let anyChanged = false;
+  const nextAccounts = accounts.map((acc) => {
+    const synced = renameSubjectInTeacherProfile(acc, oldSubject, newSubject);
+    if (synced !== acc) {
+      anyChanged = true;
+      return { ...synced, passwordHashHex: acc.passwordHashHex };
+    }
+    return acc;
+  });
+  if (anyChanged) {
+    saveStoredTeacherAccounts(nextAccounts);
+  }
+  return nextAccounts.map(stripPasswordHash);
 }
 
 export function authenticateUserCredentials(

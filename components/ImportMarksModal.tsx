@@ -38,7 +38,9 @@ interface ImportMarksModalProps {
     subjectName: string,
     targetClass: string
   ) => void;
-  onDownloadTemplate: (subjectName: string | null) => void;
+  onDownloadTemplate: (subjectName: string | null, targetClass: string) => void;
+  allowAllClasses?: boolean;
+  allowAllSubjects?: boolean;
 }
 
 export default function ImportMarksModal({
@@ -59,17 +61,25 @@ export default function ImportMarksModal({
   onApplyPastedMarks,
   onUploadFile,
   onDownloadTemplate,
+  allowAllClasses = true,
+  allowAllSubjects = true,
 }: ImportMarksModalProps) {
   const defaultClass =
-    initialClass && initialClass !== 'all'
+    initialClass &&
+    initialClass !== 'all' &&
+    (allowAllClasses ||
+      classSections.some((c) => c.toLowerCase() === initialClass.toLowerCase()))
       ? initialClass
-      : classSections[0] || 'all';
+      : classSections[0] || (allowAllClasses ? 'all' : '');
   const defaultSubject =
     initialSubject &&
     initialSubject !== 'all' &&
-    initialSubject !== 'consolidated'
+    initialSubject !== 'consolidated' &&
+    activeSubjects.some((s) => s.name.toLowerCase() === initialSubject.toLowerCase())
       ? initialSubject
-      : '__ALL__';
+      : allowAllSubjects
+      ? '__ALL__'
+      : activeSubjects[0]?.name || '';
 
   const [targetClass, setTargetClass] = useState<string>(defaultClass);
   const [targetSubject, setTargetSubject] = useState<string>(defaultSubject);
@@ -170,11 +180,15 @@ export default function ImportMarksModal({
   if (!isOpen) return null;
 
   const classOptions = [
-    {
-      value: 'all',
-      label: 'All Classes',
-      meta: `${students.length}`,
-    },
+    ...(allowAllClasses
+      ? [
+          {
+            value: 'all',
+            label: 'All Classes',
+            meta: `${students.length}`,
+          },
+        ]
+      : []),
     ...classSections.map((cls) => ({
       value: cls,
       label: getClassGradeLabel(cls),
@@ -183,11 +197,15 @@ export default function ImportMarksModal({
   ];
 
   const subjectOptions = [
-    {
-      value: '__ALL__',
-      label: 'All Subjects',
-      meta: `${activeSubjects.length} subs`,
-    },
+    ...(allowAllSubjects
+      ? [
+          {
+            value: '__ALL__',
+            label: 'All Subjects',
+            meta: `${activeSubjects.length} subs`,
+          },
+        ]
+      : []),
     ...activeSubjects.map((sub) => ({
       value: sub.name,
       label: sub.name,
@@ -360,7 +378,10 @@ export default function ImportMarksModal({
               <button
                 type="button"
                 onClick={() =>
-                  onDownloadTemplate(targetSubject === '__ALL__' ? null : targetSubject)
+                  onDownloadTemplate(
+                    targetSubject === '__ALL__' ? null : targetSubject,
+                    targetClass
+                  )
                 }
                 className="inline-flex items-center gap-1 font-medium text-slate-500 hover:text-slate-800 hover:underline cursor-pointer"
               >

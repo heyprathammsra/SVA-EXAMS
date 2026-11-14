@@ -3,12 +3,18 @@ import assert from 'node:assert/strict';
 import {
   canUserEditSubjectInClass,
   canUserViewSection,
+  filterImportedStudentsForRole,
+  getDefaultTeacherScopesForSection,
   getEditableSubjectsForClass,
   getVisibleSectionsForUser,
   getVisibleSubjectsForClass,
   isClassTeacherForSection,
   NOT_A_CLASS_TEACHER_VALUE,
   normalizeTeacherProfile,
+  removeSectionFromTeacherProfile,
+  renameSectionInTeacherProfile,
+  renameSubjectInTeacherProfile,
+  resolveInitialTeacherSection,
 } from './teacher-permissions';
 
 const ALL_CLASSES = ['Sparkle', 'Twinkle', 'Topaz', 'Jade', 'Garnet', 'Emerald', 'Ruby', 'Diamond'];
@@ -153,5 +159,155 @@ describe('teacher-permissions & class-subject mapping', () => {
       ALL_SUBJECTS
     );
     assert.equal(canUserEditSubjectInClass('Diamond', 'Maths', 'admin', null), true);
+  });
+
+  it('synchronizes teacher profile mappings when Admin renames/deletes classes or renames subjects', () => {
+    const teacher = normalizeTeacherProfile({
+      name: 'Pratham',
+      username: 'pratham',
+      assignedSubject: 'Maths',
+      assignedClasses: ['Sparkle', 'Topaz'],
+      classTeacherOf: 'Sparkle',
+    });
+
+    const renamedSection = renameSectionInTeacherProfile(teacher, 'sparkle', 'Lotus');
+    assert.deepEqual(renamedSection.assignedClasses, ['Lotus', 'Topaz']);
+    assert.equal(renamedSection.classTeacherOf, 'Lotus');
+    assert.deepEqual(renamedSection.assignments, [
+      { section: 'Lotus', subject: 'Maths' },
+      { section: 'Topaz', subject: 'Maths' },
+    ]);
+
+    const deletedSection = removeSectionFromTeacherProfile(renamedSection, 'Lotus');
+    assert.deepEqual(deletedSection.assignedClasses, ['Topaz']);
+    assert.equal(deletedSection.classTeacherOf, null);
+    assert.deepEqual(deletedSection.assignments, [{ section: 'Topaz', subject: 'Maths' }]);
+
+    const renamedSubject = renameSubjectInTeacherProfile(deletedSection, 'maths', 'Mathematics');
+    assert.equal(renamedSubject.assignedSubject, 'Mathematics');
+    assert.deepEqual(renamedSubject.assignments, [{ section: 'Topaz', subject: 'Mathematics' }]);
+  });
+
+  it('filters imported student marks by role so teachers cannot overwrite unmapped classes or subjects', () => {
+    const teacher = normalizeTeacherProfile({
+      name: 'Anita',
+      username: 'anita',
+      assignedSubject: 'Maths',
+      assignedClasses: ['Sparkle'],
+      classTeacherOf: 'Twinkle',
+    });
+
+    const previousStudents = [
+      {
+        id: 'stu-1',
+        section: 'Sparkle',
+        marks: { Maths: 15, Science: 20 },
+      },
+      {
+        id: 'stu-2',
+        section: 'Twinkle',
+        marks: { Maths: 18, Science: 22 },
+      },
+    ];
+
+    const candidateStudents = [
+      {
+        id: 'stu-1',
+        section: 'Sparkle',
+        marks: { Maths: 24, Science: 99 }, // Maths allowed, Science blocked
+      },
+      {
+        id: 'stu-2',
+        section: 'Twinkle',
+        marks: { Maths: 99, Science: 99 }, // Twinkle is Class Teacher view-only -> both blocked
+      },
+    ];
+
+    const teacherFiltered = filterImportedStudentsForRole({
+      previousStudents,
+      candidateStudents,
+      role: 'teacher',
+      teacherProfile: teacher,
+    });
+
+    assert.equal(teacherFiltered.appliedMarkUpdates, 1);
+    assert.equal(teacherFiltered.blockedUpdates, 3);
+    assert.equal(teacherFiltered.students[0].marks.Maths, 24);
+    assert.equal(teacherFiltered.students[0].marks.Science, 20);
+    assert.equal(teacherFiltered.students[1].marks.Maths, 18);
+    assert.equal(teacherFiltered.students[1].marks.Science, 22);
+
+    const adminFiltered = filterImportedStudentsForRole({
+      previousStudents,
+      candidateStudents,
+      role: 'admin',
+      teacherProfile: null,
+    });
+    assert.equal(adminFiltered.blockedUpdates, 0);
+    assert.equal(adminFiltered.students[0].marks.Science, 99);
+    assert.equal(adminFiltered.students[1].marks.Maths, 99);
+  });
+
+  it('prefers editable subject class on initial login and resets scopes cleanly when switching to a Class Teacher division', () => {
+    const teacher = normalizeTeacherProfile({
+      name: 'Anita',
+      username: 'anita',
+      assignedSubject: 'Maths',
+      assignedClasses: ['Sparkle'],
+      classTeacherOf: 'Twinkle',
+    });
+
+    // Even if persisted Admin selectedClass was Twinkle or Diamond, initial landing prefers editable Sparkle
+    assert.equal(
+      resolveInitialTeacherSection(ALL_CLASSES, 'Diamond', teacher, ALL_SUBJECTS),
+      'Sparkle'
+    );
+    assert.equal(
+      resolveInitialTeacherSection(ALL_CLASSES, 'Twinkle', teacher, ALL_SUBJECTS),
+      'Sparkle'
+    );
+
+    // Teacher with ONLY Class Teacher division falls back to their Class Teacher class
+    const ctOnly = normalizeTeacherProfile({
+      name: 'Meera',
+      username: 'meera',
+      assignedSubject: 'Hindi',
+      assignedClasses: [],
+      classTeacherOf: 'Topaz',
+    });
+    assert.equal(
+      resolveInitialTeacherSection(ALL_CLASSES, 'Diamond', ctOnly, ALL_SUBJECTS),
+      'Topaz'
+    );
+
+    // Subject Teacher division defaults to mapped subject
+    assert.deepEqual(
+      getDefaultTeacherScopesForSection({
+        section: 'Sparkle',
+        profile: teacher,
+        visibleSubjectNames: ['Maths'],
+      }),
+      {
+        selectedSubject: 'Maths',
+        internalActiveSubject: 'Maths',
+        selectedRemarkScope: 'Maths',
+        exportSubjectScope: 'Maths',
+      }
+    );
+
+    // Class Teacher division defaults to 'all' / 'all_consolidated' instead of staying stuck on 'Maths'
+    assert.deepEqual(
+      getDefaultTeacherScopesForSection({
+        section: 'Twinkle',
+        profile: teacher,
+        visibleSubjectNames: ALL_SUBJECTS,
+      }),
+      {
+        selectedSubject: 'all',
+        internalActiveSubject: 'English',
+        selectedRemarkScope: 'all',
+        exportSubjectScope: 'all_consolidated',
+      }
+    );
   });
 });

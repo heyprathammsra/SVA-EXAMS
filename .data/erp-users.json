@@ -1,0 +1,56 @@
+[
+  {
+    "id": "teacher-pratham",
+    "name": "Pratham",
+    "username": "pratham",
+    "assignedSubject": "Science",
+    "assignedClasses": [
+      "Sparkle",
+      "Twinkle",
+      "Topaz",
+      "Jade",
+      "Garnet",
+      "Emerald",
+      "Ruby",
+      "Diamond"
+    ],
+    "classTeacherOf": null,
+    "assignments": [
+      {
+        "section": "Sparkle",
+        "subject": "Science"
+      },
+      {
+        "section": "Twinkle",
+        "subject": "Science"
+      },
+      {
+        "section": "Topaz",
+        "subject": "Science"
+      },
+      {
+        "section": "Jade",
+        "subject": "Science"
+      },
+      {
+        "section": "Garnet",
+        "subject": "Science"
+      },
+      {
+        "section": "Emerald",
+        "subject": "Science"
+      },
+      {
+        "section": "Ruby",
+        "subject": "Science"
+      },
+      {
+        "section": "Diamond",
+        "subject": "Science"
+      }
+    ],
+    "createdAt": 1700000000000,
+    "updatedAt": 1700000000000,
+    "passwordHashHex": "4c78b327e40c997d386f4dd864ef8cc15b56ec4e3afd853f9e378b41228c9b52"
+  }
+]

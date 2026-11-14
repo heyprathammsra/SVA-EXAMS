@@ -125,6 +125,7 @@ interface AdminConfigPanelProps {
   svaAllClasses?: readonly string[] | string[];
   svaSubjects?: SubjectConfig[];
   getClassGradeLabel?: (clsName: string) => string;
+  teacherMappingsVersion?: number;
 }
 
 const PRESET_SUBJECTS = [
@@ -197,6 +198,7 @@ export default function AdminConfigPanel({
   svaAllClasses = [],
   svaSubjects = [],
   getClassGradeLabel = (c) => c,
+  teacherMappingsVersion = 0,
 }: AdminConfigPanelProps) {
   const [activeSheetSection, setActiveSheetSection] = useState<string | null>(null);
   const specificClassOptions = React.useMemo(
@@ -1014,6 +1016,7 @@ export default function AdminConfigPanel({
         classes={classes}
         subjects={(svaSubjects || currentConfig.subjects || []).map((s) => s.name)}
         showToast={showToast}
+        refreshTrigger={teacherMappingsVersion}
       />
 
       {/* Main Grid: Left Navigation + Right Content */}
