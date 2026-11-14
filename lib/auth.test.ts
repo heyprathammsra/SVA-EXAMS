@@ -410,3 +410,94 @@ test('upsertTeacherUser, deleteTeacherUser, and Admin class/subject rename/delet
   }
 });
 
+test('sanitizeAndValidateErpState preserves server SA-1 marks when teacher saves PT-1 marks and keeps server selectedExam/selectedClass', () => {
+  const existingState: PersistedErpState = {
+    version: 1,
+    initialized: true,
+    updatedAt: 1000,
+    selectedClass: 'Diamond',
+    selectedExam: 'SA-1',
+    classes: [
+      { id: 'c1', section: 'Sparkle', grade: '6' },
+      { id: 'c2', section: 'Diamond', grade: '9' },
+    ],
+    examConfigs: {
+      'SA-1': {
+        id: 'SA-1',
+        name: 'SA-1',
+        code: 'SA-1',
+        totalFormula: 'SUM',
+        subjects: [{ name: 'Science', maxMarks: 100, passMarks: 33 }],
+      },
+      'PT-1': {
+        id: 'PT-1',
+        name: 'PT-1',
+        code: 'PT-1',
+        totalFormula: 'SUM',
+        subjects: [{ name: 'Science', maxMarks: 25, passMarks: 8 }],
+      },
+    },
+    students: [
+      {
+        id: 's-1',
+        rollNo: '01',
+        name: 'Aarav Sparkle',
+        class: '6',
+        section: 'Sparkle',
+        marks: { Science: 88 },
+      },
+    ],
+    examMarksStore: {
+      'SA-1': { 's-1': { Science: 88 } },
+      'PT-1': { 's-1': { Science: 14 } },
+    },
+    examBreakdownsStore: {},
+  };
+
+  const teacherProfile = {
+    username: 'pratham',
+    name: 'Pratham',
+    assignedSubject: 'Science',
+    assignedClasses: ['Sparkle'],
+    classTeacherOf: null,
+    assignments: [{ section: 'Sparkle', subject: 'Science' }],
+    createdAt: 1000,
+    updatedAt: 1000,
+  };
+
+  // Teacher switches to PT-1 in Sparkle and saves 23/25 for Science
+  const incomingFromTeacher: PersistedErpState = {
+    ...existingState,
+    selectedClass: 'Sparkle',
+    selectedExam: 'PT-1',
+    students: [
+      {
+        ...existingState.students[0],
+        marks: { Science: 23 },
+      },
+    ],
+    examMarksStore: {
+      'SA-1': { 's-1': { Science: 88 } },
+      'PT-1': { 's-1': { Science: 23 } },
+    },
+  };
+
+  const sanitized = sanitizeAndValidateErpState(
+    incomingFromTeacher,
+    existingState,
+    'teacher',
+    3000,
+    teacherProfile
+  );
+
+  // Server selectedExam and selectedClass remain Admin's ('SA-1' and 'Diamond')
+  assert.equal(sanitized.selectedExam, 'SA-1');
+  assert.equal(sanitized.selectedClass, 'Diamond');
+  // PT-1 store has the teacher's new mark (23)
+  assert.equal(sanitized.examMarksStore['PT-1']['s-1'].Science, 23);
+  // SA-1 store and active SA-1 students array retain 88 (never overwritten by PT-1's 23!)
+  assert.equal(sanitized.examMarksStore['SA-1']['s-1'].Science, 88);
+  assert.equal(sanitized.students[0].marks.Science, 88);
+});
+
+

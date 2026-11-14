@@ -1,15 +1,48 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { readFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   deleteTeacherUser,
+  getStoredTeacherAccountsForBackup,
   listTeacherUsers,
+  restoreTeacherAccountsFromBackup,
   syncTeacherMappingsOnClassDelete,
   syncTeacherMappingsOnClassRename,
   syncTeacherMappingsOnSubjectRename,
   upsertTeacherUser,
 } from '@/lib/auth';
 import { getRequestAuthSession } from '@/lib/auth-server';
+import { PersistedErpState } from '@/lib/erp-persistence';
+import {
+  pullCloudBackupFromGoogleSheet,
+  pushCloudBackupToGoogleSheet,
+} from '@/lib/sheets-cloud-store';
 
 export const dynamic = 'force-dynamic';
+
+const STATE_FILE = path.join(process.cwd(), '.data', 'erp-state.json');
+
+async function readCurrentStateForCloud(): Promise<PersistedErpState | null> {
+  try {
+    const raw = await readFile(STATE_FILE, 'utf8');
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === 'object' && parsed.initialized
+      ? (parsed as PersistedErpState)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
+async function mirrorTeachersToGoogleSheet(): Promise<void> {
+  try {
+    const currentState = await readCurrentStateForCloud();
+    await pushCloudBackupToGoogleSheet(
+      currentState,
+      getStoredTeacherAccountsForBackup()
+    );
+  } catch {}
+}
 
 function requireAdmin(req: NextRequest) {
   const session = getRequestAuthSession(req);
@@ -34,6 +67,20 @@ function requireAdmin(req: NextRequest) {
 export async function GET(req: NextRequest) {
   const auth = requireAdmin(req);
   if (!auth.ok) return auth.response;
+
+  try {
+    const cloud = await pullCloudBackupFromGoogleSheet();
+    if (cloud?.teachers && cloud.teachers.length > 0) {
+      const localMax = Math.max(
+        0,
+        ...getStoredTeacherAccountsForBackup().map((t) => t.updatedAt || 0)
+      );
+      const cloudMax = Math.max(0, ...cloud.teachers.map((t) => t.updatedAt || 0));
+      if (cloudMax > localMax) {
+        restoreTeacherAccountsFromBackup(cloud.teachers);
+      }
+    }
+  } catch {}
 
   const teachers = listTeacherUsers();
   return NextResponse.json({
@@ -69,6 +116,8 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: res.error }, { status: 400 });
     }
 
+    mirrorTeachersToGoogleSheet().catch(() => {});
+
     return NextResponse.json({
       success: true,
       teacher: res.teacher,
@@ -98,6 +147,8 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: res.error }, { status: 400 });
     }
 
+    mirrorTeachersToGoogleSheet().catch(() => {});
+
     return NextResponse.json({
       success: true,
       teachers: res.teachers,
@@ -121,12 +172,14 @@ export async function PATCH(req: NextRequest) {
       const oldSection = typeof body.oldSection === 'string' ? body.oldSection : '';
       const newSection = typeof body.newSection === 'string' ? body.newSection : '';
       const teachers = syncTeacherMappingsOnClassRename(oldSection, newSection);
+      mirrorTeachersToGoogleSheet().catch(() => {});
       return NextResponse.json({ success: true, teachers });
     }
 
     if (body.action === 'deleteClass') {
       const section = typeof body.section === 'string' ? body.section : '';
       const teachers = syncTeacherMappingsOnClassDelete(section);
+      mirrorTeachersToGoogleSheet().catch(() => {});
       return NextResponse.json({ success: true, teachers });
     }
 
@@ -134,6 +187,7 @@ export async function PATCH(req: NextRequest) {
       const oldSubject = typeof body.oldSubject === 'string' ? body.oldSubject : '';
       const newSubject = typeof body.newSubject === 'string' ? body.newSubject : '';
       const teachers = syncTeacherMappingsOnSubjectRename(oldSubject, newSubject);
+      mirrorTeachersToGoogleSheet().catch(() => {});
       return NextResponse.json({ success: true, teachers });
     }
 

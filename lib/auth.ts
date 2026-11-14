@@ -216,6 +216,51 @@ function saveStoredTeacherAccounts(accounts: StoredTeacherAccount[]): void {
   }
 }
 
+export function getStoredTeacherAccountsForBackup(
+  env: NodeJS.ProcessEnv = process.env
+): StoredTeacherAccount[] {
+  return loadStoredTeacherAccounts(env);
+}
+
+export function restoreTeacherAccountsFromBackup(
+  accounts: StoredTeacherAccount[],
+  env: NodeJS.ProcessEnv = process.env
+): TeacherProfile[] {
+  if (!Array.isArray(accounts) || accounts.length === 0) {
+    return listTeacherUsers(env);
+  }
+  const valid: StoredTeacherAccount[] = [];
+  for (const item of accounts) {
+    if (
+      item &&
+      typeof item === 'object' &&
+      typeof item.username === 'string' &&
+      typeof item.passwordHashHex === 'string'
+    ) {
+      const normalized = normalizeTeacherProfile({
+        id: item.id,
+        name: item.name || item.username,
+        username: item.username,
+        assignedSubject: item.assignedSubject || 'Science',
+        assignedClasses: item.assignedClasses,
+        classTeacherOf: item.classTeacherOf,
+        assignments: item.assignments,
+        createdAt: item.createdAt,
+        updatedAt: item.updatedAt,
+      });
+      valid.push({
+        ...normalized,
+        passwordHashHex: item.passwordHashHex,
+      });
+    }
+  }
+  if (!valid.some((u) => u.username === DEFAULT_TEACHER_USERNAME)) {
+    valid.unshift(createDefaultPrathamAccount(env));
+  }
+  saveStoredTeacherAccounts(valid);
+  return valid.map(stripPasswordHash);
+}
+
 export function listTeacherUsers(env: NodeJS.ProcessEnv = process.env): TeacherProfile[] {
   return loadStoredTeacherAccounts(env).map(stripPasswordHash);
 }

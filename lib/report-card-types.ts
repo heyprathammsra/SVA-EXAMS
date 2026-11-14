@@ -445,13 +445,14 @@ export function getPtSubjectsForClass(
 
 export function getEffectiveExamConfigForClass(
   examConfig: ExamConfig,
-  classOrSection?: string
+  classOrSection?: string,
+  classRegistry?: ClassDefinition[]
 ): ExamConfig {
   if (!classOrSection || classOrSection === 'all' || classOrSection === 'ALL') {
     return examConfig;
   }
   const overrides = examConfig.classOverrides;
-  const gradeKey = getClassGradeFromSection(classOrSection);
+  const gradeKey = getClassGradeFromSection(classOrSection, classRegistry);
   const sectionOverride = overrides?.[classOrSection];
   const gradeOverride = gradeKey !== classOrSection ? overrides?.[gradeKey] : undefined;
 
@@ -1503,6 +1504,7 @@ export function computeSubjectTotalFromBreakdown(
     if (hasAnyAB) {
       return 'AB';
     }
+    return null;
   }
 
   const isClass9 = isClass9Section(sectionOrClass);
@@ -1596,6 +1598,9 @@ export function generateDefaultBreakdown(
   subjectName: string,
   sectionOrClass: string
 ): SubjectBreakdown {
+  if (totalScore === null || totalScore === undefined) {
+    return {};
+  }
   if (totalScore === 'AB') {
     return {
       internalMarks: 'AB',
@@ -1611,7 +1616,7 @@ export function generateDefaultBreakdown(
     };
   }
 
-  const score = typeof totalScore === 'number' ? totalScore : 75;
+  const score = totalScore;
   const pct = Math.min(1, Math.max(0, score / 100));
   const isClass9 = isClass9Section(sectionOrClass);
   const isHindi = subjectName.toLowerCase() === 'hindi';

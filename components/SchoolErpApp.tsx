@@ -50,6 +50,7 @@ import {
   Trophy,
   GraduationCap,
   MessageSquareText,
+  LogOut,
 } from 'lucide-react';
 import {
   StudentReportRow,
@@ -523,10 +524,14 @@ function InternalAssessmentModal({
 
 export default function SchoolErpPage({
   userRole = 'admin',
+  username = '',
   initialTeacherProfile = null,
+  onLogout,
 }: {
   userRole?: 'admin' | 'teacher';
+  username?: string;
   initialTeacherProfile?: TeacherProfile | null;
+  onLogout?: () => void;
 } = {}) {
   const [activeTab, setActiveTab] = useState<ActiveTab>('spreadsheet');
   const [teacherProfile, setTeacherProfile] = useState<TeacherProfile | null>(
@@ -586,18 +591,42 @@ export default function SchoolErpPage({
     [dynamicClassSections, userRole, teacherProfile]
   );
 
+  const [examConfigs, setExamConfigs] = useState<Record<string, ExamConfig>>(
+    () => defaultErpState.examConfigs
+  );
+
+  const allConfiguredSubjectNames = useMemo(() => {
+    const names = new Set<string>(SVA_SUBJECTS.map((s) => s.name));
+    Object.values(examConfigs).forEach((cfg) => {
+      (cfg.subjects || []).forEach((s) => {
+        if (s?.name) names.add(s.name);
+      });
+      if (cfg.classOverrides) {
+        Object.values(cfg.classOverrides).forEach((ov) => {
+          (ov?.subjects || []).forEach((s) => {
+            if (s?.name) names.add(s.name);
+          });
+        });
+      }
+    });
+    if (teacherProfile?.assignedSubject) {
+      names.add(teacherProfile.assignedSubject);
+    }
+    return Array.from(names);
+  }, [examConfigs, teacherProfile]);
+
   const editableClassSections = useMemo(() => {
     if (userRole === 'admin') return dynamicClassSections;
     return visibleClassSections.filter(
       (sec) =>
         getEditableSubjectsForClass(
-          SVA_SUBJECTS.map((s) => s.name),
+          allConfiguredSubjectNames,
           sec,
           userRole,
           teacherProfile
         ).length > 0
     );
-  }, [dynamicClassSections, visibleClassSections, userRole, teacherProfile]);
+  }, [dynamicClassSections, visibleClassSections, allConfiguredSubjectNames, userRole, teacherProfile]);
 
   const getClassNumberForSection = useCallback(
     (sec: string): string => getGradeForSection(classes, sec),
@@ -621,9 +650,6 @@ export default function SchoolErpPage({
 
   // Exam selection & Exam Configuration Store (persistent)
   const [selectedExam, setSelectedExam] = useState<string>(defaultErpState.selectedExam);
-  const [examConfigs, setExamConfigs] = useState<Record<string, ExamConfig>>(
-    () => defaultErpState.examConfigs
-  );
 
   // Base exam config (global across classes, including classOverrides)
   const baseExamConfig: ExamConfig = useMemo(() => {
@@ -651,8 +677,8 @@ export default function SchoolErpPage({
 
   // Effective exam config for currently selected class filter
   const currentExamConfig: ExamConfig = useMemo(() => {
-    return getEffectiveExamConfigForClass(baseExamConfig, selectedClass);
-  }, [baseExamConfig, selectedClass]);
+    return getEffectiveExamConfigForClass(baseExamConfig, selectedClass, classes);
+  }, [baseExamConfig, selectedClass, classes]);
 
   // Dynamic subjects based on active exam config & teacher permissions for the selected class
   const activeSubjects: SubjectConfig[] = useMemo(() => {
@@ -1337,19 +1363,34 @@ export default function SchoolErpPage({
             )
           : state.selectedClass;
 
+      // Ensure active exam marks and breakdowns from examMarksStore/examBreakdownsStore are synchronized onto students
+      const activeExamMarks = state.examMarksStore?.[state.selectedExam] || {};
+      const activeExamBds = state.examBreakdownsStore?.[state.selectedExam] || {};
+      const syncedStudents = state.students.map((st) => {
+        const storedMarks = activeExamMarks[st.id];
+        const storedBds = activeExamBds[st.id];
+        return {
+          ...st,
+          marks: storedMarks ? { ...st.marks, ...storedMarks } : st.marks,
+          breakdowns: storedBds
+            ? { ...(st.breakdowns || {}), ...storedBds }
+            : st.breakdowns,
+        };
+      });
+
       stateUpdatedAtRef.current = state.updatedAt || Date.now();
       lastSyncedSnapshotRef.current = {
         selectedClass: effectiveSelectedClass,
         selectedExam: state.selectedExam,
         classes: resolvedClasses,
         examConfigs: state.examConfigs,
-        students: state.students,
+        students: syncedStudents,
         examMarksStore: state.examMarksStore,
         examBreakdownsStore: state.examBreakdownsStore,
       };
       setClasses(resolvedClasses);
       setExamConfigs(state.examConfigs);
-      setStudents(state.students);
+      setStudents(syncedStudents);
       setExamMarksStore(state.examMarksStore);
       setExamBreakdownsStore(state.examBreakdownsStore);
       setSelectedExam(state.selectedExam);
@@ -1359,7 +1400,7 @@ export default function SchoolErpPage({
       selectedExamRef.current = state.selectedExam;
       selectedClassRef.current = effectiveSelectedClass;
       classesRef.current = resolvedClasses;
-      studentsRef.current = state.students;
+      studentsRef.current = syncedStudents;
       examConfigsRef.current = state.examConfigs;
       examMarksStoreRef.current = state.examMarksStore;
       examBreakdownsStoreRef.current = state.examBreakdownsStore;
@@ -1386,7 +1427,13 @@ export default function SchoolErpPage({
       setGasUrl(storedGas);
       setTempGasUrl(storedGas);
 
-      if (localParsed.hasSavedData && localParsed.state && !dirtyBeforeReadyRef.current) {
+      // Only pre-hydrate from localStorage before /api/erp-state for admin; teachers always hydrate from authoritative server state first
+      if (
+        userRole === 'admin' &&
+        localParsed.hasSavedData &&
+        localParsed.state &&
+        !dirtyBeforeReadyRef.current
+      ) {
         applyHydratedState(localParsed.state);
       }
 
@@ -1412,11 +1459,11 @@ export default function SchoolErpPage({
       if (cancelled) return;
 
       if (!dirtyBeforeReadyRef.current) {
-        // Server state is strictly authoritative whenever initialized so DevTools localStorage tampering can never overwrite marks
+        // Server state is strictly authoritative whenever initialized so DevTools localStorage tampering or stale teacher cache can never overwrite Admin config/marks
         const authoritative =
           remoteState && remoteState.initialized
             ? remoteState
-            : pickAuthoritativeState(localParsed.state, remoteState);
+            : pickAuthoritativeState(localParsed.state, remoteState) || defaultErpState;
         if (authoritative) {
           let stateToApply = authoritative;
           const pickedExam = userPickedExamBeforeReadyRef.current;
@@ -1442,16 +1489,14 @@ export default function SchoolErpPage({
           if (pickedClass) {
             stateToApply = { ...stateToApply, selectedClass: pickedClass };
           }
-          if (authoritative !== localParsed.state || stateToApply !== authoritative) {
-            applyHydratedState(stateToApply, freshTeacherProfile);
-            writeStateToLocalStorage(stateToApply);
-          } else {
-            if (freshTeacherProfile) {
-              applyHydratedState(stateToApply, freshTeacherProfile);
-            }
-            if (!remoteState || authoritative.updatedAt > (remoteState.updatedAt || 0)) {
-              persistToBackend(authoritative, true);
-            }
+          applyHydratedState(stateToApply, freshTeacherProfile);
+          writeStateToLocalStorage(stateToApply);
+
+          if (
+            userRole === 'admin' &&
+            (!remoteState || authoritative.updatedAt > (remoteState.updatedAt || 0))
+          ) {
+            persistToBackend(authoritative, true);
           }
         }
       }
@@ -1465,22 +1510,138 @@ export default function SchoolErpPage({
     };
   }, [defaultErpState, writeStateToLocalStorage, persistToBackend, userRole]);
 
+  // 1b. Keep Admin and Teacher views in sync with authoritative server state on tab focus / visibility / view switch
+  useEffect(() => {
+    if (!isStorageReady) return;
+    let isMounted = true;
+
+    const syncFromServer = async () => {
+      // Do not overwrite while a local save is queued
+      if (serverSaveTimerRef.current) return;
+      try {
+        const res = await fetch('/api/erp-state', {
+          cache: 'no-store',
+          headers: { ...getAdminAuthHeaders() },
+        });
+        if (!res.ok || !isMounted || serverSaveTimerRef.current) return;
+        const payload = await res.json();
+        if (payload?.teacherProfile && userRole === 'teacher') {
+          setTeacherProfile(payload.teacherProfile as TeacherProfile);
+        }
+        if (payload?.exists && payload?.state?.initialized) {
+          const remote = payload.state as PersistedErpState;
+          if ((remote.updatedAt || 0) > stateUpdatedAtRef.current) {
+            const keepExam =
+              remote.examConfigs?.[selectedExamRef.current]
+                ? selectedExamRef.current
+                : remote.selectedExam;
+            const switched = switchExamState({
+              students: remote.students,
+              currentExam: remote.selectedExam,
+              targetExam: keepExam,
+              examConfigs: remote.examConfigs,
+              initialConfigs: INITIAL_EXAM_CONFIGS,
+              examMarksStore: remote.examMarksStore,
+              examBreakdownsStore: remote.examBreakdownsStore,
+            });
+            const resolvedClasses =
+              Array.isArray(remote.classes) && remote.classes.length > 0
+                ? remote.classes
+                : defaultErpState.classes;
+            const keepClass =
+              userRole === 'teacher'
+                ? resolveInitialTeacherSection(
+                    getSectionNames(resolvedClasses),
+                    selectedClassRef.current,
+                    (payload?.teacherProfile as TeacherProfile) ?? teacherProfileRef.current,
+                    (remote.examConfigs?.[keepExam]?.subjects || SVA_SUBJECTS).map((s) => s.name)
+                  )
+                : getSectionNames(resolvedClasses).includes(selectedClassRef.current)
+                ? selectedClassRef.current
+                : remote.selectedClass;
+
+            const mergedState: PersistedErpState = {
+              ...remote,
+              selectedExam: keepExam,
+              selectedClass: keepClass,
+              classes: resolvedClasses,
+              students: switched.nextRoster,
+              examMarksStore: switched.nextMarksStore,
+              examBreakdownsStore: switched.nextBreakdownsStore,
+            };
+
+            stateUpdatedAtRef.current = remote.updatedAt || Date.now();
+            lastSyncedSnapshotRef.current = {
+              selectedClass: keepClass,
+              selectedExam: keepExam,
+              classes: resolvedClasses,
+              examConfigs: remote.examConfigs,
+              students: switched.nextRoster,
+              examMarksStore: switched.nextMarksStore,
+              examBreakdownsStore: switched.nextBreakdownsStore,
+            };
+            setClasses(resolvedClasses);
+            setExamConfigs(remote.examConfigs);
+            setStudents(switched.nextRoster);
+            setExamMarksStore(switched.nextMarksStore);
+            setExamBreakdownsStore(switched.nextBreakdownsStore);
+            setSelectedExam(keepExam);
+            setSelectedClass(keepClass);
+            selectedExamRef.current = keepExam;
+            selectedClassRef.current = keepClass;
+            classesRef.current = resolvedClasses;
+            studentsRef.current = switched.nextRoster;
+            examConfigsRef.current = remote.examConfigs;
+            examMarksStoreRef.current = switched.nextMarksStore;
+            examBreakdownsStoreRef.current = switched.nextBreakdownsStore;
+            writeStateToLocalStorage(mergedState);
+          }
+        }
+      } catch {}
+    };
+
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        syncFromServer();
+      }
+    };
+    window.addEventListener('focus', syncFromServer);
+    document.addEventListener('visibilitychange', handleVisibility);
+    syncFromServer();
+
+    return () => {
+      isMounted = false;
+      window.removeEventListener('focus', syncFromServer);
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, [isStorageReady, activeTab, userRole, defaultErpState.classes, writeStateToLocalStorage]);
+
   // 2. Persist state changes to BOTH localStorage and /api/erp-state ONLY when actual user changes differ from last synced state
   useEffect(() => {
     const snap = lastSyncedSnapshotRef.current;
-    const matchesLastSynced =
-      selectedClass === snap.selectedClass &&
-      selectedExam === snap.selectedExam &&
-      classes === snap.classes &&
-      examConfigs === snap.examConfigs &&
-      students === snap.students &&
-      examMarksStore === snap.examMarksStore &&
-      examBreakdownsStore === snap.examBreakdownsStore;
+    const dataChanged =
+      classes !== snap.classes ||
+      examConfigs !== snap.examConfigs ||
+      students !== snap.students ||
+      examMarksStore !== snap.examMarksStore ||
+      examBreakdownsStore !== snap.examBreakdownsStore;
+    const filterChanged =
+      selectedClass !== snap.selectedClass || selectedExam !== snap.selectedExam;
 
     if (!isStorageReady) {
       return;
     }
-    if (matchesLastSynced) {
+    if (!dataChanged && !filterChanged) {
+      return;
+    }
+
+    // For teachers, changing only the viewed class/exam filter is a local view preference and should not overwrite server state or bump updatedAt
+    if (userRole === 'teacher' && !dataChanged) {
+      lastSyncedSnapshotRef.current = {
+        ...snap,
+        selectedClass,
+        selectedExam,
+      };
       return;
     }
 
@@ -1509,9 +1670,11 @@ export default function SchoolErpPage({
     };
 
     writeStateToLocalStorage(nextState);
-    persistToBackend(nextState, false);
+    // Admin structural/data changes persist immediately so signing out or switching tabs right away never drops an update
+    persistToBackend(nextState, userRole === 'admin' && dataChanged);
   }, [
     isStorageReady,
+    userRole,
     selectedClass,
     selectedExam,
     classes,
@@ -1570,15 +1733,30 @@ export default function SchoolErpPage({
         bdMap[s.id] = { ...s.breakdowns };
       }
     });
-    setExamMarksStore((prev) => ({ ...prev, [examId]: marksMap }));
-    setExamBreakdownsStore((prev) => ({ ...prev, [examId]: bdMap }));
+    setExamMarksStore((prev) => {
+      const next = { ...prev, [examId]: marksMap };
+      examMarksStoreRef.current = next;
+      return next;
+    });
+    setExamBreakdownsStore((prev) => {
+      const next = { ...prev, [examId]: bdMap };
+      examBreakdownsStoreRef.current = next;
+      return next;
+    });
   }, [setExamMarksStore, setExamBreakdownsStore]);
 
   // Push latest data to Google Sheet via Google Apps Script Web App
   const pushToLockedSheet = useCallback(async (isSilent = true) => {
     try {
       setSheetsSyncStatus('syncing');
-      const res = await GasSyncService.pushData(studentsRef.current, selectedExamRef.current);
+      const activeExam = selectedExamRef.current;
+      const res = await GasSyncService.pushData(
+        studentsRef.current,
+        activeExam,
+        undefined,
+        examConfigsRef.current[activeExam],
+        classesRef.current
+      );
       if (res.success) {
         setSheetsSyncStatus('synced');
         setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
@@ -1594,7 +1772,7 @@ export default function SchoolErpPage({
       }
       setSheetsSyncStatus('error');
     }
-  }, [showToast]);
+  }, [showToast, setSheetsSyncStatus, setLastSyncTime]);
 
   // Pull fresh data directly from Google Sheets for a specific exam
   const pullFromLockedSheet = useCallback(
@@ -1704,32 +1882,53 @@ export default function SchoolErpPage({
         setSheetsSyncStatus('error');
       }
     },
-    [showToast, setExamMarksStore, setExamBreakdownsStore]
+    [showToast, setExamMarksStore, setExamBreakdownsStore, setSheetsSyncStatus, setLastSyncTime]
   );
 
   // Debounced push to Google Sheet via Google Apps Script Web App (only triggered when user edits data)
-  const triggerAutoSync = useCallback((studentsToSync: StudentReportRow[]) => {
-    if (autoSyncTimerRef.current) {
-      clearTimeout(autoSyncTimerRef.current);
-    }
+  const triggerAutoSync = useCallback(
+    (
+      studentsToSync: StudentReportRow[],
+      overrideExamId?: string,
+      overrideExamCfg?: ExamConfig
+    ) => {
+      if (autoSyncTimerRef.current) {
+        clearTimeout(autoSyncTimerRef.current);
+      }
 
-    autoSyncTimerRef.current = setTimeout(async () => {
-      try {
-        setSheetsSyncStatus('syncing');
-        const res = await GasSyncService.pushData(studentsToSync, selectedExamRef.current);
-        if (res.success) {
-          setSheetsSyncStatus('synced');
-          setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-        } else if (res.error?.includes('not configured')) {
-          setSheetsSyncStatus('idle');
-        } else {
+      autoSyncTimerRef.current = setTimeout(async () => {
+        try {
+          setSheetsSyncStatus('syncing');
+          const targetExam = overrideExamId || selectedExamRef.current;
+          const targetCfg = overrideExamCfg || examConfigsRef.current[targetExam];
+          const res = await GasSyncService.pushData(
+            studentsToSync,
+            targetExam,
+            undefined,
+            targetCfg,
+            classesRef.current
+          );
+          if (res.success) {
+            setSheetsSyncStatus('synced');
+            setLastSyncTime(
+              new Date().toLocaleTimeString([], {
+                hour: '2-digit',
+                minute: '2-digit',
+                second: '2-digit',
+              })
+            );
+          } else if (res.error?.includes('not configured')) {
+            setSheetsSyncStatus('idle');
+          } else {
+            setSheetsSyncStatus('error');
+          }
+        } catch {
           setSheetsSyncStatus('error');
         }
-      } catch {
-        setSheetsSyncStatus('error');
-      }
-    }, 1200);
-  }, []);
+      }, 1200);
+    },
+    [setSheetsSyncStatus, setLastSyncTime]
+  );
 
   const handleUndo = useCallback(() => {
     if (undoStack.length === 0) {
@@ -1793,6 +1992,19 @@ export default function SchoolErpPage({
       overrideTargetConfig,
     });
 
+    if (userRole === 'teacher' && !overrideTargetConfig) {
+      lastSyncedSnapshotRef.current = {
+        ...lastSyncedSnapshotRef.current,
+        selectedExam: newExam,
+        students: nextRoster,
+        examMarksStore: nextMarksStore,
+        examBreakdownsStore: nextBreakdownsStore,
+      };
+    }
+
+    examMarksStoreRef.current = nextMarksStore;
+    examBreakdownsStoreRef.current = nextBreakdownsStore;
+    studentsRef.current = nextRoster;
     setExamMarksStore(nextMarksStore);
     setExamBreakdownsStore(nextBreakdownsStore);
     setStudents(nextRoster);
@@ -4136,15 +4348,32 @@ export default function SchoolErpPage({
     }
   };
 
-  // Google Apps Script Cloud Sync
+  // Google Apps Script Cloud Sync (syncs all exams, student particulars/remarks, teacher mappings, and ERP system state)
   const handleGoogleSheetsSync = async () => {
     setSheetsSyncStatus('syncing');
     try {
-      const res = await GasSyncService.pushData(students, selectedExam);
+      const res = await GasSyncService.pushAllExams({
+        students: studentsRef.current,
+        selectedExam: selectedExamRef.current,
+        selectedClass: selectedClassRef.current,
+        examConfigs: examConfigsRef.current,
+        examMarksStore: examMarksStoreRef.current,
+        examBreakdownsStore: examBreakdownsStoreRef.current,
+        classes: classesRef.current,
+      });
       if (res.success) {
         setSheetsSyncStatus('synced');
-        setLastSyncTime(new Date().toLocaleTimeString());
-        showToast(`Successfully synced ${res.updatedRows || students.length} students via Google Apps Script!`);
+        setLastSyncTime(
+          new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        );
+        const examCount = res.syncedExams?.length || Object.keys(examConfigsRef.current).length;
+        showToast(
+          `Synced ${studentsRef.current.length} students, ${examCount} exams & teacher mappings to Google Sheet!`
+        );
       } else {
         setSheetsSyncStatus('error');
         showToast(`Sync error: ${res.error || 'Check Google Apps Script Web App URL'}`);
@@ -4185,7 +4414,7 @@ export default function SchoolErpPage({
           </div>
 
           {/* Navigation Links (Minimal Segmented Tabs) */}
-          <div className="overflow-x-auto no-scrollbar -mx-1 px-1 py-0.5">
+          <div className="overflow-x-auto no-scrollbar -mx-1 px-1 py-0.5 flex items-center gap-2.5">
             <nav className="flex items-center gap-0.5 bg-slate-100/80 p-0.5 rounded-lg border border-slate-200/60 text-xs font-medium w-max">
               <button
                 onClick={() => setActiveTab('spreadsheet')}
@@ -4247,6 +4476,55 @@ export default function SchoolErpPage({
                 </button>
               )}
             </nav>
+
+            {onLogout && (
+              <div className="flex items-center gap-2 shrink-0 pl-1 sm:border-l sm:border-slate-200/80 sm:pl-3">
+                <div
+                  data-testid="header-user-badge"
+                  className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100/80 border border-slate-200/70 text-[11px] font-medium text-slate-700"
+                >
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                  <span className="truncate max-w-[160px]">
+                    {userRole === 'admin'
+                      ? 'Admin'
+                      : `${teacherProfile?.name || username || 'Teacher'}${
+                          teacherProfile?.assignedSubject
+                            ? ` · ${teacherProfile.assignedSubject}`
+                            : ''
+                        }`}
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  data-testid="header-logout-btn"
+                  onClick={() => {
+                    if (serverSaveTimerRef.current) {
+                      clearTimeout(serverSaveTimerRef.current);
+                      serverSaveTimerRef.current = null;
+                      const snapshot: PersistedErpState = {
+                        version: 1,
+                        initialized: true,
+                        updatedAt: stateUpdatedAtRef.current || Date.now(),
+                        selectedClass: selectedClassRef.current,
+                        selectedExam: selectedExamRef.current,
+                        classes: classesRef.current,
+                        examConfigs: examConfigsRef.current,
+                        students: studentsRef.current,
+                        examMarksStore: examMarksStoreRef.current,
+                        examBreakdownsStore: examBreakdownsStoreRef.current,
+                      };
+                      persistToBackend(snapshot, true);
+                    }
+                    onLogout();
+                  }}
+                  title="Sign out and switch account"
+                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-slate-200/80 transition-colors flex items-center gap-1.5 cursor-pointer shrink-0"
+                >
+                  <LogOut className="w-3.5 h-3.5 text-slate-500" />
+                  <span>Sign Out</span>
+                </button>
+              </div>
+            )}
           </div>
         </div>
       </header>
@@ -8545,6 +8823,7 @@ export default function SchoolErpPage({
               setExamConfigs(res.examConfigs);
               if (res.selectedClass !== selectedClass) setSelectedClass(res.selectedClass);
               if (res.exportClass !== exportClass) setExportClass(res.exportClass);
+              triggerAutoSync(res.students);
               const trimmedNextSection = nextSection.trim();
               if (previousClass && !sectionsMatch(previousClass.section, trimmedNextSection)) {
                 fetch('/api/users', {
@@ -8592,6 +8871,7 @@ export default function SchoolErpPage({
               setExamBreakdownsStore(res.examBreakdownsStore);
               setSelectedClass(res.selectedClass);
               setExportClass(res.exportClass);
+              triggerAutoSync(res.students);
               if (deletedClass) {
                 fetch('/api/users', {
                   method: 'PATCH',
@@ -8841,9 +9121,9 @@ export default function SchoolErpPage({
                 }
 
                 const prevEffCfg = prevExamCfg
-                  ? getEffectiveExamConfigForClass(prevExamCfg, st.section)
+                  ? getEffectiveExamConfigForClass(prevExamCfg, st.section, classes)
                   : undefined;
-                const effectiveCfg = getEffectiveExamConfigForClass(updated, st.section);
+                const effectiveCfg = getEffectiveExamConfigForClass(updated, st.section, classes);
                 const nextMarks = { ...stSourceMarks };
                 const nextBreakdowns = { ...stSourceBds };
 
@@ -8862,7 +9142,7 @@ export default function SchoolErpPage({
                         sub.name,
                         st.section,
                         sub.components,
-                        oldMax === newMax ? bd : undefined
+                        bd
                       );
                     } else {
                       // Ensure any edited component maxMarks clamp individual component values safely
@@ -8887,6 +9167,7 @@ export default function SchoolErpPage({
                       delete nextBreakdowns[sub.name];
                     }
                   } else {
+                    delete nextBreakdowns[sub.name];
                     const curVal = nextMarks[sub.name];
                     if (typeof curVal === 'number' && newMax > 0 && (oldMax !== newMax || curVal > newMax)) {
                       const srcMax =
@@ -8931,8 +9212,9 @@ export default function SchoolErpPage({
               syncStoresForExam(examId, updatedForStore);
 
               if (examId === selectedExam) {
+                studentsRef.current = updatedForStore;
                 setStudents(updatedForStore);
-                triggerAutoSync(updatedForStore);
+                triggerAutoSync(updatedForStore, examId, updated);
                 const validSubNames = new Set(updated.subjects.map((s) => s.name.toLowerCase()));
                 if (
                   selectedSubject !== 'all' &&
@@ -8954,6 +9236,8 @@ export default function SchoolErpPage({
                 ) {
                   setUploadTargetSubject(updated.subjects[0].name);
                 }
+              } else {
+                triggerAutoSync(updatedForStore, examId, updated);
               }
               showToast(
                 `Updated ${updated.name}${
@@ -9061,14 +9345,17 @@ export default function SchoolErpPage({
             onRenameSubject={(examId, oldName, newName) => {
               if (!isStorageReadyRef.current) dirtyBeforeReadyRef.current = true;
               const migrated = migrateRenamedSubjectInStudents({
-                students,
-                examMarksStore,
-                examBreakdownsStore,
+                students: studentsRef.current,
+                examMarksStore: examMarksStoreRef.current,
+                examBreakdownsStore: examBreakdownsStoreRef.current,
                 examId,
-                activeExamId: selectedExam,
+                activeExamId: selectedExamRef.current,
                 oldName,
                 newName,
               });
+              studentsRef.current = migrated.students;
+              examMarksStoreRef.current = migrated.examMarksStore;
+              examBreakdownsStoreRef.current = migrated.examBreakdownsStore;
               setStudents(migrated.students);
               setExamMarksStore(migrated.examMarksStore);
               setExamBreakdownsStore(migrated.examBreakdownsStore);
@@ -9209,6 +9496,9 @@ export default function SchoolErpPage({
             sheetsSyncStatus={sheetsSyncStatus}
             lastSyncTime={lastSyncTime}
             onGoogleSheetsSync={handleGoogleSheetsSync}
+            onPullFromGoogleSheets={(examId) =>
+              pullFromLockedSheet(examId || selectedExam, false)
+            }
             students={students}
             exportExam={exportExam}
             setExportExam={setExportExam}
@@ -9682,6 +9972,9 @@ export default function SchoolErpPage({
               selectedStudentId,
               options,
             });
+            examMarksStoreRef.current = result.examMarksStore;
+            examBreakdownsStoreRef.current = result.examBreakdownsStore;
+            studentsRef.current = result.students;
             setExamMarksStore(result.examMarksStore);
             setExamBreakdownsStore(result.examBreakdownsStore);
             setStudents(result.students);
@@ -9689,7 +9982,40 @@ export default function SchoolErpPage({
               setSelectedStudentId(result.selectedStudentId);
             }
             setClearModalState(null);
-            triggerAutoSync(result.students);
+            const affectedExamIds =
+              options.targetExam === 'ALL' || options.removeStudents
+                ? Object.keys(examConfigs)
+                : [options.targetExam];
+            if (affectedExamIds.length > 1) {
+              setSheetsSyncStatus('syncing');
+              GasSyncService.pushAllExams({
+                students: result.students,
+                selectedExam,
+                selectedClass,
+                examConfigs,
+                examMarksStore: result.examMarksStore,
+                examBreakdownsStore: result.examBreakdownsStore,
+                classes,
+                examIdsToPush: affectedExamIds,
+              })
+                .then((res) => {
+                  if (res.success) {
+                    setSheetsSyncStatus('synced');
+                    setLastSyncTime(
+                      new Date().toLocaleTimeString([], {
+                        hour: '2-digit',
+                        minute: '2-digit',
+                        second: '2-digit',
+                      })
+                    );
+                  } else {
+                    setSheetsSyncStatus('error');
+                  }
+                })
+                .catch(() => setSheetsSyncStatus('error'));
+            } else {
+              triggerAutoSync(result.students);
+            }
             showToast(result.summaryMessage);
           }}
         />

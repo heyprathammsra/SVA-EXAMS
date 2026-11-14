@@ -114,6 +114,7 @@ interface AdminConfigPanelProps {
   sheetsSyncStatus?: 'idle' | 'syncing' | 'synced' | 'error';
   lastSyncTime?: string | null;
   onGoogleSheetsSync?: () => void;
+  onPullFromGoogleSheets?: (examId?: string) => void;
   students?: StudentReportRow[];
   exportExam?: string;
   setExportExam?: (val: string) => void;
@@ -187,6 +188,8 @@ export default function AdminConfigPanel({
   showToast,
   sheetsSyncStatus = 'idle',
   lastSyncTime = null,
+  onGoogleSheetsSync,
+  onPullFromGoogleSheets,
   students = [],
   exportExam,
   setExportExam,
@@ -264,8 +267,8 @@ export default function AdminConfigPanel({
     examConfigs[editingExamId] || examConfigs[activeExamId] || Object.values(examConfigs)[0];
 
   const currentConfig: ExamConfig = React.useMemo(
-    () => getEffectiveExamConfigForClass(baseConfig, activeClassScope),
-    [baseConfig, activeClassScope]
+    () => getEffectiveExamConfigForClass(baseConfig, activeClassScope, classes),
+    [baseConfig, activeClassScope, classes]
   );
 
   if (
@@ -284,13 +287,23 @@ export default function AdminConfigPanel({
     if (activeClassScope === 'ALL') {
       const updatedBase = updater(baseConfig);
       const subjectsChanged = updatedBase.subjects !== baseConfig.subjects;
+      const formulaChanged =
+        updatedBase.totalFormula !== baseConfig.totalFormula ||
+        updatedBase.customFormula !== baseConfig.customFormula;
+      const criteriaChanged = updatedBase.resultCriteria !== baseConfig.resultCriteria;
       let nextOverrides = baseConfig.classOverrides;
-      if (subjectsChanged && nextOverrides) {
+      if ((subjectsChanged || formulaChanged || criteriaChanged) && nextOverrides) {
         const cleaned: Record<string, any> = {};
         Object.entries(nextOverrides).forEach(([k, ov]) => {
-          const { subjects: _ignored, ...rest } = ov || {};
-          if (Object.keys(rest).length > 0) {
-            cleaned[k] = rest;
+          const nextOv = { ...(ov || {}) };
+          if (subjectsChanged) delete nextOv.subjects;
+          if (formulaChanged) {
+            delete nextOv.totalFormula;
+            delete nextOv.customFormula;
+          }
+          if (criteriaChanged) delete nextOv.resultCriteria;
+          if (Object.keys(nextOv).length > 0) {
+            cleaned[k] = nextOv;
           }
         });
         nextOverrides = Object.keys(cleaned).length > 0 ? cleaned : undefined;
@@ -1014,7 +1027,15 @@ export default function AdminConfigPanel({
       {/* Teacher Accounts & Class-Subject Mapping Section */}
       <TeacherAccessManager
         classes={classes}
-        subjects={(svaSubjects || currentConfig.subjects || []).map((s) => s.name)}
+        subjects={Array.from(
+          new Set([
+            ...currentConfig.subjects.map((s) => s.name),
+            ...Object.values(examConfigs).flatMap((cfg) =>
+              (cfg.subjects || []).map((s) => s.name)
+            ),
+            ...(svaSubjects || []).map((s) => s.name),
+          ])
+        )}
         showToast={showToast}
         refreshTrigger={teacherMappingsVersion}
       />
@@ -1552,6 +1573,9 @@ export default function AdminConfigPanel({
           <GoogleSheetsConnectCard
             students={students}
             selectedExam={currentConfig.id}
+            examCount={Object.keys(examConfigs).length}
+            onSyncSuccess={onGoogleSheetsSync}
+            onPullFromSheet={onPullFromGoogleSheets}
             showToast={showToast}
             lastSyncTime={lastSyncTime}
             sheetsSyncStatus={sheetsSyncStatus}

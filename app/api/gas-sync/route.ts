@@ -1,13 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getStoredTeacherAccountsForBackup } from '@/lib/auth';
 import { isRequestAuthenticated } from '@/lib/auth-server';
+import { PersistedErpState } from '@/lib/erp-persistence';
+import { pushCloudBackupToGoogleSheet } from '@/lib/sheets-cloud-store';
 
 export const dynamic = 'force-dynamic';
-
-/**
- * Server-side proxy for Google Apps Script Web App.
- * Automatically follows 302 redirects from script.google.com to script.googleusercontent.com
- * and avoids all browser CORS / authorization limitations.
- */
 
 function validateGasUrl(url: string): { valid: boolean; error?: string } {
   if (url.includes('docs.google.com/spreadsheets')) {
@@ -82,6 +79,42 @@ function safeParseJsonResponse(rawText: string): { success: boolean; data?: any;
   }
 }
 
+const META_COLUMN_KEYS = new Set([
+  'id',
+  'rollno',
+  'roll no',
+  'roll',
+  'name',
+  'student name',
+  'name of the students',
+  'studentname',
+  'section',
+  'class',
+  'house',
+  'dob',
+  'attendance',
+  'height',
+  'height (cm)',
+  'weight',
+  'weight (kg)',
+  'fathername',
+  "father's name",
+  'mothername',
+  "mother's name",
+  'remarks',
+  'customremarks',
+  'class teacher remark',
+  'subjectremarks',
+  'subject remarks json',
+  'breakdowns',
+  'breakdowns json',
+  'marks',
+  'total',
+  'percentage',
+  'grade',
+  'admissionno',
+]);
+
 function normalizeStudentList(rawData: any): any[] {
   let list: any[] = [];
   if (Array.isArray(rawData)) {
@@ -94,30 +127,20 @@ function normalizeStudentList(rawData: any): any[] {
     }
   }
 
-  const knownSubjects = [
-    'English',
-    'Hindi',
-    'Marathi',
-    'Maths',
-    'Mathematics',
-    'Science',
-    'Social Science',
-    'Computer Science',
-  ];
-
   return list.map((item: any, idx: number) => {
     if (!item || typeof item !== 'object') return item;
-    const rollNo = parseInt(
-      String(
-        item.rollNo ??
-          item['Roll No'] ??
-          item['Roll'] ??
-          item['ROLL NO'] ??
-          item['roll'] ??
-          idx + 1
-      ),
-      10
-    ) || (idx + 1);
+    const rollNo =
+      parseInt(
+        String(
+          item.rollNo ??
+            item['Roll No'] ??
+            item['Roll'] ??
+            item['ROLL NO'] ??
+            item['roll'] ??
+            idx + 1
+        ),
+        10
+      ) || idx + 1;
 
     const name = String(
       item.name ??
@@ -129,39 +152,69 @@ function normalizeStudentList(rawData: any): any[] {
     ).trim();
 
     const section = String(
-      item.section ??
-        item['Section'] ??
-        item['SECTION'] ??
-        item['Class'] ??
-        '9 Diamond'
+      item.section ?? item['Section'] ?? item['SECTION'] ?? item['Class'] ?? 'Sparkle'
     ).trim();
 
     const marks: Record<string, number | 'AB' | null> = {};
     if (item.marks && typeof item.marks === 'object') {
-      Object.assign(marks, item.marks);
-    }
-
-    for (const [k, v] of Object.entries(item)) {
-      const cleanKey = k.replace(/\s*\(\d+\)/g, '').trim();
-      for (const sub of knownSubjects) {
-        if (cleanKey.toLowerCase() === sub.toLowerCase()) {
-          const targetSub = sub === 'Mathematics' ? 'Maths' : sub;
-          if (marks[targetSub] === undefined) {
-            if (v === 'AB' || String(v).trim().toUpperCase() === 'AB') {
-              marks[targetSub] = 'AB';
-            } else if (v !== null && v !== undefined && v !== '') {
-              const num = typeof v === 'number' ? v : parseFloat(String(v));
-              if (!isNaN(num)) marks[targetSub] = num;
-            }
-          }
+      for (const [subKey, rawVal] of Object.entries(item.marks)) {
+        const targetSub = subKey === 'Mathematics' ? 'Maths' : subKey;
+        if (rawVal === null || rawVal === undefined || rawVal === '') {
+          marks[targetSub] = null;
+        } else if (rawVal === 'AB' || String(rawVal).trim().toUpperCase() === 'AB') {
+          marks[targetSub] = 'AB';
+        } else {
+          const num = typeof rawVal === 'number' ? rawVal : parseFloat(String(rawVal));
+          marks[targetSub] = !isNaN(num) ? num : null;
         }
       }
     }
 
+    // Also parse any flat subject column (standard or custom Admin subjects)
+    for (const [k, v] of Object.entries(item)) {
+      const cleanKey = k.replace(/\s*\(\d+\)\s*$/g, '').trim();
+      const lowerKey = cleanKey.toLowerCase();
+      if (!cleanKey || META_COLUMN_KEYS.has(lowerKey) || lowerKey.startsWith('total')) {
+        continue;
+      }
+      const targetSub = cleanKey === 'Mathematics' ? 'Maths' : cleanKey;
+      if (marks[targetSub] === undefined) {
+        if (v === null || v === undefined || v === '') {
+          marks[targetSub] = null;
+        } else if (v === 'AB' || String(v).trim().toUpperCase() === 'AB') {
+          marks[targetSub] = 'AB';
+        } else {
+          const num = typeof v === 'number' ? v : parseFloat(String(v));
+          if (!isNaN(num)) marks[targetSub] = num;
+        }
+      }
+    }
+
+    let breakdowns = item.breakdowns;
+    if (typeof breakdowns === 'string') {
+      try {
+        breakdowns = JSON.parse(breakdowns);
+      } catch {
+        breakdowns = undefined;
+      }
+    }
+
+    let subjectRemarks = item.subjectRemarks;
+    if (typeof subjectRemarks === 'string') {
+      try {
+        subjectRemarks = JSON.parse(subjectRemarks);
+      } catch {
+        subjectRemarks = undefined;
+      }
+    }
+
+    const remarksVal = item.customRemarks ?? item.remarks ?? item['Class Teacher Remark'];
+
     return {
-      id: String(item.id || `sheet_${section}_${rollNo}`),
+      id: String(item.id || `sva-${section}-${rollNo}`),
       rollNo: String(rollNo).padStart(2, '0'),
       name,
+      class: item.class ? String(item.class) : undefined,
       section,
       admissionNo: item.admissionNo ? String(item.admissionNo) : undefined,
       dob: item.dob ? String(item.dob) : undefined,
@@ -171,10 +224,12 @@ function normalizeStudentList(rawData: any): any[] {
       height: item.height ? String(item.height) : undefined,
       weight: item.weight ? String(item.weight) : undefined,
       attendance: item.attendance ? String(item.attendance) : undefined,
-      customRemarks: item.customRemarks ? String(item.customRemarks) : undefined,
+      remarks: remarksVal ? String(remarksVal) : undefined,
+      customRemarks: remarksVal ? String(remarksVal) : undefined,
       marks,
-      breakdowns: item.breakdowns || undefined,
-      subjectRemarks: item.subjectRemarks || undefined,
+      breakdowns: breakdowns && typeof breakdowns === 'object' ? breakdowns : undefined,
+      subjectRemarks:
+        subjectRemarks && typeof subjectRemarks === 'object' ? subjectRemarks : undefined,
     };
   });
 }
@@ -197,20 +252,17 @@ export async function GET(req: NextRequest) {
 
     const validation = validateGasUrl(gasUrl);
     if (!validation.valid) {
-      return NextResponse.json(
-        { success: false, error: validation.error },
-        { status: 200 }
-      );
+      return NextResponse.json({ success: false, error: validation.error }, { status: 200 });
     }
 
-    const targetUrl = gasUrl.includes('?') 
+    const targetUrl = gasUrl.includes('?')
       ? `${gasUrl}&examName=${encodeURIComponent(examName)}`
       : `${gasUrl}?examName=${encodeURIComponent(examName)}`;
 
     const gasRes = await fetch(targetUrl, {
       method: 'GET',
       headers: {
-        'Accept': 'application/json',
+        Accept: 'application/json',
       },
       redirect: 'follow',
       cache: 'no-store',
@@ -222,7 +274,10 @@ export async function GET(req: NextRequest) {
 
     if (!result.success) {
       return NextResponse.json(
-        { success: false, error: result.error || 'Failed to parse response from Google Apps Script' },
+        {
+          success: false,
+          error: result.error || 'Failed to parse response from Google Apps Script',
+        },
         { status: 200 }
       );
     }
@@ -259,9 +314,8 @@ export async function POST(req: NextRequest) {
         { status: 400 }
       );
     }
-    const { url, students, examName } = body;
-    const gasUrl = (url || '').trim();
 
+    const gasUrl = (body.url || '').trim();
     if (!gasUrl) {
       return NextResponse.json(
         { success: false, error: 'Google Apps Script Web App URL is not configured.' },
@@ -271,21 +325,108 @@ export async function POST(req: NextRequest) {
 
     const validation = validateGasUrl(gasUrl);
     if (!validation.valid) {
-      return NextResponse.json(
-        { success: false, error: validation.error },
-        { status: 200 }
-      );
+      return NextResponse.json({ success: false, error: validation.error }, { status: 200 });
     }
+
+    // Coordinated multi-exam + Teachers & Mapping + ERP_System_State sync
+    if (body.action === 'syncAll') {
+      const students = Array.isArray(body.students) ? body.students : [];
+      const examConfigs = body.examConfigs && typeof body.examConfigs === 'object' ? body.examConfigs : {};
+      const examMarksStore = body.examMarksStore && typeof body.examMarksStore === 'object' ? body.examMarksStore : {};
+      const examBreakdownsStore =
+        body.examBreakdownsStore && typeof body.examBreakdownsStore === 'object'
+          ? body.examBreakdownsStore
+          : {};
+      const classes = Array.isArray(body.classes) ? body.classes : [];
+      const selectedExam = body.selectedExam || 'SA-1';
+      const selectedClass = body.selectedClass || 'Sparkle';
+      const examIds: string[] = Array.isArray(body.examIdsToPush)
+        ? body.examIdsToPush
+        : Object.keys(examConfigs);
+
+      const fullState: PersistedErpState = {
+        version: 1,
+        initialized: true,
+        updatedAt: Date.now(),
+        selectedClass,
+        selectedExam,
+        classes,
+        examConfigs,
+        students,
+        examMarksStore,
+        examBreakdownsStore,
+      };
+
+      const syncedExams: string[] = [];
+
+      // 1. Push ERP_System_State + Teachers & Mapping tabs
+      await pushCloudBackupToGoogleSheet(
+        fullState,
+        getStoredTeacherAccountsForBackup(),
+        gasUrl
+      );
+
+      // 2. Push each requested exam tab with its exam-specific marks, breakdowns, and examConfig
+      for (const examId of examIds) {
+        const examCfg = examConfigs[examId];
+        const storeMarksForExam = examMarksStore[examId] || {};
+        const storeBdsForExam = examBreakdownsStore[examId] || {};
+        const studentsForExam = students.map((st: any) => ({
+          ...st,
+          marks:
+            examId === selectedExam
+              ? st.marks || storeMarksForExam[st.id] || {}
+              : storeMarksForExam[st.id] || {},
+          breakdowns:
+            examId === selectedExam
+              ? st.breakdowns || storeBdsForExam[st.id] || {}
+              : storeBdsForExam[st.id] || {},
+        }));
+
+        try {
+          const examRes = await fetch(gasUrl, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Accept: 'application/json',
+            },
+            body: JSON.stringify({
+              students: studentsForExam,
+              examName: examId,
+              examConfig: examCfg,
+              classes,
+              timestamp: new Date().toISOString(),
+            }),
+            redirect: 'follow',
+            signal: AbortSignal.timeout(12000),
+          });
+          if (examRes.ok) {
+            syncedExams.push(examId);
+          }
+        } catch {}
+      }
+
+      return NextResponse.json({
+        success: true,
+        updatedRows: students.length,
+        syncedExams,
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const { students, examName, examConfig, classes } = body;
 
     const gasRes = await fetch(gasUrl, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Accept': 'application/json',
+        Accept: 'application/json',
       },
       body: JSON.stringify({
         students,
         examName,
+        examConfig,
+        classes,
         timestamp: new Date().toISOString(),
       }),
       redirect: 'follow',
@@ -297,7 +438,10 @@ export async function POST(req: NextRequest) {
 
     if (!result.success) {
       return NextResponse.json(
-        { success: false, error: result.error || 'Failed to parse response from Google Apps Script' },
+        {
+          success: false,
+          error: result.error || 'Failed to parse response from Google Apps Script',
+        },
         { status: 200 }
       );
     }
@@ -310,4 +454,3 @@ export async function POST(req: NextRequest) {
     );
   }
 }
-

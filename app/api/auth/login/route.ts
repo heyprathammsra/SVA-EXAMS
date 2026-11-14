@@ -6,9 +6,12 @@ import {
   checkLoginRateLimit,
   clearLoginFailures,
   createSessionToken,
+  getStoredTeacherAccountsForBackup,
   recordLoginFailure,
+  restoreTeacherAccountsFromBackup,
 } from '@/lib/auth';
 import { getRequestClientKey, isHttpsRequest } from '@/lib/auth-server';
+import { pullCloudBackupFromGoogleSheet } from '@/lib/sheets-cloud-store';
 
 export const dynamic = 'force-dynamic';
 
@@ -42,7 +45,26 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const authResult = authenticateUserCredentials(username, password);
+    let authResult = authenticateUserCredentials(username, password);
+    if (username.toLowerCase() !== 'admin') {
+      const cloud = await pullCloudBackupFromGoogleSheet({
+        force: !authResult.authenticated,
+      });
+      if (cloud?.teachers && cloud.teachers.length > 0) {
+        const localMaxUpdated = Math.max(
+          0,
+          ...getStoredTeacherAccountsForBackup().map((t) => t.updatedAt || 0)
+        );
+        const cloudMaxUpdated = Math.max(
+          0,
+          ...cloud.teachers.map((t) => t.updatedAt || 0)
+        );
+        if (!authResult.authenticated || cloudMaxUpdated > localMaxUpdated) {
+          restoreTeacherAccountsFromBackup(cloud.teachers);
+          authResult = authenticateUserCredentials(username, password);
+        }
+      }
+    }
     if (!authResult.authenticated || !authResult.role || !authResult.username) {
       const failure = recordLoginFailure(clientKey);
       if (failure.locked) {

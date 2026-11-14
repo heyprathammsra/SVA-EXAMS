@@ -102,10 +102,24 @@ export function sanitizeAndValidateErpState(
       ? existingServerState.classes
       : incoming.classes;
 
-  const activeExamId =
+  // The exam that incoming.students[].marks and incoming.students[].breakdowns belong to
+  const incomingExamId =
     typeof incoming.selectedExam === 'string' && authoritativeExamConfigs[incoming.selectedExam]
       ? incoming.selectedExam
       : Object.keys(authoritativeExamConfigs)[0] || 'SA-1';
+
+  // Preserve Admin's active exam and class on the server when a teacher saves marks in any exam/class
+  const serverExamId =
+    enforceTeacherScope &&
+    existingServerState?.selectedExam &&
+    authoritativeExamConfigs[existingServerState.selectedExam]
+      ? existingServerState.selectedExam
+      : incomingExamId;
+
+  const serverSelectedClass =
+    enforceTeacherScope && existingServerState?.selectedClass
+      ? sanitizeText(existingServerState.selectedClass, 60)
+      : sanitizeText(incoming.selectedClass || 'Diamond', 60);
 
   // Map existing students by ID so teachers cannot delete the roster or spoof student identities
   const existingStudentsById = new Map<string, StudentReportRow>();
@@ -121,9 +135,212 @@ export function sanitizeAndValidateErpState(
     ? incoming.students
     : [];
 
+  // Build student section map for mark bound validation
+  const studentSectionMap = new Map<string, string>();
+  for (const st of sourceStudents) {
+    if (st && typeof st === 'object' && typeof st.id === 'string') {
+      const existingStu = existingStudentsById.get(st.id);
+      const sec =
+        isTeacher && existingStu ? existingStu.section : sanitizeText(st.section, 60);
+      studentSectionMap.set(sanitizeText(st.id, 80), sec);
+    }
+  }
+  if (isTeacher && existingServerState?.students) {
+    for (const existingStu of existingServerState.students) {
+      if (!studentSectionMap.has(existingStu.id)) {
+        studentSectionMap.set(existingStu.id, existingStu.section);
+      }
+    }
+  }
+
+  // 1. Sanitize examMarksStore across all exams first
+  const cleanExamMarksStore: PersistedErpState['examMarksStore'] = {};
+  if (enforceTeacherScope && existingServerState) {
+    if (existingServerState.examMarksStore) {
+      for (const [exId, byStu] of Object.entries(existingServerState.examMarksStore)) {
+        cleanExamMarksStore[exId] = {};
+        for (const [stuId, marks] of Object.entries(byStu || {})) {
+          cleanExamMarksStore[exId][stuId] = { ...marks };
+        }
+      }
+    }
+    // Also ensure existingServerState.selectedExam marks from existingServerState.students are seeded
+    const prevServerExam = existingServerState.selectedExam;
+    if (prevServerExam && Array.isArray(existingServerState.students)) {
+      if (!cleanExamMarksStore[prevServerExam]) cleanExamMarksStore[prevServerExam] = {};
+      for (const existingStu of existingServerState.students) {
+        if (!existingStu?.id) continue;
+        cleanExamMarksStore[prevServerExam][existingStu.id] = {
+          ...(cleanExamMarksStore[prevServerExam][existingStu.id] || {}),
+          ...(existingStu.marks || {}),
+        };
+      }
+    }
+  }
+
+  if (incoming.examMarksStore && typeof incoming.examMarksStore === 'object') {
+    for (const [examId, byStudent] of Object.entries(incoming.examMarksStore)) {
+      if (!byStudent || typeof byStudent !== 'object') continue;
+      if (!cleanExamMarksStore[examId]) cleanExamMarksStore[examId] = {};
+      for (const [studentId, subjectMarks] of Object.entries(byStudent)) {
+        if (!subjectMarks || typeof subjectMarks !== 'object') continue;
+        const cleanStuId = sanitizeText(studentId, 80);
+        const section = studentSectionMap.get(cleanStuId) || 'Diamond';
+        if (!cleanExamMarksStore[examId][cleanStuId]) {
+          cleanExamMarksStore[examId][cleanStuId] = {};
+        }
+        for (const [subName, markVal] of Object.entries(subjectMarks)) {
+          const cleanSub = sanitizeText(subName, 60);
+          if (
+            enforceTeacherScope &&
+            !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
+          ) {
+            continue;
+          }
+          const maxMarks = resolveSubjectMaxMarks(
+            authoritativeExamConfigs,
+            examId,
+            section,
+            cleanSub
+          );
+          cleanExamMarksStore[examId][cleanStuId][cleanSub] =
+            sanitizeMarkValue(markVal, maxMarks);
+        }
+      }
+    }
+  }
+
+  // 2. Sanitize examBreakdownsStore across all exams
+  const cleanExamBreakdownsStore: PersistedErpState['examBreakdownsStore'] = {};
+  if (enforceTeacherScope && existingServerState) {
+    if (existingServerState.examBreakdownsStore) {
+      for (const [exId, byStu] of Object.entries(existingServerState.examBreakdownsStore)) {
+        cleanExamBreakdownsStore[exId] = {};
+        for (const [stuId, bds] of Object.entries(byStu || {})) {
+          cleanExamBreakdownsStore[exId][stuId] = { ...bds };
+        }
+      }
+    }
+    const prevServerExam = existingServerState.selectedExam;
+    if (prevServerExam && Array.isArray(existingServerState.students)) {
+      if (!cleanExamBreakdownsStore[prevServerExam]) {
+        cleanExamBreakdownsStore[prevServerExam] = {};
+      }
+      for (const existingStu of existingServerState.students) {
+        if (!existingStu?.id || !existingStu.breakdowns) continue;
+        cleanExamBreakdownsStore[prevServerExam][existingStu.id] = {
+          ...(cleanExamBreakdownsStore[prevServerExam][existingStu.id] || {}),
+          ...existingStu.breakdowns,
+        };
+      }
+    }
+  }
+
+  if (incoming.examBreakdownsStore && typeof incoming.examBreakdownsStore === 'object') {
+    for (const [examId, byStudent] of Object.entries(incoming.examBreakdownsStore)) {
+      if (!byStudent || typeof byStudent !== 'object') continue;
+      if (!cleanExamBreakdownsStore[examId]) cleanExamBreakdownsStore[examId] = {};
+      for (const [studentId, subjectBds] of Object.entries(byStudent)) {
+        if (!subjectBds || typeof subjectBds !== 'object') continue;
+        const cleanStuId = sanitizeText(studentId, 80);
+        const section = studentSectionMap.get(cleanStuId) || 'Diamond';
+        if (!cleanExamBreakdownsStore[examId][cleanStuId]) {
+          cleanExamBreakdownsStore[examId][cleanStuId] = {};
+        }
+        for (const [subName, bd] of Object.entries(subjectBds)) {
+          const cleanSub = sanitizeText(subName, 60);
+          if (
+            enforceTeacherScope &&
+            !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
+          ) {
+            continue;
+          }
+          const maxMarks = resolveSubjectMaxMarks(
+            authoritativeExamConfigs,
+            examId,
+            section,
+            cleanSub
+          );
+          const cleanedBd = sanitizeBreakdown(bd, maxMarks);
+          if (cleanedBd) {
+            cleanExamBreakdownsStore[examId][cleanStuId][cleanSub] = cleanedBd;
+          } else {
+            delete cleanExamBreakdownsStore[examId][cleanStuId][cleanSub];
+          }
+        }
+      }
+    }
+  }
+
+  // 3. Merge incoming.students marks/breakdowns into cleanExamMarksStore[incomingExamId] & cleanExamBreakdownsStore[incomingExamId]
+  if (!cleanExamMarksStore[incomingExamId]) cleanExamMarksStore[incomingExamId] = {};
+  if (!cleanExamBreakdownsStore[incomingExamId]) cleanExamBreakdownsStore[incomingExamId] = {};
+
+  for (const st of sourceStudents) {
+    if (!st || typeof st !== 'object' || typeof st.id !== 'string') continue;
+    const cleanStuId = sanitizeText(st.id, 80);
+    const existingStu = existingStudentsById.get(st.id);
+    const section =
+      isTeacher && existingStu ? existingStu.section : sanitizeText(st.section, 60);
+
+    if (!cleanExamMarksStore[incomingExamId][cleanStuId]) {
+      cleanExamMarksStore[incomingExamId][cleanStuId] = {};
+    }
+    if (st.marks && typeof st.marks === 'object') {
+      for (const [subjectName, markVal] of Object.entries(st.marks)) {
+        const cleanSub = sanitizeText(subjectName, 60);
+        if (
+          enforceTeacherScope &&
+          !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
+        ) {
+          continue;
+        }
+        const maxMarks = resolveSubjectMaxMarks(
+          authoritativeExamConfigs,
+          incomingExamId,
+          section,
+          cleanSub
+        );
+        cleanExamMarksStore[incomingExamId][cleanStuId][cleanSub] = sanitizeMarkValue(
+          markVal,
+          maxMarks
+        );
+      }
+    }
+
+    if (!cleanExamBreakdownsStore[incomingExamId][cleanStuId]) {
+      cleanExamBreakdownsStore[incomingExamId][cleanStuId] = {};
+    }
+    if (st.breakdowns && typeof st.breakdowns === 'object') {
+      for (const [subjectName, bd] of Object.entries(st.breakdowns)) {
+        const cleanSub = sanitizeText(subjectName, 60);
+        if (
+          enforceTeacherScope &&
+          !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
+        ) {
+          continue;
+        }
+        const maxMarks = resolveSubjectMaxMarks(
+          authoritativeExamConfigs,
+          incomingExamId,
+          section,
+          cleanSub
+        );
+        const sanitizedBd = sanitizeBreakdown(bd, maxMarks);
+        if (sanitizedBd) {
+          cleanExamBreakdownsStore[incomingExamId][cleanStuId][cleanSub] = sanitizedBd;
+        } else {
+          delete cleanExamBreakdownsStore[incomingExamId][cleanStuId][cleanSub];
+        }
+      }
+    }
+  }
+
+  // 4. Construct sanitizedStudents whose .marks and .breakdowns correspond to serverExamId
   const sanitizedStudents: StudentReportRow[] = sourceStudents
     .filter((st) => st && typeof st === 'object' && typeof st.id === 'string')
     .map((st) => {
+      const cleanStuId = sanitizeText(st.id, 80);
       const existingStu = existingStudentsById.get(st.id);
       const section =
         isTeacher && existingStu ? existingStu.section : sanitizeText(st.section, 60);
@@ -132,52 +349,52 @@ export function sanitizeAndValidateErpState(
       const rollNo =
         isTeacher && existingStu ? existingStu.rollNo : sanitizeText(st.rollNo, 20);
 
-      // Start with existing marks/breakdowns/subjectRemarks when enforcing teacher scope
-      const cleanMarks: Record<string, number | 'AB' | null> =
-        enforceTeacherScope && existingStu?.marks ? { ...existingStu.marks } : {};
+      let cleanMarks: Record<string, number | 'AB' | null>;
+      let cleanBreakdowns: Record<string, SubjectBreakdown>;
 
-      if (st.marks && typeof st.marks === 'object') {
-        for (const [subjectName, markVal] of Object.entries(st.marks)) {
-          const cleanSub = sanitizeText(subjectName, 60);
-          if (
-            enforceTeacherScope &&
-            !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
-          ) {
-            continue;
-          }
-          const maxMarks = resolveSubjectMaxMarks(
-            authoritativeExamConfigs,
-            activeExamId,
-            section,
-            cleanSub
-          );
-          cleanMarks[cleanSub] = sanitizeMarkValue(markVal, maxMarks);
+      if (enforceTeacherScope && incomingExamId !== serverExamId) {
+        // Teacher edited a different exam than serverExamId: keep serverExamId's marks on student rows
+        cleanMarks = {
+          ...(existingStu?.marks || {}),
+          ...(cleanExamMarksStore[serverExamId]?.[cleanStuId] || {}),
+        };
+        cleanBreakdowns = {
+          ...(existingStu?.breakdowns || {}),
+          ...(cleanExamBreakdownsStore[serverExamId]?.[cleanStuId] || {}),
+        };
+      } else {
+        cleanMarks =
+          enforceTeacherScope && existingStu?.marks ? { ...existingStu.marks } : {};
+        const storeMarksForActive = cleanExamMarksStore[serverExamId]?.[cleanStuId];
+        if (storeMarksForActive) {
+          Object.assign(cleanMarks, storeMarksForActive);
         }
-      }
 
-      const cleanBreakdowns: Record<string, SubjectBreakdown> =
-        enforceTeacherScope && existingStu?.breakdowns ? { ...existingStu.breakdowns } : {};
-
-      if (st.breakdowns && typeof st.breakdowns === 'object') {
-        for (const [subjectName, bd] of Object.entries(st.breakdowns)) {
-          const cleanSub = sanitizeText(subjectName, 60);
-          if (
-            enforceTeacherScope &&
-            !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
-          ) {
-            continue;
-          }
-          const maxMarks = resolveSubjectMaxMarks(
-            authoritativeExamConfigs,
-            activeExamId,
-            section,
-            cleanSub
-          );
-          const sanitizedBd = sanitizeBreakdown(bd, maxMarks);
-          if (sanitizedBd) {
-            cleanBreakdowns[cleanSub] = sanitizedBd;
-          } else {
-            delete cleanBreakdowns[cleanSub];
+        cleanBreakdowns =
+          enforceTeacherScope && existingStu?.breakdowns
+            ? { ...existingStu.breakdowns }
+            : {};
+        if (st.breakdowns && typeof st.breakdowns === 'object') {
+          for (const [subjectName, bd] of Object.entries(st.breakdowns)) {
+            const cleanSub = sanitizeText(subjectName, 60);
+            if (
+              enforceTeacherScope &&
+              !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
+            ) {
+              continue;
+            }
+            const maxMarks = resolveSubjectMaxMarks(
+              authoritativeExamConfigs,
+              serverExamId,
+              section,
+              cleanSub
+            );
+            const sanitizedBd = sanitizeBreakdown(bd, maxMarks);
+            if (sanitizedBd) {
+              cleanBreakdowns[cleanSub] = sanitizedBd;
+            } else {
+              delete cleanBreakdowns[cleanSub];
+            }
           }
         }
       }
@@ -220,7 +437,7 @@ export function sanitizeAndValidateErpState(
 
       return {
         ...st,
-        id: sanitizeText(st.id, 80),
+        id: cleanStuId,
         rollNo,
         name,
         section,
@@ -280,98 +497,19 @@ export function sanitizeAndValidateErpState(
     const presentIds = new Set(sanitizedStudents.map((s) => s.id));
     for (const existingStu of existingServerState.students) {
       if (!presentIds.has(existingStu.id)) {
-        sanitizedStudents.push(existingStu);
-      }
-    }
-  }
-
-  const studentSectionMap = new Map<string, string>();
-  for (const st of sanitizedStudents) {
-    studentSectionMap.set(st.id, st.section);
-  }
-
-  // Sanitize examMarksStore across all exams
-  const cleanExamMarksStore: PersistedErpState['examMarksStore'] = {};
-  if (enforceTeacherScope && existingServerState?.examMarksStore) {
-    for (const [exId, byStu] of Object.entries(existingServerState.examMarksStore)) {
-      cleanExamMarksStore[exId] = {};
-      for (const [stuId, marks] of Object.entries(byStu || {})) {
-        cleanExamMarksStore[exId][stuId] = { ...marks };
-      }
-    }
-  }
-
-  if (incoming.examMarksStore && typeof incoming.examMarksStore === 'object') {
-    for (const [examId, byStudent] of Object.entries(incoming.examMarksStore)) {
-      if (!byStudent || typeof byStudent !== 'object') continue;
-      if (!cleanExamMarksStore[examId]) cleanExamMarksStore[examId] = {};
-      for (const [studentId, subjectMarks] of Object.entries(byStudent)) {
-        if (!subjectMarks || typeof subjectMarks !== 'object') continue;
-        const section = studentSectionMap.get(studentId) || 'Diamond';
-        if (!cleanExamMarksStore[examId][studentId]) {
-          cleanExamMarksStore[examId][studentId] = {};
-        }
-        for (const [subName, markVal] of Object.entries(subjectMarks)) {
-          const cleanSub = sanitizeText(subName, 60);
-          if (
-            enforceTeacherScope &&
-            !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
-          ) {
-            continue;
-          }
-          const maxMarks = resolveSubjectMaxMarks(
-            authoritativeExamConfigs,
-            examId,
-            section,
-            cleanSub
-          );
-          cleanExamMarksStore[examId][studentId][cleanSub] =
-            sanitizeMarkValue(markVal, maxMarks);
-        }
-      }
-    }
-  }
-
-  // Sanitize examBreakdownsStore across all exams
-  const cleanExamBreakdownsStore: PersistedErpState['examBreakdownsStore'] = {};
-  if (enforceTeacherScope && existingServerState?.examBreakdownsStore) {
-    for (const [exId, byStu] of Object.entries(existingServerState.examBreakdownsStore)) {
-      cleanExamBreakdownsStore[exId] = {};
-      for (const [stuId, bds] of Object.entries(byStu || {})) {
-        cleanExamBreakdownsStore[exId][stuId] = { ...bds };
-      }
-    }
-  }
-
-  if (incoming.examBreakdownsStore && typeof incoming.examBreakdownsStore === 'object') {
-    for (const [examId, byStudent] of Object.entries(incoming.examBreakdownsStore)) {
-      if (!byStudent || typeof byStudent !== 'object') continue;
-      if (!cleanExamBreakdownsStore[examId]) cleanExamBreakdownsStore[examId] = {};
-      for (const [studentId, subjectBds] of Object.entries(byStudent)) {
-        if (!subjectBds || typeof subjectBds !== 'object') continue;
-        const section = studentSectionMap.get(studentId) || 'Diamond';
-        if (!cleanExamBreakdownsStore[examId][studentId]) {
-          cleanExamBreakdownsStore[examId][studentId] = {};
-        }
-        for (const [subName, bd] of Object.entries(subjectBds)) {
-          const cleanSub = sanitizeText(subName, 60);
-          if (
-            enforceTeacherScope &&
-            !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
-          ) {
-            continue;
-          }
-          const maxMarks = resolveSubjectMaxMarks(
-            authoritativeExamConfigs,
-            examId,
-            section,
-            cleanSub
-          );
-          const cleanedBd = sanitizeBreakdown(bd, maxMarks);
-          if (cleanedBd) {
-            cleanExamBreakdownsStore[examId][studentId][cleanSub] = cleanedBd;
-          }
-        }
+        const restoredMarks = {
+          ...(existingStu.marks || {}),
+          ...(cleanExamMarksStore[serverExamId]?.[existingStu.id] || {}),
+        };
+        const restoredBds = {
+          ...(existingStu.breakdowns || {}),
+          ...(cleanExamBreakdownsStore[serverExamId]?.[existingStu.id] || {}),
+        };
+        sanitizedStudents.push({
+          ...existingStu,
+          marks: restoredMarks,
+          breakdowns: restoredBds,
+        });
       }
     }
   }
@@ -380,8 +518,8 @@ export function sanitizeAndValidateErpState(
     version: 1,
     initialized: true,
     updatedAt: nowMs,
-    selectedClass: sanitizeText(incoming.selectedClass || 'Diamond', 60),
-    selectedExam: activeExamId,
+    selectedClass: serverSelectedClass,
+    selectedExam: serverExamId,
     classes: authoritativeClasses,
     examConfigs: authoritativeExamConfigs,
     students: sanitizedStudents,
