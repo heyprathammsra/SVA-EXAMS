@@ -550,9 +550,9 @@ export default function ClassesStudentsManager({
           onClick={(e) => {
             if (e.target === e.currentTarget) setIsAddStudentOpen(false);
           }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4 animate-in fade-in duration-150"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-3 sm:p-4 animate-in fade-in duration-150"
         >
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-md p-5 space-y-4 animate-in zoom-in-95 duration-150">
+          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-md max-h-[90vh] overflow-y-auto p-4 sm:p-5 space-y-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
               <h3 className="text-sm font-semibold text-slate-900">Add Student</h3>
               <button
@@ -678,7 +678,7 @@ export default function ClassesStudentsManager({
                 </div>
               </div>
 
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <div>
                   <label className="text-slate-600 block mb-1 font-medium">Height (cm)</label>
                   <input

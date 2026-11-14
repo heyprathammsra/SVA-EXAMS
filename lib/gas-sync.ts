@@ -1,10 +1,12 @@
 /**
- * Google Apps Script Sync Service (v2.0)
+ * Google Apps Script Sync Service (v3.0)
  * Two-way sync with Google Sheets supporting:
+ * - Atomic concurrency locking (LockService + flush) for multi-user 10s auto-sync
+ * - Formula-safe chunk & text encoding for ERP_System_State & Exam tabs
  * - Multi-exam tabs (PT-1..4, SA-1..2, and custom exams created by Admin)
  * - Dynamic subjects, custom max marks, and internal assessment breakdowns
  * - Student particulars (Class/Grade, House, DOB, Attendance, Height, Weight, Parents) & Remarks
- * - Dedicated "Teachers & Mapping" tab and "ERP_System_State" cloud backup tab
+ * - Structured "Teachers & Mapping" tab and "ERP_System_State" cloud backup tab
  */
 
 import { getAdminAuthHeaders } from './auth-client';
@@ -35,14 +37,15 @@ export function saveStoredGasUrl(url: string): void {
 
 export const GAS_SCRIPT_CODE = `/**
  * =========================================================================
- * GOOGLE APPS SCRIPT FOR SARASWATI VIDYA ACADEMY EXAM WEB APP (v2.0)
+ * GOOGLE APPS SCRIPT FOR SARASWATI VIDYA ACADEMY EXAM WEB APP (v3.0)
  * Target Sheet: SVA EXAM WEB APP (ID: 1EzodiIYrfqqNoLgkvBATIvZAlRo00-UlDFw2XJXW0s)
  * Supports:
+ *  - LockService Atomic Read/Write + Flush (prevents multi-user sync races)
+ *  - Formula-Safe Base64 Chunk Storage (prevents '+' or '=' chunks corrupting)
+ *  - Structured "Teachers & Mapping" Tab (Username, Subject, Class Teacher, Classes)
  *  - Dynamic Subjects, Custom Max Marks, and Internal Assessment Breakdowns
  *  - Cleared Marks (blank cells stay blank, never overwritten with fake defaults)
- *  - Student Particulars (Class, House, DOB, Attendance, Height, Weight, Parents)
- *  - Class Teacher & Subject Remarks
- *  - Dedicated "Teachers & Mapping" Tab & "ERP_System_State" Cloud Sync Tab
+ *  - Student Particulars & Class Teacher / Subject Remarks
  * =========================================================================
  *
  * HOW TO UPDATE / DEPLOY (Takes 1 minute):
@@ -56,19 +59,47 @@ export const GAS_SCRIPT_CODE = `/**
 
 var SPREADSHEET_ID = "1EzodiIYrfqqNoLgkvBATIvZAlRo00-UlDFw2XJXW0s";
 
-function getTargetSheet(examName) {
-  var ss;
+function getTargetSpreadsheet() {
   try {
-    ss = SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(SPREADSHEET_ID);
+    return SpreadsheetApp.getActiveSpreadsheet() || SpreadsheetApp.openById(SPREADSHEET_ID);
   } catch (e) {
-    ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+    return SpreadsheetApp.openById(SPREADSHEET_ID);
   }
+}
+
+function getTargetSheet(examName) {
+  var ss = getTargetSpreadsheet();
   var tabName = (examName && String(examName).trim()) ? String(examName).trim() : "SA-1";
   var sheet = ss.getSheetByName(tabName);
   if (!sheet) {
     sheet = ss.insertSheet(tabName);
   }
   return sheet;
+}
+
+// Prevents Google Sheets from evaluating strings starting with '=', '+', '-' as formulas
+// (Critical for base64 state chunks, attendance like 180/195, and remarks).
+function safeSheetTextValue(val) {
+  if (val === null || val === undefined) return "";
+  var str = String(val);
+  if (!str) return "";
+  var firstChar = str.charAt(0);
+  if (firstChar === "=" || firstChar === "+" || firstChar === "-" || firstChar === "@") {
+    return "'" + str;
+  }
+  return str;
+}
+
+function formatCellReadString(v) {
+  if (v === null || v === undefined || v === "") return "";
+  if (v instanceof Date) {
+    return Utilities.formatDate(v, Session.getScriptTimeZone() || "Asia/Kolkata", "yyyy-MM-dd");
+  }
+  var s = String(v);
+  if (s.charAt(0) === "'") {
+    return s.substring(1);
+  }
+  return s;
 }
 
 function parseCellMark(v) {
@@ -89,8 +120,11 @@ function safeJsonParse(str, fallback) {
 
 // 1. GET: Pulls exam tab rows, Teachers & Mapping, or ERP_System_State backup
 function doGet(e) {
+  var lock = LockService.getScriptLock();
+  var hasLock = false;
   try {
-    var examName = (e && e.parameter && e.parameter.examName) ? e.parameter.examName : "SA-1";
+    hasLock = lock.tryLock(15000);
+    var examName = (e && e.parameter && e.parameter.examName) ? String(e.parameter.examName).trim() : "SA-1";
     var sheet = getTargetSheet(examName);
     var data = sheet.getDataRange().getValues();
 
@@ -100,20 +134,44 @@ function doGet(e) {
 
     var headers = data[0].map(function(h) { return String(h || "").trim(); });
 
-    // System Cloud Backup tab ("ERP_System_State")
+    // System Cloud Backup tab ("ERP_System_State") - sort chunks numerically by Chunk Index
     if (examName === "ERP_System_State") {
       var chunks = [];
       for (var c = 1; c < data.length; c++) {
         var cRow = data[c];
         if (!cRow || !cRow[1]) continue;
+        var chunkIdx = parseInt(String(cRow[0] || c), 10) || c;
         chunks.push({
-          id: "cloud-chunk-" + c,
-          rollNo: String(cRow[0] || c),
-          name: String(cRow[1] || ""),
-          section: String(cRow[2] || "")
+          id: "cloud-chunk-" + chunkIdx,
+          rollNo: String(chunkIdx),
+          name: formatCellReadString(cRow[1]),
+          section: formatCellReadString(cRow[2]),
+          _order: chunkIdx
         });
       }
+      chunks.sort(function(a, b) { return a._order - b._order; });
+      for (var k = 0; k < chunks.length; k++) {
+        delete chunks[k]._order;
+      }
       return jsonResponse({ success: true, count: chunks.length, exam: examName, students: chunks });
+    }
+
+    // Teachers & Mapping tab
+    if (examName === "Teachers & Mapping") {
+      var teacherRows = [];
+      for (var tIdx = 1; tIdx < data.length; tIdx++) {
+        var tRow = data[tIdx];
+        if (!tRow || !tRow[0]) continue;
+        teacherRows.push({
+          id: "teacher-row-" + tIdx,
+          rollNo: formatCellReadString(tRow[0]),
+          name: formatCellReadString(tRow[1]),
+          section: formatCellReadString(tRow[4] || tRow[2] || ""),
+          assignedSubject: headers.length >= 5 ? formatCellReadString(tRow[2]) : "",
+          classTeacherOf: headers.length >= 5 ? formatCellReadString(tRow[3]) : ""
+        });
+      }
+      return jsonResponse({ success: true, count: teacherRows.length, exam: examName, students: teacherRows });
     }
 
     var metaCols = {
@@ -178,27 +236,28 @@ function doGet(e) {
 
       var stuObj = {
         id: String("sva-" + (row[2] || "Sparkle") + "-" + (row[0] || i)),
-        rollNo: String(row[0] || i),
-        name: String(row[1] || ""),
-        section: String(row[2] || "Sparkle"),
+        rollNo: formatCellReadString(row[0] || i),
+        name: formatCellReadString(row[1]),
+        section: formatCellReadString(row[2] || "Sparkle"),
         marks: marks,
-        breakdowns: colBreakdowns >= 0 ? safeJsonParse(String(row[colBreakdowns] || ""), {}) : {}
+        breakdowns: colBreakdowns >= 0 ? safeJsonParse(formatCellReadString(row[colBreakdowns]), {}) : {}
       };
 
-      if (colClass >= 0 && row[colClass]) stuObj.class = String(row[colClass]);
-      if (colHouse >= 0 && row[colHouse]) stuObj.house = String(row[colHouse]);
-      if (colDob >= 0 && row[colDob]) stuObj.dob = String(row[colDob]);
-      if (colAtt >= 0 && row[colAtt]) stuObj.attendance = String(row[colAtt]);
-      if (colHeight >= 0 && row[colHeight]) stuObj.height = String(row[colHeight]);
-      if (colWeight >= 0 && row[colWeight]) stuObj.weight = String(row[colWeight]);
-      if (colFather >= 0 && row[colFather]) stuObj.fatherName = String(row[colFather]);
-      if (colMother >= 0 && row[colMother]) stuObj.motherName = String(row[colMother]);
-      if (colRemark >= 0 && row[colRemark]) {
-        stuObj.remarks = String(row[colRemark]);
-        stuObj.customRemarks = String(row[colRemark]);
+      if (colClass >= 0 && row[colClass] !== "") stuObj.class = formatCellReadString(row[colClass]);
+      if (colHouse >= 0 && row[colHouse] !== "") stuObj.house = formatCellReadString(row[colHouse]);
+      if (colDob >= 0 && row[colDob] !== "") stuObj.dob = formatCellReadString(row[colDob]);
+      if (colAtt >= 0 && row[colAtt] !== "") stuObj.attendance = formatCellReadString(row[colAtt]);
+      if (colHeight >= 0 && row[colHeight] !== "") stuObj.height = formatCellReadString(row[colHeight]);
+      if (colWeight >= 0 && row[colWeight] !== "") stuObj.weight = formatCellReadString(row[colWeight]);
+      if (colFather >= 0 && row[colFather] !== "") stuObj.fatherName = formatCellReadString(row[colFather]);
+      if (colMother >= 0 && row[colMother] !== "") stuObj.motherName = formatCellReadString(row[colMother]);
+      if (colRemark >= 0 && row[colRemark] !== "") {
+        var remStr = formatCellReadString(row[colRemark]);
+        stuObj.remarks = remStr;
+        stuObj.customRemarks = remStr;
       }
-      if (colSubRemarks >= 0 && row[colSubRemarks]) {
-        stuObj.subjectRemarks = safeJsonParse(String(row[colSubRemarks] || ""), {});
+      if (colSubRemarks >= 0 && row[colSubRemarks] !== "") {
+        stuObj.subjectRemarks = safeJsonParse(formatCellReadString(row[colSubRemarks]), {});
       }
 
       students.push(stuObj);
@@ -207,43 +266,112 @@ function doGet(e) {
     return jsonResponse({ success: true, count: students.length, exam: examName, students: students });
   } catch (err) {
     return jsonResponse({ success: false, error: err.toString() });
+  } finally {
+    if (hasLock) {
+      try { lock.releaseLock(); } catch (e) {}
+    }
   }
 }
 
-// 2. POST: Saves student marks, particulars, remarks, dynamic subjects, and Teacher Mappings
+// 2. POST: Atomic writes for student marks, particulars, remarks, dynamic subjects, Teachers & Mapping, and ERP_System_State
 function doPost(e) {
+  var lock = LockService.getScriptLock();
+  var hasLock = false;
   try {
+    lock.waitLock(20000);
+    hasLock = true;
+
     var payload = (e.postData && e.postData.contents) ? JSON.parse(e.postData.contents) : e.parameter;
     var students = payload.students || [];
-    var examName = payload.examName || "SA-1";
+    var examName = (payload.examName && String(payload.examName).trim()) ? String(payload.examName).trim() : "SA-1";
+    var isSystemTab = examName === "ERP_System_State" || Boolean(payload.isSystemBackup);
+    var isTeachersTab = examName === "Teachers & Mapping" || Boolean(payload.isTeachersTab);
 
-    if (!Array.isArray(students) || students.length === 0) {
+    if (!isSystemTab && !isTeachersTab && (!Array.isArray(students) || students.length === 0)) {
       return jsonResponse({ success: false, error: "No records provided" });
     }
 
     var sheet = getTargetSheet(examName);
 
-    // Case A: System Cloud Backup or Teachers & Mapping Tab
-    if (examName === "ERP_System_State" || examName === "Teachers & Mapping" || payload.isSystemBackup || payload.isTeachersTab) {
-      var sysHeaders = examName === "Teachers & Mapping"
-        ? ["Username", "Teacher Name & Role", "Mapped Classes"]
-        : ["Chunk Index", "Compressed State Payload", "Metadata"];
-      var sysRows = [sysHeaders];
+    // Case A1: System Cloud Backup ("ERP_System_State")
+    if (isSystemTab) {
+      var cloudHeaders = ["Chunk Index", "Compressed State Payload", "Metadata"];
+      var cloudRows = [cloudHeaders];
       for (var idx = 0; idx < students.length; idx++) {
         var item = students[idx];
-        sysRows.push([
-          item.rollNo || (idx + 1),
-          item.name || "",
-          item.section || ""
+        cloudRows.push([
+          idx + 1,
+          safeSheetTextValue(item.name || ""),
+          safeSheetTextValue(item.section || "")
         ]);
       }
       sheet.clearContents();
-      sheet.getRange(1, 1, sysRows.length, sysHeaders.length).setValues(sysRows);
+      var cloudRange = sheet.getRange(1, 1, cloudRows.length, cloudHeaders.length);
+      cloudRange.setNumberFormat("@");
+      cloudRange.setValues(cloudRows);
+      SpreadsheetApp.flush();
       return jsonResponse({
         success: true,
         exam: examName,
         sheetTab: sheet.getName(),
-        updatedRows: sysRows.length - 1,
+        updatedRows: cloudRows.length - 1,
+        timestamp: new Date().toISOString()
+      });
+    }
+
+    // Case A2: Teachers & Mapping Tab (Structured 7-column directory synced for all users)
+    if (isTeachersTab) {
+      var syncedAt = payload.timestamp || new Date().toISOString();
+      var teacherHeaders = [
+        "Username",
+        "Teacher Name",
+        "Assigned Subject",
+        "Class Teacher Of",
+        "Mapped Classes",
+        "Class Count",
+        "Last Synced"
+      ];
+      var teacherRows = [teacherHeaders];
+
+      if (Array.isArray(payload.teachers) && payload.teachers.length > 0) {
+        for (var t = 0; t < payload.teachers.length; t++) {
+          var tp = payload.teachers[t];
+          var clsList = Array.isArray(tp.assignedClasses) ? tp.assignedClasses : [];
+          teacherRows.push([
+            safeSheetTextValue("@" + (tp.username || "")),
+            safeSheetTextValue(tp.name || tp.username || ""),
+            safeSheetTextValue(tp.assignedSubject || ""),
+            safeSheetTextValue(tp.classTeacherOf ? tp.classTeacherOf : "No (Subject Only)"),
+            safeSheetTextValue(clsList.length > 0 ? clsList.join(", ") : "None"),
+            clsList.length,
+            safeSheetTextValue(syncedAt)
+          ]);
+        }
+      } else if (Array.isArray(students) && students.length > 0) {
+        for (var f = 0; f < students.length; f++) {
+          var fallbackRow = students[f];
+          teacherRows.push([
+            safeSheetTextValue(fallbackRow.rollNo || ""),
+            safeSheetTextValue(fallbackRow.name || ""),
+            "",
+            "",
+            safeSheetTextValue(fallbackRow.section || ""),
+            "",
+            safeSheetTextValue(syncedAt)
+          ]);
+        }
+      }
+
+      sheet.clearContents();
+      var tRange = sheet.getRange(1, 1, teacherRows.length, teacherHeaders.length);
+      tRange.setNumberFormat("@");
+      tRange.setValues(teacherRows);
+      SpreadsheetApp.flush();
+      return jsonResponse({
+        success: true,
+        exam: examName,
+        sheetTab: sheet.getName(),
+        updatedRows: teacherRows.length - 1,
         timestamp: new Date().toISOString()
       });
     }
@@ -281,9 +409,9 @@ function doPost(e) {
       var s = students[i];
       var m = s.marks || {};
       var row = [
-        s.rollNo || (i + 1),
-        s.name || "",
-        s.section || "Sparkle"
+        safeSheetTextValue(s.rollNo || (i + 1)),
+        safeSheetTextValue(s.name || ""),
+        safeSheetTextValue(s.section || "Sparkle")
       ];
 
       var numericScores = [];
@@ -294,7 +422,7 @@ function doPost(e) {
           val = m["Mathematics"];
         }
         var cellVal = (val !== undefined && val !== null) ? val : "";
-        row.push(cellVal);
+        row.push(typeof cellVal === "string" ? safeSheetTextValue(cellVal) : cellVal);
         if (typeof val === "number") {
           numericScores.push(val);
         }
@@ -322,23 +450,30 @@ function doPost(e) {
         total,
         pctStr,
         grade,
-        s.class || "",
-        s.house || "",
-        s.dob || "",
-        s.attendance || "",
-        s.height || "",
-        s.weight || "",
-        s.fatherName || "",
-        s.motherName || "",
-        s.customRemarks || s.remarks || "",
-        s.subjectRemarks ? JSON.stringify(s.subjectRemarks) : "",
-        s.breakdowns ? JSON.stringify(s.breakdowns) : ""
+        safeSheetTextValue(s.class || ""),
+        safeSheetTextValue(s.house || ""),
+        safeSheetTextValue(s.dob || ""),
+        safeSheetTextValue(s.attendance || ""),
+        safeSheetTextValue(s.height || ""),
+        safeSheetTextValue(s.weight || ""),
+        safeSheetTextValue(s.fatherName || ""),
+        safeSheetTextValue(s.motherName || ""),
+        safeSheetTextValue(s.customRemarks || s.remarks || ""),
+        safeSheetTextValue(s.subjectRemarks ? JSON.stringify(s.subjectRemarks) : ""),
+        safeSheetTextValue(s.breakdowns ? JSON.stringify(s.breakdowns) : "")
       );
       rows.push(row);
     }
 
     sheet.clearContents();
     sheet.getRange(1, 1, rows.length, headers.length).setValues(rows);
+    if (rows.length > 1) {
+      // Force Plain Text format on Roll No and trailing particulars/JSON columns (avoids 180/195 becoming Dates)
+      sheet.getRange(2, 1, rows.length - 1, 1).setNumberFormat("@");
+      var metaStartCol = 3 + subjectList.length + 4; // 1-based index of "Class" column
+      sheet.getRange(2, metaStartCol, rows.length - 1, 11).setNumberFormat("@");
+    }
+    SpreadsheetApp.flush();
 
     return jsonResponse({
       success: true,
@@ -349,6 +484,10 @@ function doPost(e) {
     });
   } catch (err) {
     return jsonResponse({ success: false, error: err.toString() });
+  } finally {
+    if (hasLock) {
+      try { lock.releaseLock(); } catch (e) {}
+    }
   }
 }
 
@@ -449,6 +588,7 @@ export class GasSyncService {
     classes: ClassDefinition[];
     examIdsToPush?: string[];
     gasUrl?: string;
+    skipCloudBackup?: boolean;
   }): Promise<GasSyncResponse> {
     const url = (params.gasUrl || getStoredGasUrl()).trim();
     if (!url) {
@@ -473,6 +613,7 @@ export class GasSyncService {
           examBreakdownsStore: params.examBreakdownsStore,
           classes: params.classes,
           examIdsToPush: params.examIdsToPush,
+          skipCloudBackup: Boolean(params.skipCloudBackup),
         }),
       });
 

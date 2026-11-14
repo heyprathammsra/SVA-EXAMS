@@ -113,8 +113,7 @@ interface AdminConfigPanelProps {
   setSpreadsheetId?: (id: string) => void;
   sheetsSyncStatus?: 'idle' | 'syncing' | 'synced' | 'error';
   lastSyncTime?: string | null;
-  onGoogleSheetsSync?: () => void;
-  onPullFromGoogleSheets?: (examId?: string) => void;
+  onGasUrlSaved?: () => void;
   students?: StudentReportRow[];
   exportExam?: string;
   setExportExam?: (val: string) => void;
@@ -188,8 +187,7 @@ export default function AdminConfigPanel({
   showToast,
   sheetsSyncStatus = 'idle',
   lastSyncTime = null,
-  onGoogleSheetsSync,
-  onPullFromGoogleSheets,
+  onGasUrlSaved,
   students = [],
   exportExam,
   setExportExam,
@@ -1041,13 +1039,13 @@ export default function AdminConfigPanel({
       />
 
       {/* Main Grid: Left Navigation + Right Content */}
-      <div className="grid grid-cols-1 md:grid-cols-12 gap-6 items-start">
-        {/* Left Minimal Sidebar: Exams */}
-        <div className="md:col-span-3 space-y-1.5">
-          <div className="text-[11px] font-semibold text-slate-400 tracking-wide px-3 py-1">
+      <div className="grid grid-cols-1 md:grid-cols-12 gap-4 md:gap-6 items-start">
+        {/* Left Minimal Sidebar: Exams (Horizontal scrollable strip on phone, vertical sidebar on desktop) */}
+        <div className="md:col-span-3 space-y-1.5 min-w-0">
+          <div className="text-[11px] font-semibold text-slate-400 tracking-wide px-1 md:px-3 py-0.5 md:py-1">
             Exams
           </div>
-          <div className="space-y-0.5">
+          <div className="flex md:flex-col gap-1.5 md:gap-0.5 overflow-x-auto no-scrollbar pb-1 md:pb-0">
             {Object.values(examConfigs).map((ex) => {
               const isSelected = ex.id === currentConfig.id;
               const canDelete = Object.keys(examConfigs).length > 1;
@@ -1057,15 +1055,15 @@ export default function AdminConfigPanel({
                 <div
                   key={ex.id}
                   onClick={() => handleSelectExamToEdit(ex.id)}
-                  className={`group flex items-center justify-between px-3 py-2 rounded-xl text-xs cursor-pointer transition-all duration-150 ${
+                  className={`group flex items-center justify-between gap-2 px-3 py-2 rounded-xl text-xs cursor-pointer transition-all duration-150 shrink-0 ${
                     isSelected
                       ? 'bg-white text-blue-700 font-semibold border border-slate-200/90 shadow-[0_1px_2px_rgba(15,23,42,0.04)]'
-                      : 'text-slate-600 hover:bg-white/70 hover:text-slate-900 border border-transparent'
+                      : 'text-slate-600 bg-white/50 md:bg-transparent hover:bg-white/70 hover:text-slate-900 border border-slate-200/60 md:border-transparent'
                   }`}
                 >
-                  <div className="min-w-0 flex items-baseline gap-2">
-                    <span className="truncate">{ex.code || ex.id}</span>
-                    <span className={`text-[11px] font-normal tabular-nums truncate ${
+                  <div className="min-w-0 flex items-baseline gap-1.5 sm:gap-2">
+                    <span className="truncate whitespace-nowrap">{ex.code || ex.id}</span>
+                    <span className={`text-[11px] font-normal tabular-nums whitespace-nowrap ${
                       isSelected ? 'text-blue-500/80' : 'text-slate-400'
                     }`}>
                       {subMax}m
@@ -1086,7 +1084,7 @@ export default function AdminConfigPanel({
                           setEditingExamId(remaining[0] || 'SA-1');
                         }
                       }}
-                      className="opacity-0 group-hover:opacity-100 p-1 text-slate-400 hover:text-rose-600 rounded-md transition-opacity cursor-pointer"
+                      className="opacity-100 md:opacity-0 md:group-hover:opacity-100 p-1 text-slate-400 hover:text-rose-600 rounded-md transition-opacity cursor-pointer"
                     >
                       <Trash2 className="w-3 h-3" />
                     </button>
@@ -1098,9 +1096,9 @@ export default function AdminConfigPanel({
         </div>
 
         {/* Right Content */}
-        <div className="md:col-span-9 space-y-6">
+        <div className="md:col-span-9 space-y-5 sm:space-y-6 min-w-0">
           {/* Section: Exam Header, Class Scope & Mode */}
-          <div className="bg-white border border-slate-200/85 rounded-2xl p-5 space-y-3.5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
+          <div className="bg-white border border-slate-200/85 rounded-2xl p-4 sm:p-5 space-y-3.5 shadow-[0_1px_2px_rgba(15,23,42,0.03)]">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
               <div className="flex-1">
                 <label className="text-[11px] font-medium text-slate-400 block mb-0.5">Exam Name</label>
@@ -1194,10 +1192,10 @@ export default function AdminConfigPanel({
 
           {/* Section 1: Assessment Breakdown */}
           {hasInternalSplit && (
-            <div className="bg-white border border-slate-200/85 rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] space-y-4">
-              <div className="flex items-center justify-between pb-3 border-b border-slate-100">
-                <div>
-                  <div className="flex items-baseline gap-2">
+            <div className="bg-white border border-slate-200/85 rounded-2xl p-4 sm:p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] space-y-4">
+              <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-100">
+                <div className="min-w-0">
+                  <div className="flex flex-wrap items-baseline gap-1.5 sm:gap-2">
                     <h2 className="text-sm font-semibold text-slate-900">
                       Assessment Breakdown
                     </h2>
@@ -1211,7 +1209,7 @@ export default function AdminConfigPanel({
                   </p>
                 </div>
 
-                <div className="text-xs text-slate-500 font-mono">
+                <div className="text-xs text-slate-500 font-mono shrink-0">
                   Total: <strong className="text-slate-900">{activeSplitTotal}</strong>
                 </div>
               </div>
@@ -1250,11 +1248,11 @@ export default function AdminConfigPanel({
                 {activeComponents.map((comp, idx) => (
                   <div
                     key={comp.key || idx}
-                    className="flex items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-slate-50/50 transition-colors"
+                    className="flex flex-wrap sm:flex-nowrap items-center justify-between gap-2 sm:gap-3 px-2.5 sm:px-3 py-2 text-xs hover:bg-slate-50/50 transition-colors"
                   >
-                    <div className="flex items-center gap-2 flex-1 min-w-0">
+                    <div className="flex items-center gap-1.5 sm:gap-2 flex-1 min-w-[140px]">
                       <span
-                        className={`text-[10px] font-medium px-1.5 py-0.5 rounded ${
+                        className={`text-[10px] font-medium px-1.5 py-0.5 rounded shrink-0 ${
                           comp.isMainExam
                             ? 'bg-blue-50 text-blue-700 font-semibold'
                             : 'bg-slate-100 text-slate-600'
@@ -1268,87 +1266,89 @@ export default function AdminConfigPanel({
                         onChange={(e) =>
                           handleEditSplitRow(idx, { label: e.target.value })
                         }
-                        className="font-medium text-slate-900 bg-transparent focus:outline-none focus:bg-white px-1.5 py-1 rounded border border-transparent focus:border-slate-300 w-full max-w-[200px]"
+                        className="font-medium text-slate-900 bg-transparent focus:outline-none focus:bg-white px-1.5 py-1 rounded border border-transparent focus:border-slate-300 w-full max-w-[200px] min-w-0"
                       />
                     </div>
 
-                    <div className="flex items-center gap-1.5">
-                      <input
-                        type="number"
-                        min={1}
-                        max={200}
-                        value={draftNumbers[`comp-${idx}`] ?? String(comp.maxMarks)}
-                        onChange={(e) => {
-                          const raw = e.target.value;
-                          setDraftNumbers((prev) => ({ ...prev, [`comp-${idx}`]: raw }));
-                          const parsed = parseInt(raw, 10);
-                          if (raw !== '' && !isNaN(parsed) && parsed >= 1) {
-                            handleEditSplitRow(idx, {
-                              maxMarks: Math.min(200, parsed),
+                    <div className="flex items-center gap-1.5 sm:gap-2 ml-auto sm:ml-0">
+                      <div className="flex items-center gap-1">
+                        <input
+                          type="number"
+                          min={1}
+                          max={200}
+                          value={draftNumbers[`comp-${idx}`] ?? String(comp.maxMarks)}
+                          onChange={(e) => {
+                            const raw = e.target.value;
+                            setDraftNumbers((prev) => ({ ...prev, [`comp-${idx}`]: raw }));
+                            const parsed = parseInt(raw, 10);
+                            if (raw !== '' && !isNaN(parsed) && parsed >= 1) {
+                              handleEditSplitRow(idx, {
+                                maxMarks: Math.min(200, parsed),
+                              });
+                            }
+                          }}
+                          onBlur={(e) => {
+                            const parsed = parseInt(e.target.value, 10);
+                            setDraftNumbers((prev) => {
+                              const next = { ...prev };
+                              delete next[`comp-${idx}`];
+                              return next;
                             });
-                          }
-                        }}
-                        onBlur={(e) => {
-                          const parsed = parseInt(e.target.value, 10);
-                          setDraftNumbers((prev) => {
-                            const next = { ...prev };
-                            delete next[`comp-${idx}`];
-                            return next;
-                          });
-                          const clamped = !isNaN(parsed) ? Math.min(200, Math.max(1, parsed)) : Math.max(1, comp.maxMarks || 1);
-                          if (clamped !== comp.maxMarks) {
-                            handleEditSplitRow(idx, { maxMarks: clamped });
-                          }
-                        }}
-                        className="w-14 px-1.5 py-1 text-center font-mono font-medium text-slate-900 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:bg-white focus:border-slate-400"
-                      />
-                      <span className="text-[11px] text-slate-400">m</span>
-                    </div>
+                            const clamped = !isNaN(parsed) ? Math.min(200, Math.max(1, parsed)) : Math.max(1, comp.maxMarks || 1);
+                            if (clamped !== comp.maxMarks) {
+                              handleEditSplitRow(idx, { maxMarks: clamped });
+                            }
+                          }}
+                          className="w-12 sm:w-14 px-1.5 py-1 text-center font-mono font-medium text-slate-900 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:bg-white focus:border-slate-400"
+                        />
+                        <span className="text-[11px] text-slate-400">m</span>
+                      </div>
 
-                    {/* Source Selector */}
-                    <div className="w-36">
-                      {!comp.isMainExam ? (
-                        <select
-                          value={comp.linkedExamId || 'manual'}
-                          onChange={(e) =>
-                            handleEditSplitRow(idx, {
-                              linkedExamId: e.target.value === 'manual' ? undefined : e.target.value,
-                            })
-                          }
-                          className="w-full text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded px-2 py-1 focus:outline-none focus:bg-white"
-                        >
-                          <option value="manual">Manual Entry</option>
-                          {otherExams.map((ex) => (
-                            <option key={ex.id} value={ex.id}>
-                              Pull from {ex.code || ex.id}
-                            </option>
-                          ))}
-                        </select>
-                      ) : (
-                        <span className="text-[11px] text-slate-400 px-2 block">
-                          Main Paper
-                        </span>
-                      )}
-                    </div>
+                      {/* Source Selector */}
+                      <div className="w-28 sm:w-36">
+                        {!comp.isMainExam ? (
+                          <select
+                            value={comp.linkedExamId || 'manual'}
+                            onChange={(e) =>
+                              handleEditSplitRow(idx, {
+                                linkedExamId: e.target.value === 'manual' ? undefined : e.target.value,
+                              })
+                            }
+                            className="w-full text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded px-1.5 sm:px-2 py-1 focus:outline-none focus:bg-white"
+                          >
+                            <option value="manual">Manual Entry</option>
+                            {otherExams.map((ex) => (
+                              <option key={ex.id} value={ex.id}>
+                                Pull from {ex.code || ex.id}
+                              </option>
+                            ))}
+                          </select>
+                        ) : (
+                          <span className="text-[11px] text-slate-400 px-2 block truncate">
+                            Main Paper
+                          </span>
+                        )}
+                      </div>
 
-                    {/* Remove */}
-                    <div className="w-6 flex justify-end">
-                      {!comp.isMainExam && activeComponents.length > 1 && (
-                        <button
-                          type="button"
-                          onClick={() => handleDeleteSplitRow(idx)}
-                          className="text-slate-300 hover:text-rose-600 transition-colors"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      )}
+                      {/* Remove */}
+                      <div className="w-5 sm:w-6 flex justify-end shrink-0">
+                        {!comp.isMainExam && activeComponents.length > 1 && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteSplitRow(idx)}
+                            className="text-slate-300 hover:text-rose-600 transition-colors p-0.5"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                 ))}
               </div>
 
               {/* Bottom Quick Actions */}
-              <div className="flex items-center justify-between pt-1">
+              <div className="flex flex-wrap items-center justify-between gap-2 pt-1">
                 <button
                   type="button"
                   onClick={handleAddInternalColumn}
@@ -1383,10 +1383,10 @@ export default function AdminConfigPanel({
           )}
 
           {/* Section 2: Subjects & Passing Marks */}
-          <div className="bg-white border border-slate-200/85 rounded-2xl p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] space-y-4">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+          <div className="bg-white border border-slate-200/85 rounded-2xl p-4 sm:p-5 shadow-[0_1px_2px_rgba(15,23,42,0.03)] space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-3 border-b border-slate-100">
               <div>
-                <div className="flex items-baseline gap-2">
+                <div className="flex flex-wrap items-baseline gap-1.5 sm:gap-2">
                   <h2 className="text-sm font-semibold text-slate-900">
                     Subjects & Passing Marks
                   </h2>
@@ -1401,7 +1401,7 @@ export default function AdminConfigPanel({
               </div>
 
               {/* Mini Quick-set */}
-              <div className="flex items-center gap-1">
+              <div className="flex items-center flex-wrap gap-1">
                 <span className="text-[11px] text-slate-400 mr-1">Set all:</span>
                 {[20, 50, 80, 100].map((m) => (
                   <button
@@ -1418,17 +1418,17 @@ export default function AdminConfigPanel({
 
             {/* Clean Subjects Table */}
             <div className="divide-y divide-slate-100 border border-slate-100 rounded-lg overflow-hidden">
-              <div className="flex items-center justify-between px-3 py-1.5 bg-slate-50/50 text-[11px] font-medium text-slate-400">
-                <span className="flex-1">Subject</span>
-                <span className="w-20 text-center">Max</span>
-                <span className="w-20 text-center">Pass</span>
-                <span className="w-6" />
+              <div className="flex items-center justify-between gap-2 sm:gap-3 px-2.5 sm:px-3 py-1.5 bg-slate-50/50 text-[11px] font-medium text-slate-400">
+                <span className="flex-1 min-w-0">Subject</span>
+                <span className="w-14 sm:w-20 text-center">Max</span>
+                <span className="w-14 sm:w-20 text-center">Pass</span>
+                <span className="w-5 sm:w-6" />
               </div>
 
               {currentConfig.subjects.map((sub, idx) => (
                 <div
                   key={idx}
-                  className="flex items-center justify-between gap-3 px-3 py-2 text-xs hover:bg-slate-50/40 transition-colors"
+                  className="flex items-center justify-between gap-2 sm:gap-3 px-2.5 sm:px-3 py-2 text-xs hover:bg-slate-50/40 transition-colors"
                 >
                   <input
                     type="text"
@@ -1457,7 +1457,7 @@ export default function AdminConfigPanel({
                         e.currentTarget.blur();
                       }
                     }}
-                    className="flex-1 font-medium text-slate-900 bg-transparent focus:outline-none focus:bg-white px-1.5 py-1 rounded border border-transparent focus:border-slate-300"
+                    className="flex-1 min-w-0 font-medium text-slate-900 bg-transparent focus:outline-none focus:bg-white px-1.5 py-1 rounded border border-transparent focus:border-slate-300"
                   />
 
                   <input
@@ -1485,7 +1485,7 @@ export default function AdminConfigPanel({
                         handleSubjectChange(idx, 'maxMarks', clamped);
                       }
                     }}
-                    className="w-16 px-1.5 py-1 text-center font-mono font-medium text-slate-900 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:bg-white"
+                    className="w-14 sm:w-16 px-1 sm:px-1.5 py-1 text-center font-mono font-medium text-slate-900 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:bg-white shrink-0"
                   />
 
                   <input
@@ -1515,10 +1515,10 @@ export default function AdminConfigPanel({
                         handleSubjectChange(idx, 'passMarks', clamped);
                       }
                     }}
-                    className="w-16 px-1.5 py-1 text-center font-mono font-medium text-slate-900 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:bg-white"
+                    className="w-14 sm:w-16 px-1 sm:px-1.5 py-1 text-center font-mono font-medium text-slate-900 bg-slate-50 border border-slate-200 rounded focus:outline-none focus:bg-white shrink-0"
                   />
 
-                  <div className="w-6 flex justify-end">
+                  <div className="w-5 sm:w-6 flex justify-end shrink-0">
                     <button
                       type="button"
                       onClick={() => handleRemoveSubject(idx)}
@@ -1569,13 +1569,11 @@ export default function AdminConfigPanel({
             showToast={showToast}
           />
 
-          {/* Section 4: Google Sheets Sync */}
+          {/* Section 4: Google Sheets Auto-Sync */}
           <GoogleSheetsConnectCard
             students={students}
-            selectedExam={currentConfig.id}
             examCount={Object.keys(examConfigs).length}
-            onSyncSuccess={onGoogleSheetsSync}
-            onPullFromSheet={onPullFromGoogleSheets}
+            onUrlSaved={onGasUrlSaved}
             showToast={showToast}
             lastSyncTime={lastSyncTime}
             sheetsSyncStatus={sheetsSyncStatus}

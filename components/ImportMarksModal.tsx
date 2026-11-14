@@ -272,7 +272,7 @@ export default function ImportMarksModal({
         }}
         onDragLeave={() => setIsDraggingFile(false)}
         onDrop={handleDrop}
-        className={`bg-white border rounded-2xl shadow-xl w-full max-w-2xl p-6 sm:p-7 flex flex-col gap-5 animate-in zoom-in-95 duration-150 transition-colors ${
+        className={`bg-white border rounded-2xl shadow-xl w-full max-w-2xl max-h-[90vh] overflow-y-auto p-4 sm:p-7 flex flex-col gap-4 sm:gap-5 animate-in zoom-in-95 duration-150 transition-colors ${
           isDraggingFile ? 'border-blue-400 ring-2 ring-blue-500/20' : 'border-slate-200/90'
         }`}
       >

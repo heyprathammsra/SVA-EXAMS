@@ -163,6 +163,7 @@ test('clears only targeted class and exam when scoped, preserving other classes 
 
 test('clears only remarks and optional attendance without erasing marks', () => {
   const { students, examMarksStore, examBreakdownsStore } = makeFixture();
+  students[0] = { ...students[0], remarks: 'Legacy overall remark' };
   const res = applyClearErpData({
     students,
     activeExamId: 'SA-1',
@@ -182,6 +183,7 @@ test('clears only remarks and optional attendance without erasing marks', () => 
 
   assert.equal(res.students[0].marks.English, 92);
   assert.equal(res.students[0].customRemarks, '');
+  assert.equal((res.students[0] as { remarks?: string }).remarks, '');
   assert.deepEqual(res.students[0].subjectRemarks, {});
   assert.equal(res.students[0].attendance, '');
   assert.equal(res.students[1].customRemarks, '');

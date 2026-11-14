@@ -307,7 +307,7 @@ export default function TotalCalculationFormulaCard({
       {/* Header Row */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-100">
         <div>
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2 min-w-0">
             <h2 className="text-sm font-semibold text-slate-900">
               Total Calculation
             </h2>
@@ -315,7 +315,7 @@ export default function TotalCalculationFormulaCard({
               value={activeClassScope}
               onChange={(e) => handleScopeChange(e.target.value)}
               aria-label="Apply Total Calculation Rule To"
-              className="text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200/70 border border-slate-200/80 rounded-md px-2 py-0.5 focus:outline-none focus:border-blue-600 cursor-pointer"
+              className="text-[11px] font-medium text-slate-700 bg-slate-100 hover:bg-slate-200/70 border border-slate-200/80 rounded-md px-2 py-0.5 focus:outline-none focus:border-blue-600 cursor-pointer max-w-[190px] sm:max-w-[260px] truncate"
             >
               {specificClassOptions.map((opt) => (
                 <option key={opt.value} value={opt.value}>

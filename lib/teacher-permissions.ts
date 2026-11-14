@@ -596,3 +596,81 @@ export function getDefaultTeacherScopesForSection(params: {
     exportSubjectScope: firstSub,
   };
 }
+
+/**
+ * Picks the best initial exam for a teacher session:
+ * - Keeps `preferredExam` if the teacher has at least one visible subject across any of their visible classes.
+ * - Otherwise picks the first configured exam where they do have at least one visible subject (e.g., SA-1 for Computer Science in Classes 6–8).
+ * - Falls back to `preferredExam`.
+ */
+export function resolveInitialTeacherExam(params: {
+  preferredExam: string;
+  examIds: string[];
+  getSubjectsForExamAndSection: (examId: string, section: string) => string[];
+  allSections: string[];
+  profile?: TeacherProfile | null;
+}): string {
+  const { preferredExam, examIds, getSubjectsForExamAndSection, allSections, profile } = params;
+  if (!profile) return preferredExam;
+
+  const visibleSections = getVisibleSectionsForUser(allSections, 'teacher', profile);
+  if (visibleSections.length === 0) return preferredExam;
+
+  const hasVisibleSubjectInExam = (examId: string): boolean => {
+    for (const sec of visibleSections) {
+      const allSubs = getSubjectsForExamAndSection(examId, sec);
+      if (getVisibleSubjectsForClass(allSubs, sec, 'teacher', profile).length > 0) {
+        return true;
+      }
+    }
+    return false;
+  };
+
+  if (preferredExam && examIds.includes(preferredExam) && hasVisibleSubjectInExam(preferredExam)) {
+    return preferredExam;
+  }
+
+  for (const examId of examIds) {
+    if (hasVisibleSubjectInExam(examId)) {
+      return examId;
+    }
+  }
+
+  return preferredExam;
+}
+
+/**
+ * Compares two TeacherProfile snapshots by their effective permission fields
+ * so 10-second background polling detects Admin reassignments immediately.
+ */
+export function didTeacherPermissionsChange(
+  prev: TeacherProfile | null | undefined,
+  next: TeacherProfile | null | undefined
+): boolean {
+  if (!prev && !next) return false;
+  if (!prev || !next) return true;
+  if (prev.username !== next.username) return true;
+  if (prev.name !== next.name) return true;
+  if (!subjectsMatch(prev.assignedSubject, next.assignedSubject)) return true;
+  if ((prev.classTeacherOf || null) !== (next.classTeacherOf || null)) return true;
+
+  const prevClasses = [...(prev.assignedClasses || [])].map((c) => c.toLowerCase()).sort();
+  const nextClasses = [...(next.assignedClasses || [])].map((c) => c.toLowerCase()).sort();
+  if (prevClasses.length !== nextClasses.length) return true;
+  for (let i = 0; i < prevClasses.length; i++) {
+    if (prevClasses[i] !== nextClasses[i]) return true;
+  }
+
+  const prevAssigns = [...(prev.assignments || [])]
+    .map((a) => `${a.section.toLowerCase()}::${normalizeSubjectKey(a.subject)}`)
+    .sort();
+  const nextAssigns = [...(next.assignments || [])]
+    .map((a) => `${a.section.toLowerCase()}::${normalizeSubjectKey(a.subject)}`)
+    .sort();
+  if (prevAssigns.length !== nextAssigns.length) return true;
+  for (let i = 0; i < prevAssigns.length; i++) {
+    if (prevAssigns[i] !== nextAssigns[i]) return true;
+  }
+
+  return false;
+}

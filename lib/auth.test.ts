@@ -16,6 +16,7 @@ import {
   getTeacherProfileByUsername,
   recordLoginFailure,
   resetAllLoginRateLimits,
+  shouldRestoreTeachersFromCloud,
   syncTeacherMappingsOnClassDelete,
   syncTeacherMappingsOnClassRename,
   syncTeacherMappingsOnSubjectRename,
@@ -498,6 +499,52 @@ test('sanitizeAndValidateErpState preserves server SA-1 marks when teacher saves
   // SA-1 store and active SA-1 students array retain 88 (never overwritten by PT-1's 23!)
   assert.equal(sanitized.examMarksStore['SA-1']['s-1'].Science, 88);
   assert.equal(sanitized.students[0].marks.Science, 88);
+});
+
+test('shouldRestoreTeachersFromCloud detects newer edits and deletions across containers', () => {
+  const baseTeacher = {
+    id: 'teacher-pratham',
+    name: 'Pratham',
+    username: 'pratham',
+    passwordHashHex: 'hash1',
+    assignedSubject: 'Science',
+    assignedClasses: ['Sparkle'],
+    classTeacherOf: null,
+    assignments: [{ section: 'Sparkle', subject: 'Science' }],
+    createdAt: 1000,
+    updatedAt: 2000,
+  };
+  const extraTeacher = {
+    ...baseTeacher,
+    id: 'teacher-anita',
+    name: 'Anita',
+    username: 'anita',
+    updatedAt: 2000,
+  };
+
+  // Identical roster with older or equal timestamps -> false
+  assert.equal(
+    shouldRestoreTeachersFromCloud([baseTeacher], { updatedAt: 5000, teachers: [baseTeacher] }),
+    false
+  );
+
+  // Newer teacher update in cloud -> true
+  assert.equal(
+    shouldRestoreTeachersFromCloud([baseTeacher], {
+      updatedAt: 3000,
+      teachers: [{ ...baseTeacher, assignedSubject: 'Computer Science', updatedAt: 3000 }],
+    }),
+    true
+  );
+
+  // Teacher deleted in cloud (cloudMaxUpdated == localMaxUpdated == 2000, but cloudPayload.updatedAt is newer and digest differs) -> true
+  assert.equal(
+    shouldRestoreTeachersFromCloud([baseTeacher, extraTeacher], {
+      updatedAt: 4000,
+      teachers: [baseTeacher],
+    }),
+    true
+  );
 });
 
 

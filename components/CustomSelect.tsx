@@ -36,8 +36,8 @@ export default function CustomSelect({
   options,
   icon,
   prefixLabel,
-  containerClassName = 'flex items-center gap-2 bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 shadow-2xs hover:border-slate-300 transition-colors',
-  triggerClassName = 'text-xs font-semibold text-slate-800',
+  containerClassName = 'flex items-center justify-between gap-2 bg-white border border-slate-200/80 rounded-lg px-2.5 py-1.5 min-h-[36px] sm:min-h-0 shadow-2xs hover:border-slate-300 transition-colors',
+  triggerClassName = 'text-xs font-semibold text-slate-800 flex-1 min-w-0',
   chevronClassName = 'w-3.5 h-3.5 text-slate-400 shrink-0',
   menuClassName = '',
   fullWidth = false,
@@ -126,7 +126,7 @@ export default function CustomSelect({
       className={`relative select-none cursor-pointer ${fullWidth ? 'w-full' : ''} ${containerClassName}`}
     >
       {(icon || prefixLabel) && (
-        <span className="text-xs font-medium text-slate-500 whitespace-nowrap flex items-center gap-1.5">
+        <span className="text-xs font-medium text-slate-500 whitespace-nowrap flex items-center gap-1.5 shrink-0">
           {icon}
           {prefixLabel && <span>{prefixLabel}</span>}
         </span>
@@ -137,7 +137,7 @@ export default function CustomSelect({
         type="button"
         aria-haspopup="listbox"
         aria-expanded={isOpen}
-        className={`flex items-center justify-between gap-2 bg-transparent focus:outline-none cursor-pointer ${
+        className={`flex items-center justify-between gap-1.5 sm:gap-2 bg-transparent focus:outline-none cursor-pointer min-w-0 ${
           fullWidth ? 'w-full flex-1' : ''
         } ${triggerClassName}`}
       >
@@ -161,9 +161,9 @@ export default function CustomSelect({
         <div
           role="listbox"
           onClick={(e) => e.stopPropagation()}
-          className={`absolute left-0 top-[calc(100%+6px)] z-50 ${
-            matchTriggerWidth ? 'right-0 w-full' : 'w-max min-w-[max(100%,210px)]'
-          } bg-white border border-slate-200/90 rounded-xl shadow-[0_18px_40px_-12px_rgba(15,23,42,0.16),0_4px_14px_-4px_rgba(15,23,42,0.06)] ring-1 ring-slate-900/[0.04] p-1.5 max-h-[380px] overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-150 ${menuClassName}`}
+          className={`absolute left-0 top-[calc(100%+6px)] z-50 max-w-[calc(100vw-1.5rem)] ${
+            matchTriggerWidth ? 'right-0 w-full' : 'w-max min-w-[max(100%,180px)] sm:min-w-[max(100%,210px)]'
+          } bg-white border border-slate-200/90 rounded-xl shadow-[0_18px_40px_-12px_rgba(15,23,42,0.16),0_4px_14px_-4px_rgba(15,23,42,0.06)] ring-1 ring-slate-900/[0.04] p-1.5 max-h-[340px] sm:max-h-[380px] overflow-y-auto [&::-webkit-scrollbar]:hidden [-ms-overflow-style:none] [scrollbar-width:none] flex flex-col gap-0.5 animate-in fade-in zoom-in-95 duration-150 ${menuClassName}`}
         >
           {options.map((opt, idx) => {
             const isSelected = String(opt.value) === String(value);

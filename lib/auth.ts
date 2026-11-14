@@ -261,6 +261,54 @@ export function restoreTeacherAccountsFromBackup(
   return valid.map(stripPasswordHash);
 }
 
+function getTeachersRosterDigest(accounts: StoredTeacherAccount[]): string {
+  return JSON.stringify(
+    [...accounts]
+      .sort((a, b) => a.username.localeCompare(b.username))
+      .map((u) => ({
+        id: u.id,
+        username: u.username,
+        name: u.name,
+        assignedSubject: u.assignedSubject,
+        assignedClasses: [...(u.assignedClasses || [])].sort(),
+        classTeacherOf: u.classTeacherOf ?? null,
+        assignments: [...(u.assignments || [])].sort((a, b) =>
+          `${a.section}::${a.subject}`.localeCompare(`${b.section}::${b.subject}`)
+        ),
+        passwordHashHex: u.passwordHashHex,
+        updatedAt: u.updatedAt || 0,
+      }))
+  );
+}
+
+/**
+ * Determines whether the cloud backup's teacher accounts should replace the local store.
+ * Detects both newer profile edits/additions (`cloudMaxUpdated > localMaxUpdated`) AND
+ * teacher deletions where `cloud.updatedAt > localMaxUpdated` and the teacher list differs.
+ */
+export function shouldRestoreTeachersFromCloud(
+  localTeachers: StoredTeacherAccount[],
+  cloudPayload: { updatedAt?: number; teachers?: StoredTeacherAccount[] } | null | undefined
+): boolean {
+  const cloudTeachers = cloudPayload?.teachers;
+  if (!Array.isArray(cloudTeachers) || cloudTeachers.length === 0) {
+    return false;
+  }
+  const localMaxUpdated = Math.max(0, ...localTeachers.map((t) => t.updatedAt || 0));
+  const cloudMaxUpdated = Math.max(0, ...cloudTeachers.map((t) => t.updatedAt || 0));
+  if (cloudMaxUpdated > localMaxUpdated) {
+    return true;
+  }
+  const cloudUpdatedAt = typeof cloudPayload?.updatedAt === 'number' ? cloudPayload.updatedAt : 0;
+  if (
+    cloudUpdatedAt > localMaxUpdated &&
+    getTeachersRosterDigest(cloudTeachers) !== getTeachersRosterDigest(localTeachers)
+  ) {
+    return true;
+  }
+  return false;
+}
+
 export function listTeacherUsers(env: NodeJS.ProcessEnv = process.env): TeacherProfile[] {
   return loadStoredTeacherAccounts(env).map(stripPasswordHash);
 }

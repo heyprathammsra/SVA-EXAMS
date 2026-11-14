@@ -337,7 +337,6 @@ export interface SheetLayoutMetadata {
   includeTotalColumn: boolean;
   isConsolidated?: boolean;
   hasSingleHeaderRow?: boolean;
-  isResultAnalysis?: boolean;
   totalColIndices?: number[];
   gradeColIndices?: number[];
 }
@@ -579,38 +578,6 @@ export async function applyReferenceSheetStylesToXlsxBuffer(
                 styleIdx = 5;
               } else if (meta.gradeColIndices?.includes(colIdx)) {
                 styleIdx = 6;
-              } else {
-                styleIdx = 3;
-              }
-            }
-
-            const cleanedAttrs = attrs.replace(/\s+s="\d+"/g, '');
-            return `<c r="${colLetters}${rNumStr}"${cleanedAttrs} s="${styleIdx}"${closeTag}`;
-          }
-        );
-
-        return `<row r="${rowNum}"${rowHeightAttr}>${styledCells}</row>`;
-      });
-    } else if (meta.isResultAnalysis) {
-      xml = xml.replace(/<row r="(\d+)"[^>]*>([\s\S]*?)<\/row>/g, (_match, rowStr, innerCells) => {
-        const rowNum = parseInt(rowStr, 10);
-        const rowHeightAttr = rowNum === 1 ? ' ht="25" customHeight="1"' : ' ht="22" customHeight="1"';
-
-        const styledCells = innerCells.replace(
-          /<c r="([A-Z]+)(\d+)"([^/>]*)(\/?>)/g,
-          (_cMatch: string, colLetters: string, rNumStr: string, attrs: string, closeTag: string) => {
-            const colIdx = XLSX.utils.decode_col(colLetters);
-            let styleIdx = 0;
-
-            if (rowNum === 1) {
-              styleIdx = 2;
-            } else if (rowNum >= 2 && colIdx < meta.totalCols) {
-              if (colIdx === 0) {
-                styleIdx = 3;
-              } else if (colIdx === 1) {
-                styleIdx = 4;
-              } else if (colIdx >= meta.totalCols - 2) {
-                styleIdx = 5;
               } else {
                 styleIdx = 3;
               }
@@ -1180,162 +1147,7 @@ export function buildConsolidatedWorksheet(
 }
 
 /**
- * Builds the Result Analysis Worksheet matching the second tab of 1QMuO9-8j9TM-b8zWW_5kIL8rjzwNJBIvSmH6uU9SPmk
- */
-export function buildResultAnalysisWorksheet(
-  students: StudentReportRow[],
-  examConfig: ExamConfig,
-  classSectionOrAll: string
-): { ws: XLSX.WorkSheet; meta: SheetLayoutMetadata } {
-  const subjects = orderSubjectsForConsolidated(examConfig.subjects);
-  const subjectHeaders = subjects.map((s) => getReferenceSubjectTabName(s.name));
-
-  const headers = ['ROLL NO', 'NAME OF THE STUDENT', ...subjectHeaders, 'TOTAL', 'PERCENTAGE'];
-  const aoa: (string | number)[][] = [headers];
-
-  const sortedStudents = [...students].sort((a, b) => {
-    if (classSectionOrAll === 'all' && a.section !== b.section) {
-      return a.section.localeCompare(b.section);
-    }
-    const rA = parseInt(String(a.rollNo), 10) || 0;
-    const rB = parseInt(String(b.rollNo), 10) || 0;
-    return rA - rB;
-  });
-
-  const sampleRes = sortedStudents[0]
-    ? computeStudentResult(
-        sortedStudents[0],
-        subjects,
-        examConfig.totalFormula,
-        examConfig.customFormula,
-        examConfig.resultCriteria
-      )
-    : null;
-  const grandMaxMarks =
-    sampleRes?.totalMax || subjects.reduce((sum, s) => sum + (s.maxMarks || 100), 0);
-  const totalCols = headers.length;
-  const firstSubColLetter = 'C';
-  const lastSubColLetter = XLSX.utils.encode_col(1 + subjects.length);
-  const totalColLetter = XLSX.utils.encode_col(2 + subjects.length);
-  const pctColLetter = XLSX.utils.encode_col(3 + subjects.length);
-
-  sortedStudents.forEach((student, idx) => {
-    const numericRoll = parseInt(String(student.rollNo), 10) || idx + 1;
-    const studentRes = computeStudentResult(
-      student,
-      subjects,
-      examConfig.totalFormula,
-      examConfig.customFormula,
-      examConfig.resultCriteria
-    );
-    const subMarks = subjects.map((s) => {
-      const m = student.marks[s.name];
-      return typeof m === 'number' ? m : 0;
-    });
-    const sumMarks = studentRes.totalObtained;
-    const pct = studentRes.percentage;
-
-    aoa.push([numericRoll, student.name, ...subMarks, sumMarks, pct]);
-  });
-
-  const ws = XLSX.utils.aoa_to_sheet(aoa);
-
-  sortedStudents.forEach((_, idx) => {
-    const r = idx + 2;
-    const totalRef = `${totalColLetter}${r}`;
-    const pctRef = `${pctColLetter}${r}`;
-    const rawCustom = (examConfig.customFormula || '').trim();
-    const upperCustom = rawCustom.toUpperCase().replace(/\s+/g, '');
-    const bestMatch =
-      examConfig.totalFormula === 'BEST_5'
-        ? 5
-        : examConfig.totalFormula === 'CUSTOM'
-        ? parseInt(
-            (upperCustom.match(/^BEST(?:\((\d+)\)|_(\d+))$/)?.[1] ||
-              upperCustom.match(/^BEST(?:\((\d+)\)|_(\d+))$/)?.[2] ||
-              '0'),
-            10
-          )
-        : 0;
-    const isAdditiveBracketSubset =
-      examConfig.totalFormula === 'CUSTOM' &&
-      /^\s*\[[^\]:]+\](\s*\+\s*\[[^\]:]+\])*\s*$/.test(rawCustom);
-    const subjectCellRefs = subjects.map(
-      (__, sIdx) => `${XLSX.utils.encode_col(2 + sIdx)}${r}`
-    );
-
-    let totalFormula: string | undefined;
-    if (examConfig.totalFormula === 'SUM' || !examConfig.totalFormula) {
-      if (subjects.every((s) => s.includedInTotal !== false)) {
-        totalFormula = `SUM(${firstSubColLetter}${r}:${lastSubColLetter}${r})`;
-      } else {
-        const includedRefs = subjects
-          .map((sub, sIdx) => (sub.includedInTotal !== false ? subjectCellRefs[sIdx] : null))
-          .filter((ref): ref is string => Boolean(ref));
-        if (includedRefs.length > 0) totalFormula = `SUM(${includedRefs.join(',')})`;
-      }
-    } else if (isAdditiveBracketSubset) {
-      const lowerCustom = rawCustom.toLowerCase();
-      const matchedRefs = subjects
-        .map((sub, sIdx) =>
-          lowerCustom.includes(`[${sub.name.toLowerCase()}]`) ? subjectCellRefs[sIdx] : null
-        )
-        .filter((ref): ref is string => Boolean(ref));
-      if (matchedRefs.length > 0) {
-        totalFormula = `SUM(${matchedRefs.join(',')})`;
-      }
-    } else if (bestMatch > 0) {
-      const takeCount = Math.min(bestMatch, subjects.length);
-      if (takeCount > 0) {
-        const rangeArg = `${firstSubColLetter}${r}:${lastSubColLetter}${r}`;
-        totalFormula = Array.from(
-          { length: takeCount },
-          (_, k) => `LARGE(${rangeArg},${k + 1})`
-        ).join('+');
-      }
-    }
-
-    ws[totalRef] = totalFormula
-      ? {
-          t: 'n',
-          v: Number(ws[totalRef]?.v) || 0,
-          f: totalFormula,
-        }
-      : {
-          t: 'n',
-          v: Number(ws[totalRef]?.v) || 0,
-        };
-
-    ws[pctRef] = {
-      t: 'n',
-      v: Number(ws[pctRef]?.v) || 0,
-      f: `ROUND(${totalRef}/${grandMaxMarks || 1}*100,2)`,
-    };
-  });
-
-  ws['!cols'] = [
-    { wch: 8 },
-    { wch: 26 },
-    ...subjects.map(() => ({ wch: 12 })),
-    { wch: 12 },
-    { wch: 14 },
-  ];
-
-  return {
-    ws,
-    meta: {
-      sheetName: 'Result Analysis',
-      totalCols,
-      studentRowCount: sortedStudents.length,
-      includeTotalColumn: true,
-      isResultAnalysis: true,
-    },
-  };
-}
-
-/**
- * Generates the complete Consolidated format workbook with Consolidated + Result Analysis sheets
- * matching 1QMuO9-8j9TM-b8zWW_5kIL8rjzwNJBIvSmH6uU9SPmk
+ * Generates the Consolidated format workbook matching 1QMuO9-8j9TM-b8zWW_5kIL8rjzwNJBIvSmH6uU9SPmk
  */
 export async function generateConsolidatedWorkbookBytes(params: {
   students: StudentReportRow[];
@@ -1377,14 +1189,6 @@ export async function generateConsolidatedWorkbookBytes(params: {
   );
   XLSX.utils.book_append_sheet(wb, conWs, conMeta.sheetName);
   sheetsMeta.push(conMeta);
-
-  const { ws: resWs, meta: resMeta } = buildResultAnalysisWorksheet(
-    targetStudents,
-    effectiveConfig,
-    classScope
-  );
-  XLSX.utils.book_append_sheet(wb, resWs, resMeta.sheetName);
-  sheetsMeta.push(resMeta);
 
   const rawArray = XLSX.write(wb, { bookType: 'xlsx', type: 'array' }) as ArrayBuffer;
   const styledBytes = await applyReferenceSheetStylesToXlsxBuffer(rawArray, sheetsMeta);

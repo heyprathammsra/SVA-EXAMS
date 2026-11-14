@@ -536,7 +536,7 @@ export default function TeacherAccessManager({
 
               <span
                 title={activeTeacherSummary}
-                className="hidden xl:inline-block text-xs text-slate-400 truncate min-w-0 max-w-[280px] pl-1"
+                className="w-full sm:w-auto xl:inline-block text-[11px] sm:text-xs text-slate-500 sm:text-slate-400 truncate min-w-0 sm:max-w-[280px] pt-0.5 sm:pt-0 sm:pl-1 sm:hidden xl:inline"
               >
                 {activeTeacherSummary}
               </span>
@@ -566,13 +566,13 @@ export default function TeacherAccessManager({
           onClick={(e) => {
             if (e.target === e.currentTarget) setUserModalMode(null);
           }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4 animate-in fade-in duration-150"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-3 sm:p-4 animate-in fade-in duration-150"
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-label={userModalMode === 'create' ? 'New Teacher User' : 'Edit Teacher User'}
-            className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-[500px] p-5 space-y-4 animate-in zoom-in-95 duration-150"
+            className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-[500px] max-h-[90vh] overflow-y-auto p-4 sm:p-5 space-y-4 animate-in zoom-in-95 duration-150"
           >
             {/* Minimal Header */}
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
@@ -591,7 +591,7 @@ export default function TeacherAccessManager({
 
             <form onSubmit={handleSaveUserForm} className="space-y-3.5 text-xs">
               {/* Row 1: Name + Username */}
-              <div className="grid grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
                   <label
                     htmlFor="teacher-name-input"
@@ -638,7 +638,7 @@ export default function TeacherAccessManager({
               </div>
 
               {/* Row 2: Password + Assigned Subject */}
-              <div className="grid grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
                   <label
                     htmlFor="teacher-password-input"
@@ -747,7 +747,7 @@ export default function TeacherAccessManager({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 gap-2 max-h-[168px] overflow-y-auto pr-0.5">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-[168px] overflow-y-auto pr-0.5">
                   {classes.map((cls) => {
                     const checked = assignedClassesInput.some(
                       (c) => c.toLowerCase() === cls.section.toLowerCase()
@@ -821,13 +821,13 @@ export default function TeacherAccessManager({
           onClick={(e) => {
             if (e.target === e.currentTarget) setIsMapModalOpen(false);
           }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4 animate-in fade-in duration-150"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-3 sm:p-4 animate-in fade-in duration-150"
         >
           <div
             role="dialog"
             aria-modal="true"
             aria-label="Map Teacher with Assigned Classes"
-            className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-[500px] p-5 space-y-4 animate-in zoom-in-95 duration-150"
+            className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-[500px] max-h-[90vh] overflow-y-auto p-4 sm:p-5 space-y-4 animate-in zoom-in-95 duration-150"
           >
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
               <h3 className="text-sm font-semibold text-slate-900 tracking-tight">
@@ -845,7 +845,7 @@ export default function TeacherAccessManager({
 
             <form onSubmit={handleSaveClassMapping} className="space-y-3.5 text-xs">
               {/* Row 1: Select Teacher + Subject */}
-              <div className="grid grid-cols-2 gap-2.5">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
                     Teacher
@@ -915,7 +915,7 @@ export default function TeacherAccessManager({
                   </div>
                 </div>
 
-                <div className="grid grid-cols-3 gap-2 max-h-[168px] overflow-y-auto pr-0.5">
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 max-h-[168px] overflow-y-auto pr-0.5">
                   {classes.map((cls) => {
                     const checked = mapClasses.some(
                       (c) => c.toLowerCase() === cls.section.toLowerCase()

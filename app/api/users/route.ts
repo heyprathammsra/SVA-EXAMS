@@ -1,11 +1,12 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   deleteTeacherUser,
   getStoredTeacherAccountsForBackup,
   listTeacherUsers,
   restoreTeacherAccountsFromBackup,
+  shouldRestoreTeachersFromCloud,
   syncTeacherMappingsOnClassDelete,
   syncTeacherMappingsOnClassRename,
   syncTeacherMappingsOnSubjectRename,
@@ -14,15 +15,17 @@ import {
 import { getRequestAuthSession } from '@/lib/auth-server';
 import { PersistedErpState } from '@/lib/erp-persistence';
 import {
+  getCachedCloudPayload,
   pullCloudBackupFromGoogleSheet,
   pushCloudBackupToGoogleSheet,
 } from '@/lib/sheets-cloud-store';
 
 export const dynamic = 'force-dynamic';
 
-const STATE_FILE = path.join(process.cwd(), '.data', 'erp-state.json');
+const DATA_DIR = path.join(process.cwd(), '.data');
+const STATE_FILE = path.join(DATA_DIR, 'erp-state.json');
 
-async function readCurrentStateForCloud(): Promise<PersistedErpState | null> {
+async function readLocalStateFile(): Promise<PersistedErpState | null> {
   try {
     const raw = await readFile(STATE_FILE, 'utf8');
     const parsed = JSON.parse(raw);
@@ -34,12 +37,54 @@ async function readCurrentStateForCloud(): Promise<PersistedErpState | null> {
   }
 }
 
+async function writeLocalStateFile(state: PersistedErpState): Promise<void> {
+  await mkdir(DATA_DIR, { recursive: true });
+  const tmpFile = `${STATE_FILE}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
+  await writeFile(tmpFile, JSON.stringify(state), 'utf8');
+  await rename(tmpFile, STATE_FILE);
+}
+
+async function syncTeachersFromCloud(forcePull: boolean): Promise<PersistedErpState | null> {
+  const localState = await readLocalStateFile();
+  const cloud = await pullCloudBackupFromGoogleSheet({ force: forcePull });
+  if (shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloud)) {
+    restoreTeacherAccountsFromBackup(cloud!.teachers);
+  }
+  if (
+    cloud?.state?.initialized &&
+    (cloud.state.updatedAt || 0) > (localState?.updatedAt || 0)
+  ) {
+    await writeLocalStateFile(cloud.state).catch(() => {});
+    return cloud.state;
+  }
+  return localState ?? cloud?.state ?? null;
+}
+
+async function readAuthoritativeStateForCloud(): Promise<PersistedErpState | null> {
+  const localState = await readLocalStateFile();
+  let cloudState = getCachedCloudPayload()?.state ?? null;
+  if (!localState || !cloudState) {
+    const cloud = await pullCloudBackupFromGoogleSheet({ force: !localState });
+    cloudState = cloud?.state ?? cloudState;
+  }
+  if (
+    cloudState?.initialized &&
+    (cloudState.updatedAt || 0) > (localState?.updatedAt || 0)
+  ) {
+    await writeLocalStateFile(cloudState).catch(() => {});
+    return cloudState;
+  }
+  return localState ?? cloudState ?? null;
+}
+
 async function mirrorTeachersToGoogleSheet(): Promise<void> {
   try {
-    const currentState = await readCurrentStateForCloud();
+    const currentState = await readAuthoritativeStateForCloud();
     await pushCloudBackupToGoogleSheet(
       currentState,
-      getStoredTeacherAccountsForBackup()
+      getStoredTeacherAccountsForBackup(),
+      undefined,
+      { authoritativeTeachers: true }
     );
   } catch {}
 }
@@ -69,17 +114,7 @@ export async function GET(req: NextRequest) {
   if (!auth.ok) return auth.response;
 
   try {
-    const cloud = await pullCloudBackupFromGoogleSheet();
-    if (cloud?.teachers && cloud.teachers.length > 0) {
-      const localMax = Math.max(
-        0,
-        ...getStoredTeacherAccountsForBackup().map((t) => t.updatedAt || 0)
-      );
-      const cloudMax = Math.max(0, ...cloud.teachers.map((t) => t.updatedAt || 0));
-      if (cloudMax > localMax) {
-        restoreTeacherAccountsFromBackup(cloud.teachers);
-      }
-    }
+    await syncTeachersFromCloud(true);
   } catch {}
 
   const teachers = listTeacherUsers();
@@ -97,6 +132,8 @@ export async function POST(req: NextRequest) {
     if (!body || typeof body !== 'object') {
       return NextResponse.json({ error: 'Invalid request payload' }, { status: 400 });
     }
+
+    await syncTeachersFromCloud(false).catch(() => null);
 
     const res = upsertTeacherUser({
       id: typeof body.id === 'string' ? body.id : undefined,
@@ -116,7 +153,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: res.error }, { status: 400 });
     }
 
-    mirrorTeachersToGoogleSheet().catch(() => {});
+    await mirrorTeachersToGoogleSheet();
 
     return NextResponse.json({
       success: true,
@@ -142,12 +179,14 @@ export async function DELETE(req: NextRequest) {
     const body = await req.json().catch(() => null);
     const target = queryUsername || body?.username || body?.id || '';
 
+    await syncTeachersFromCloud(false).catch(() => null);
+
     const res = deleteTeacherUser(String(target));
     if (!res.ok) {
       return NextResponse.json({ error: res.error }, { status: 400 });
     }
 
-    mirrorTeachersToGoogleSheet().catch(() => {});
+    await mirrorTeachersToGoogleSheet();
 
     return NextResponse.json({
       success: true,
@@ -168,18 +207,20 @@ export async function PATCH(req: NextRequest) {
       return NextResponse.json({ error: 'Invalid sync payload' }, { status: 400 });
     }
 
+    await syncTeachersFromCloud(false).catch(() => null);
+
     if (body.action === 'renameClass') {
       const oldSection = typeof body.oldSection === 'string' ? body.oldSection : '';
       const newSection = typeof body.newSection === 'string' ? body.newSection : '';
       const teachers = syncTeacherMappingsOnClassRename(oldSection, newSection);
-      mirrorTeachersToGoogleSheet().catch(() => {});
+      await mirrorTeachersToGoogleSheet();
       return NextResponse.json({ success: true, teachers });
     }
 
     if (body.action === 'deleteClass') {
       const section = typeof body.section === 'string' ? body.section : '';
       const teachers = syncTeacherMappingsOnClassDelete(section);
-      mirrorTeachersToGoogleSheet().catch(() => {});
+      await mirrorTeachersToGoogleSheet();
       return NextResponse.json({ success: true, teachers });
     }
 
@@ -187,7 +228,7 @@ export async function PATCH(req: NextRequest) {
       const oldSubject = typeof body.oldSubject === 'string' ? body.oldSubject : '';
       const newSubject = typeof body.newSubject === 'string' ? body.newSubject : '';
       const teachers = syncTeacherMappingsOnSubjectRename(oldSubject, newSubject);
-      mirrorTeachersToGoogleSheet().catch(() => {});
+      await mirrorTeachersToGoogleSheet();
       return NextResponse.json({ success: true, teachers });
     }
 

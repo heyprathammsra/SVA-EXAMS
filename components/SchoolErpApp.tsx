@@ -98,7 +98,6 @@ import {
 } from '@/lib/remarks-utils';
 import AdminConfigPanel from '@/components/AdminConfigPanel';
 import TotalCalculationFormulaCard from '@/components/TotalCalculationFormulaCard';
-import GoogleSheetsConnectCard from '@/components/GoogleSheetsConnectCard';
 import {
   downloadSinglePDF,
   downloadAllPDFsAsZip,
@@ -107,10 +106,6 @@ import {
 import {
   GasSyncService,
   LOCKED_SPREADSHEET_ID,
-  LOCKED_SPREADSHEET_URL,
-  getStoredGasUrl,
-  saveStoredGasUrl,
-  GAS_SCRIPT_CODE,
 } from '@/lib/gas-sync';
 import {
   SVA_STORAGE_KEYS,
@@ -151,16 +146,22 @@ import ClearMarksRemarksModal, {
   ClearModalPreset,
 } from '@/components/ClearMarksRemarksModal';
 import { applyClearErpData, ClearDataOptions } from '@/lib/erp-clear-data';
-import { getAdminAuthHeaders, getStoredTeacherProfile } from '@/lib/auth-client';
+import {
+  getAdminAuthHeaders,
+  getStoredTeacherProfile,
+  setStoredTeacherProfile,
+} from '@/lib/auth-client';
 import {
   canUserEditSubjectInClass,
   canUserViewSection,
+  didTeacherPermissionsChange,
   filterImportedStudentsForRole,
   getDefaultTeacherScopesForSection,
   getEditableSubjectsForClass,
   getVisibleSectionsForUser,
   getVisibleSubjectsForClass,
   isClassTeacherForSection,
+  resolveInitialTeacherExam,
   resolveInitialTeacherSection,
   sectionsMatch,
   subjectsMatch,
@@ -538,9 +539,11 @@ export default function SchoolErpPage({
     () => initialTeacherProfile ?? getStoredTeacherProfile()
   );
   const teacherProfileRef = useRef<TeacherProfile | null>(teacherProfile);
+  const onLogoutRef = useRef<(() => void) | undefined>(onLogout);
   useEffect(() => {
     teacherProfileRef.current = teacherProfile;
-  }, [teacherProfile]);
+    onLogoutRef.current = onLogout;
+  }, [teacherProfile, onLogout]);
 
   // Deterministic SSR-safe default seed state (hydrated from localStorage + backend API after mount so saved data is NEVER overwritten)
   const defaultErpState = useMemo(
@@ -557,6 +560,7 @@ export default function SchoolErpPage({
   const [isStorageReady, setIsStorageReady] = useState<boolean>(false);
   const stateUpdatedAtRef = useRef<number>(0);
   const serverSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const pendingBackendSavesRef = useRef<Set<Promise<void>>>(new Set());
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSyncedSnapshotRef = useRef<{
     selectedClass: string;
@@ -1012,9 +1016,12 @@ export default function SchoolErpPage({
         setExportClass(fallbackClass);
       }
     } else {
-      const classChanged = prevTeacherClassSync !== selectedClass;
+      const teacherSyncKey = `${selectedClass}::${teacherProfile?.assignedSubject || ''}::${
+        teacherProfile?.classTeacherOf || ''
+      }::${(teacherProfile?.assignedClasses || []).join(',')}`;
+      const classChanged = prevTeacherClassSync !== teacherSyncKey;
       if (classChanged) {
-        setPrevTeacherClassSync(selectedClass);
+        setPrevTeacherClassSync(teacherSyncKey);
         const defaults = getDefaultTeacherScopesForSection({
           section: selectedClass,
           profile: teacherProfile,
@@ -1266,15 +1273,13 @@ export default function SchoolErpPage({
     }, 3000);
   }, []);
 
-  // Google Apps Script Sync state (SSR-safe initialization)
-  const [gasUrl, setGasUrl] = useState<string>('');
-  const [tempGasUrl, setTempGasUrl] = useState<string>('');
-  const [isTestingGas, setIsTestingGas] = useState<boolean>(false);
-  const [gasCopied, setGasCopied] = useState<boolean>(false);
-  const [isGasModalOpen, setIsGasModalOpen] = useState<boolean>(false);
+  // Google Apps Script Auto-Sync state (SSR-safe initialization)
   const [sheetsSyncStatus, setSheetsSyncStatus] = useState<'idle' | 'syncing' | 'synced' | 'error'>('idle');
   const [lastSyncTime, setLastSyncTime] = useState<string | null>(null);
   const autoSyncTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const pendingSheetExamsRef = useRef<Set<string>>(new Set());
+  const needsFullSheetSyncRef = useRef<boolean>(false);
+  const isSheetSyncRunningRef = useRef<boolean>(false);
   const studentsRef = useRef<StudentReportRow[]>(students);
   const selectedExamRef = useRef<string>(selectedExam);
   const selectedClassRef = useRef<string>(selectedClass);
@@ -1319,26 +1324,60 @@ export default function SchoolErpPage({
       clearTimeout(serverSaveTimerRef.current);
       serverSaveTimerRef.current = null;
     }
-    const send = () => {
-      fetch('/api/erp-state', {
+    const send = (): Promise<void> => {
+      const reqPromise = fetch('/api/erp-state', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...getAdminAuthHeaders(),
         },
         body: JSON.stringify({ state }),
-      }).catch((err) => {
-        console.warn('Backend ERP state sync warning:', err);
-      });
+      })
+        .then(() => undefined)
+        .catch((err) => {
+          console.warn('Backend ERP state sync warning:', err);
+        })
+        .finally(() => {
+          pendingBackendSavesRef.current.delete(reqPromise);
+        });
+      pendingBackendSavesRef.current.add(reqPromise);
+      return reqPromise;
     };
     if (immediate) {
-      send();
+      return send();
     } else {
-      serverSaveTimerRef.current = setTimeout(send, 120);
+      serverSaveTimerRef.current = setTimeout(() => {
+        serverSaveTimerRef.current = null;
+        void send();
+      }, 120);
+      return Promise.resolve();
     }
   }, []);
 
-  // 1. Hydrate once from localStorage AND /api/erp-state without ever overwriting saved data with defaults
+  const flushPendingBackendSaves = useCallback(async () => {
+    if (serverSaveTimerRef.current) {
+      clearTimeout(serverSaveTimerRef.current);
+      serverSaveTimerRef.current = null;
+      const snapshot: PersistedErpState = {
+        version: 1,
+        initialized: true,
+        updatedAt: stateUpdatedAtRef.current || Date.now(),
+        selectedClass: selectedClassRef.current,
+        selectedExam: selectedExamRef.current,
+        classes: classesRef.current,
+        examConfigs: examConfigsRef.current,
+        students: studentsRef.current,
+        examMarksStore: examMarksStoreRef.current,
+        examBreakdownsStore: examBreakdownsStoreRef.current,
+      };
+      persistToBackend(snapshot, true);
+    }
+    while (pendingBackendSavesRef.current.size > 0) {
+      await Promise.allSettled(Array.from(pendingBackendSavesRef.current));
+    }
+  }, [persistToBackend]);
+
+  // 1. Hydrate once from localStorage AND /api/erp-state?fresh=1 without ever overwriting saved data with defaults
   useEffect(() => {
     let cancelled = false;
     if (typeof window === 'undefined') return;
@@ -1351,22 +1390,68 @@ export default function SchoolErpPage({
         Array.isArray(state.classes) && state.classes.length > 0
           ? state.classes
           : defaultErpState.classes;
+      const effectiveProfile = resolvedTeacherProfile ?? teacherProfileRef.current;
+
+      // For teachers on initial mount, if server's active exam (e.g. PT-2) has zero visible subjects
+      // for their mapping (e.g. Computer Science in Classes 6-8), switch initial view to an exam that has them (e.g. SA-1).
+      let effectiveExam = state.selectedExam;
+      let preparedStudents = state.students;
+      let preparedMarksStore = state.examMarksStore;
+      let preparedBreakdownsStore = state.examBreakdownsStore;
+
+      if (userRole === 'teacher' && !userPickedExamBeforeReadyRef.current) {
+        const examIds = Object.keys(state.examConfigs || {});
+        const bestExam = resolveInitialTeacherExam({
+          preferredExam: state.selectedExam,
+          examIds,
+          allSections: getSectionNames(resolvedClasses),
+          profile: effectiveProfile,
+          getSubjectsForExamAndSection: (exId, sec) => {
+            const rawCfg = state.examConfigs?.[exId];
+            if (!rawCfg) return SVA_SUBJECTS.map((s) => s.name);
+            const eff = getEffectiveExamConfigForClass(rawCfg, sec, resolvedClasses);
+            const subs = isPtExam(rawCfg.code || exId) && !hasCsInPtExam(sec)
+              ? eff.subjects.filter((s) => {
+                  const lower = s.name.trim().toLowerCase();
+                  return lower !== 'computer science' && lower !== 'cs';
+                })
+              : eff.subjects;
+            return subs.map((s) => s.name);
+          },
+        });
+        if (bestExam && bestExam !== state.selectedExam) {
+          const switched = switchExamState({
+            students: state.students,
+            currentExam: state.selectedExam,
+            targetExam: bestExam,
+            examConfigs: state.examConfigs,
+            initialConfigs: INITIAL_EXAM_CONFIGS,
+            examMarksStore: state.examMarksStore,
+            examBreakdownsStore: state.examBreakdownsStore,
+          });
+          effectiveExam = bestExam;
+          preparedStudents = switched.nextRoster;
+          preparedMarksStore = switched.nextMarksStore;
+          preparedBreakdownsStore = switched.nextBreakdownsStore;
+        }
+      }
+
       const resolvedExamCfg =
-        state.examConfigs?.[state.selectedExam] || defaultErpState.examConfigs['SA-1'];
+        state.examConfigs?.[effectiveExam] || defaultErpState.examConfigs['SA-1'];
       const effectiveSelectedClass =
         userRole === 'teacher' && !userPickedClassBeforeReadyRef.current
           ? resolveInitialTeacherSection(
               getSectionNames(resolvedClasses),
               state.selectedClass,
-              resolvedTeacherProfile ?? teacherProfileRef.current,
+              effectiveProfile,
               (resolvedExamCfg?.subjects || SVA_SUBJECTS).map((s) => s.name)
             )
           : state.selectedClass;
 
       // Ensure active exam marks and breakdowns from examMarksStore/examBreakdownsStore are synchronized onto students
-      const activeExamMarks = state.examMarksStore?.[state.selectedExam] || {};
-      const activeExamBds = state.examBreakdownsStore?.[state.selectedExam] || {};
-      const syncedStudents = state.students.map((st) => {
+      const activeExamMarks = preparedMarksStore?.[effectiveExam] || {};
+      const activeExamBds = preparedBreakdownsStore?.[effectiveExam] || {};
+      const syncedStudents = preparedStudents.map((st) => {
         const storedMarks = activeExamMarks[st.id];
         const storedBds = activeExamBds[st.id];
         return {
@@ -1381,29 +1466,29 @@ export default function SchoolErpPage({
       stateUpdatedAtRef.current = state.updatedAt || Date.now();
       lastSyncedSnapshotRef.current = {
         selectedClass: effectiveSelectedClass,
-        selectedExam: state.selectedExam,
+        selectedExam: effectiveExam,
         classes: resolvedClasses,
         examConfigs: state.examConfigs,
         students: syncedStudents,
-        examMarksStore: state.examMarksStore,
-        examBreakdownsStore: state.examBreakdownsStore,
+        examMarksStore: preparedMarksStore,
+        examBreakdownsStore: preparedBreakdownsStore,
       };
       setClasses(resolvedClasses);
       setExamConfigs(state.examConfigs);
       setStudents(syncedStudents);
-      setExamMarksStore(state.examMarksStore);
-      setExamBreakdownsStore(state.examBreakdownsStore);
-      setSelectedExam(state.selectedExam);
-      setExportExam(state.selectedExam);
+      setExamMarksStore(preparedMarksStore);
+      setExamBreakdownsStore(preparedBreakdownsStore);
+      setSelectedExam(effectiveExam);
+      setExportExam(effectiveExam);
       setSelectedClass(effectiveSelectedClass);
       setExportClass(effectiveSelectedClass);
-      selectedExamRef.current = state.selectedExam;
+      selectedExamRef.current = effectiveExam;
       selectedClassRef.current = effectiveSelectedClass;
       classesRef.current = resolvedClasses;
       studentsRef.current = syncedStudents;
       examConfigsRef.current = state.examConfigs;
-      examMarksStoreRef.current = state.examMarksStore;
-      examBreakdownsStoreRef.current = state.examBreakdownsStore;
+      examMarksStoreRef.current = preparedMarksStore;
+      examBreakdownsStoreRef.current = preparedBreakdownsStore;
     };
 
     const rawStorage: Record<string, string | null> = {
@@ -1423,10 +1508,6 @@ export default function SchoolErpPage({
       await Promise.resolve();
       if (cancelled) return;
 
-      const storedGas = getStoredGasUrl();
-      setGasUrl(storedGas);
-      setTempGasUrl(storedGas);
-
       // Only pre-hydrate from localStorage before /api/erp-state for admin; teachers always hydrate from authoritative server state first
       if (
         userRole === 'admin' &&
@@ -1440,19 +1521,37 @@ export default function SchoolErpPage({
       let remoteState: PersistedErpState | null = null;
       let freshTeacherProfile: TeacherProfile | null | undefined = undefined;
       try {
-        const res = await fetch('/api/erp-state', {
+        const res = await fetch('/api/erp-state?fresh=1', {
           cache: 'no-store',
           headers: { ...getAdminAuthHeaders() },
         });
         if (res.ok) {
           const payload = await res.json();
-          if (payload?.teacherProfile && userRole === 'teacher') {
-            freshTeacherProfile = payload.teacherProfile as TeacherProfile;
-            setTeacherProfile(freshTeacherProfile);
+          if (userRole === 'teacher') {
+            if (payload?.teacherProfile === null) {
+              setStoredTeacherProfile(null);
+              showToast('Your account access was removed by Admin.');
+              onLogoutRef.current?.();
+              return;
+            }
+            if (payload?.teacherProfile) {
+              freshTeacherProfile = payload.teacherProfile as TeacherProfile;
+              setTeacherProfile(freshTeacherProfile);
+              teacherProfileRef.current = freshTeacherProfile;
+              setStoredTeacherProfile(freshTeacherProfile);
+            }
           }
           if (payload?.exists && payload?.state?.initialized) {
             remoteState = payload.state as PersistedErpState;
           }
+          setSheetsSyncStatus('synced');
+          setLastSyncTime(
+            new Date().toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })
+          );
         }
       } catch {}
 
@@ -1510,31 +1609,261 @@ export default function SchoolErpPage({
     };
   }, [defaultErpState, writeStateToLocalStorage, persistToBackend, userRole]);
 
-  // 1b. Keep Admin and Teacher views in sync with authoritative server state on tab focus / visibility / view switch
+  // Flush queued exam/structure pushes to Google Sheets (used by 10-second auto-sync & after URL updates)
+  const flushPendingGoogleSheetSync = useCallback(async (): Promise<boolean> => {
+    if (isSheetSyncRunningRef.current) return true;
+    const fullNeeded = needsFullSheetSyncRef.current;
+    const queuedExams = Array.from(pendingSheetExamsRef.current);
+    if (!fullNeeded && queuedExams.length === 0) return true;
+
+    isSheetSyncRunningRef.current = true;
+    setSheetsSyncStatus('syncing');
+    try {
+      let ok = false;
+      if (fullNeeded || queuedExams.length > 1) {
+        needsFullSheetSyncRef.current = false;
+        pendingSheetExamsRef.current.clear();
+        const res = await GasSyncService.pushAllExams({
+          students: studentsRef.current,
+          selectedExam: selectedExamRef.current,
+          selectedClass: selectedClassRef.current,
+          examConfigs: examConfigsRef.current,
+          examMarksStore: examMarksStoreRef.current,
+          examBreakdownsStore: examBreakdownsStoreRef.current,
+          classes: classesRef.current,
+          examIdsToPush: fullNeeded ? undefined : queuedExams,
+          skipCloudBackup: true,
+        });
+        ok = Boolean(res.success);
+        if (!ok) {
+          if (fullNeeded) {
+            needsFullSheetSyncRef.current = true;
+          } else {
+            queuedExams.forEach((exId) => pendingSheetExamsRef.current.add(exId));
+          }
+        }
+      } else {
+        const targetExam = queuedExams[0];
+        pendingSheetExamsRef.current.delete(targetExam);
+        const studentsForExam =
+          targetExam === selectedExamRef.current
+            ? studentsRef.current
+            : studentsRef.current.map((st) => ({
+                ...st,
+                marks: (examMarksStoreRef.current[targetExam] || {})[st.id] || {},
+                breakdowns: (examBreakdownsStoreRef.current[targetExam] || {})[st.id] || {},
+              }));
+        const res = await GasSyncService.pushData(
+          studentsForExam,
+          targetExam,
+          undefined,
+          examConfigsRef.current[targetExam],
+          classesRef.current
+        );
+        ok = Boolean(res.success);
+        if (!ok) {
+          pendingSheetExamsRef.current.add(targetExam);
+        }
+      }
+
+      if (ok) {
+        setSheetsSyncStatus('synced');
+        setLastSyncTime(
+          new Date().toLocaleTimeString([], {
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        );
+      } else {
+        setSheetsSyncStatus('error');
+      }
+      return ok;
+    } catch {
+      setSheetsSyncStatus('error');
+      return false;
+    } finally {
+      isSheetSyncRunningRef.current = false;
+    }
+  }, [setSheetsSyncStatus, setLastSyncTime]);
+
+  // 1b. Automatic 10-second bidirectional sync between Admin, Teachers, and Google Sheets
   useEffect(() => {
     if (!isStorageReady) return;
     let isMounted = true;
+    let isPolling = false;
+
+    const applyUpdatedTeacherPermissions = (
+      nextProfile: TeacherProfile,
+      resolvedClasses: ClassDefinition[],
+      resolvedExamConfigs: Record<string, ExamConfig>,
+      currentRoster: StudentReportRow[],
+      currentMarksStore: ExamMarksStore,
+      currentBreakdownsStore: ExamBreakdownsStore
+    ) => {
+      setTeacherProfile(nextProfile);
+      teacherProfileRef.current = nextProfile;
+      setStoredTeacherProfile(nextProfile);
+
+      const allSections = getSectionNames(resolvedClasses);
+      const examIds = Object.keys(resolvedExamConfigs || {});
+      const bestExam = resolveInitialTeacherExam({
+        preferredExam: selectedExamRef.current,
+        examIds,
+        allSections,
+        profile: nextProfile,
+        getSubjectsForExamAndSection: (exId, sec) => {
+          const rawCfg = resolvedExamConfigs?.[exId];
+          if (!rawCfg) return SVA_SUBJECTS.map((s) => s.name);
+          const eff = getEffectiveExamConfigForClass(rawCfg, sec, resolvedClasses);
+          const subs =
+            isPtExam(rawCfg.code || exId) && !hasCsInPtExam(sec)
+              ? eff.subjects.filter((s) => {
+                  const lower = s.name.trim().toLowerCase();
+                  return lower !== 'computer science' && lower !== 'cs';
+                })
+              : eff.subjects;
+          return subs.map((s) => s.name);
+        },
+      });
+
+      let activeRoster = currentRoster;
+      let activeMarksStore = currentMarksStore;
+      let activeBreakdownsStore = currentBreakdownsStore;
+      const targetExam =
+        bestExam && resolvedExamConfigs?.[bestExam] ? bestExam : selectedExamRef.current;
+
+      if (targetExam !== selectedExamRef.current) {
+        const switched = switchExamState({
+          students: currentRoster,
+          currentExam: selectedExamRef.current,
+          targetExam,
+          examConfigs: resolvedExamConfigs,
+          initialConfigs: INITIAL_EXAM_CONFIGS,
+          examMarksStore: currentMarksStore,
+          examBreakdownsStore: currentBreakdownsStore,
+        });
+        activeRoster = switched.nextRoster;
+        activeMarksStore = switched.nextMarksStore;
+        activeBreakdownsStore = switched.nextBreakdownsStore;
+        setStudents(activeRoster);
+        setExamMarksStore(activeMarksStore);
+        setExamBreakdownsStore(activeBreakdownsStore);
+        studentsRef.current = activeRoster;
+        examMarksStoreRef.current = activeMarksStore;
+        examBreakdownsStoreRef.current = activeBreakdownsStore;
+        setSelectedExam(targetExam);
+        setExportExam(targetExam);
+        selectedExamRef.current = targetExam;
+      }
+
+      const rawExamCfg =
+        resolvedExamConfigs?.[targetExam] ||
+        examConfigsRef.current[targetExam] ||
+        defaultErpState.examConfigs['SA-1'];
+      const targetSection = resolveInitialTeacherSection(
+        allSections,
+        selectedClassRef.current,
+        nextProfile,
+        (rawExamCfg?.subjects || SVA_SUBJECTS).map((s) => s.name)
+      );
+
+      const effCfg = getEffectiveExamConfigForClass(rawExamCfg, targetSection, resolvedClasses);
+      const effSubjectNames = (
+        isPtExam(rawExamCfg?.code || targetExam) && !hasCsInPtExam(targetSection)
+          ? effCfg.subjects.filter((s) => {
+              const lower = s.name.trim().toLowerCase();
+              return lower !== 'computer science' && lower !== 'cs';
+            })
+          : effCfg.subjects
+      ).map((s) => s.name);
+      const visibleSubjectNames = getVisibleSubjectsForClass(
+        effSubjectNames,
+        targetSection,
+        'teacher',
+        nextProfile
+      );
+      const defaults = getDefaultTeacherScopesForSection({
+        section: targetSection,
+        profile: nextProfile,
+        visibleSubjectNames,
+      });
+
+      lastSyncedSnapshotRef.current = {
+        ...lastSyncedSnapshotRef.current,
+        selectedClass: targetSection,
+        selectedExam: targetExam,
+        classes: resolvedClasses,
+        examConfigs: resolvedExamConfigs,
+        students: activeRoster,
+        examMarksStore: activeMarksStore,
+        examBreakdownsStore: activeBreakdownsStore,
+      };
+      selectedClassRef.current = targetSection;
+      setSelectedClass(targetSection);
+      setExportClass(targetSection);
+      setSelectedSubject(defaults.selectedSubject);
+      if (defaults.internalActiveSubject) {
+        setInternalActiveSubject(defaults.internalActiveSubject);
+      }
+      setSelectedRemarkScope(defaults.selectedRemarkScope);
+      setExportSubjectScope(defaults.exportSubjectScope);
+      showToast('Updated permissions from Admin');
+    };
 
     const syncFromServer = async () => {
-      // Do not overwrite while a local save is queued
-      if (serverSaveTimerRef.current) return;
+      if (isPolling || !isMounted) return;
+      isPolling = true;
       try {
-        const res = await fetch('/api/erp-state', {
+        // 1. Flush any queued Sheet pushes/retries first
+        const sheetOk = await flushPendingGoogleSheetSync();
+        if (!isMounted) return;
+
+        // 2. Pull authoritative ERP state + user permissions unless local changes are in-flight
+        if (serverSaveTimerRef.current || pendingBackendSavesRef.current.size > 0) return;
+
+        const res = await fetch('/api/erp-state?fresh=1', {
           cache: 'no-store',
           headers: { ...getAdminAuthHeaders() },
         });
-        if (!res.ok || !isMounted || serverSaveTimerRef.current) return;
-        const payload = await res.json();
-        if (payload?.teacherProfile && userRole === 'teacher') {
-          setTeacherProfile(payload.teacherProfile as TeacherProfile);
+        if (
+          !res.ok ||
+          !isMounted ||
+          serverSaveTimerRef.current ||
+          pendingBackendSavesRef.current.size > 0
+        ) {
+          return;
         }
+        const payload = await res.json();
+
+        // If teacher was deleted by Admin, terminate session cleanly
+        if (userRole === 'teacher' && payload?.teacherProfile === null) {
+          setStoredTeacherProfile(null);
+          showToast('Your account access was removed by Admin.');
+          onLogoutRef.current?.();
+          return;
+        }
+
+        let resolvedClasses = classesRef.current;
+        let resolvedExamConfigs = examConfigsRef.current;
+        let resolvedRoster = studentsRef.current;
+        let resolvedMarksStore = examMarksStoreRef.current;
+        let resolvedBreakdownsStore = examBreakdownsStoreRef.current;
+
+        const nextProfile =
+          userRole === 'teacher' && payload?.teacherProfile
+            ? (payload.teacherProfile as TeacherProfile)
+            : null;
+        const profileChanged = Boolean(
+          nextProfile && didTeacherPermissionsChange(teacherProfileRef.current, nextProfile)
+        );
+
         if (payload?.exists && payload?.state?.initialized) {
           const remote = payload.state as PersistedErpState;
           if ((remote.updatedAt || 0) > stateUpdatedAtRef.current) {
-            const keepExam =
-              remote.examConfigs?.[selectedExamRef.current]
-                ? selectedExamRef.current
-                : remote.selectedExam;
+            const keepExam = remote.examConfigs?.[selectedExamRef.current]
+              ? selectedExamRef.current
+              : remote.selectedExam;
             const switched = switchExamState({
               students: remote.students,
               currentExam: remote.selectedExam,
@@ -1544,17 +1873,25 @@ export default function SchoolErpPage({
               examMarksStore: remote.examMarksStore,
               examBreakdownsStore: remote.examBreakdownsStore,
             });
-            const resolvedClasses =
+            resolvedClasses =
               Array.isArray(remote.classes) && remote.classes.length > 0
                 ? remote.classes
                 : defaultErpState.classes;
+            resolvedExamConfigs = remote.examConfigs;
+            resolvedRoster = switched.nextRoster;
+            resolvedMarksStore = switched.nextMarksStore;
+            resolvedBreakdownsStore = switched.nextBreakdownsStore;
+
+            const effectiveProfile = nextProfile ?? teacherProfileRef.current;
             const keepClass =
               userRole === 'teacher'
                 ? resolveInitialTeacherSection(
                     getSectionNames(resolvedClasses),
                     selectedClassRef.current,
-                    (payload?.teacherProfile as TeacherProfile) ?? teacherProfileRef.current,
-                    (remote.examConfigs?.[keepExam]?.subjects || SVA_SUBJECTS).map((s) => s.name)
+                    effectiveProfile,
+                    (resolvedExamConfigs?.[keepExam]?.subjects || SVA_SUBJECTS).map(
+                      (s) => s.name
+                    )
                   )
                 : getSectionNames(resolvedClasses).includes(selectedClassRef.current)
                 ? selectedClassRef.current
@@ -1565,9 +1902,9 @@ export default function SchoolErpPage({
               selectedExam: keepExam,
               selectedClass: keepClass,
               classes: resolvedClasses,
-              students: switched.nextRoster,
-              examMarksStore: switched.nextMarksStore,
-              examBreakdownsStore: switched.nextBreakdownsStore,
+              students: resolvedRoster,
+              examMarksStore: resolvedMarksStore,
+              examBreakdownsStore: resolvedBreakdownsStore,
             };
 
             stateUpdatedAtRef.current = remote.updatedAt || Date.now();
@@ -1575,46 +1912,94 @@ export default function SchoolErpPage({
               selectedClass: keepClass,
               selectedExam: keepExam,
               classes: resolvedClasses,
-              examConfigs: remote.examConfigs,
-              students: switched.nextRoster,
-              examMarksStore: switched.nextMarksStore,
-              examBreakdownsStore: switched.nextBreakdownsStore,
+              examConfigs: resolvedExamConfigs,
+              students: resolvedRoster,
+              examMarksStore: resolvedMarksStore,
+              examBreakdownsStore: resolvedBreakdownsStore,
             };
             setClasses(resolvedClasses);
-            setExamConfigs(remote.examConfigs);
-            setStudents(switched.nextRoster);
-            setExamMarksStore(switched.nextMarksStore);
-            setExamBreakdownsStore(switched.nextBreakdownsStore);
+            setExamConfigs(resolvedExamConfigs);
+            setStudents(resolvedRoster);
+            setExamMarksStore(resolvedMarksStore);
+            setExamBreakdownsStore(resolvedBreakdownsStore);
             setSelectedExam(keepExam);
+            setExportExam(keepExam);
             setSelectedClass(keepClass);
+            setExportClass(keepClass);
             selectedExamRef.current = keepExam;
             selectedClassRef.current = keepClass;
             classesRef.current = resolvedClasses;
-            studentsRef.current = switched.nextRoster;
-            examConfigsRef.current = remote.examConfigs;
-            examMarksStoreRef.current = switched.nextMarksStore;
-            examBreakdownsStoreRef.current = switched.nextBreakdownsStore;
+            studentsRef.current = resolvedRoster;
+            examConfigsRef.current = resolvedExamConfigs;
+            examMarksStoreRef.current = resolvedMarksStore;
+            examBreakdownsStoreRef.current = resolvedBreakdownsStore;
             writeStateToLocalStorage(mergedState);
           }
         }
-      } catch {}
+
+        if (nextProfile && profileChanged) {
+          applyUpdatedTeacherPermissions(
+            nextProfile,
+            resolvedClasses,
+            resolvedExamConfigs,
+            resolvedRoster,
+            resolvedMarksStore,
+            resolvedBreakdownsStore
+          );
+        }
+
+        if (
+          sheetOk &&
+          !needsFullSheetSyncRef.current &&
+          pendingSheetExamsRef.current.size === 0
+        ) {
+          setSheetsSyncStatus('synced');
+          setLastSyncTime(
+            new Date().toLocaleTimeString([], {
+              hour: '2-digit',
+              minute: '2-digit',
+              second: '2-digit',
+            })
+          );
+        }
+      } catch {
+      } finally {
+        isPolling = false;
+      }
     };
 
     const handleVisibility = () => {
       if (document.visibilityState === 'visible') {
-        syncFromServer();
+        void syncFromServer();
       }
     };
+
+    const intervalId = setInterval(() => {
+      if (typeof document === 'undefined' || document.visibilityState === 'visible') {
+        void syncFromServer();
+      }
+    }, 10000);
+
     window.addEventListener('focus', syncFromServer);
     document.addEventListener('visibilitychange', handleVisibility);
-    syncFromServer();
+    void syncFromServer();
 
     return () => {
       isMounted = false;
+      clearInterval(intervalId);
       window.removeEventListener('focus', syncFromServer);
       document.removeEventListener('visibilitychange', handleVisibility);
     };
-  }, [isStorageReady, activeTab, userRole, defaultErpState.classes, writeStateToLocalStorage]);
+  }, [
+    isStorageReady,
+    activeTab,
+    userRole,
+    defaultErpState.classes,
+    defaultErpState.examConfigs,
+    writeStateToLocalStorage,
+    flushPendingGoogleSheetSync,
+    showToast,
+  ]);
 
   // 2. Persist state changes to BOTH localStorage and /api/erp-state ONLY when actual user changes differ from last synced state
   useEffect(() => {
@@ -1643,6 +2028,10 @@ export default function SchoolErpPage({
         selectedExam,
       };
       return;
+    }
+
+    if (userRole === 'admin' && (classes !== snap.classes || examConfigs !== snap.examConfigs)) {
+      needsFullSheetSyncRef.current = true;
     }
 
     const updatedAt = Date.now();
@@ -1745,158 +2134,23 @@ export default function SchoolErpPage({
     });
   }, [setExamMarksStore, setExamBreakdownsStore]);
 
-  // Push latest data to Google Sheet via Google Apps Script Web App
-  const pushToLockedSheet = useCallback(async (isSilent = true) => {
-    try {
-      setSheetsSyncStatus('syncing');
-      const activeExam = selectedExamRef.current;
-      const res = await GasSyncService.pushData(
-        studentsRef.current,
-        activeExam,
-        undefined,
-        examConfigsRef.current[activeExam],
-        classesRef.current
-      );
-      if (res.success) {
-        setSheetsSyncStatus('synced');
-        setLastSyncTime(new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }));
-        if (!isSilent) {
-          showToast('Pushed latest data to Google Sheet');
-        }
-      } else {
-        setSheetsSyncStatus('error');
-      }
-    } catch (err: any) {
-      if (!isSilent) {
-        console.warn('Apps Script auto-push failed:', err);
-      }
-      setSheetsSyncStatus('error');
-    }
-  }, [showToast, setSheetsSyncStatus, setLastSyncTime]);
-
-  // Pull fresh data directly from Google Sheets for a specific exam
-  const pullFromLockedSheet = useCallback(
-    async (examName: string, isSilent = true) => {
-      try {
-        setSheetsSyncStatus('syncing');
-        const res = await GasSyncService.pullData(undefined, examName);
-        if (res.success) {
-          // If `examName` is not 'SA-1', do not let silent background pulls overwrite PT/other exams
-          // with the default SA-1 100-mark sheet data.
-          if (isSilent && examName !== 'SA-1') {
-            setSheetsSyncStatus('synced');
-            setLastSyncTime(
-              new Date().toLocaleTimeString([], {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-              })
-            );
-            return;
-          }
-
-          if (Array.isArray(res.students) && res.students.length > 0) {
-            const targetCfg =
-              examConfigsRef.current[examName] ||
-              INITIAL_EXAM_CONFIGS[examName] ||
-              INITIAL_EXAM_CONFIGS['SA-1'];
-
-            setStudents((prevRoster) => {
-              const rawMerged = mergePulledStudentsWithRoster(
-                prevRoster,
-                res.students!,
-                targetCfg
-              );
-              const merged = rawMerged.map((s) => {
-                const effCfg = getEffectiveExamConfigForClass(targetCfg, s.section);
-                const defaultMax = effCfg.subjects[0]?.maxMarks || (isPtExam(examName) ? 25 : 100);
-                if (isPtExam(examName) && hasCsInPtExam(s.section)) {
-                  const csSub = effCfg.subjects.find(
-                    (sub) =>
-                      sub.name.toLowerCase() === 'computer science' ||
-                      sub.name.toLowerCase() === 'cs'
-                  );
-                  const csMax = csSub?.maxMarks || defaultMax;
-                  const currentCs = s.marks['Computer Science'];
-                  if (currentCs === null || currentCs === undefined || (typeof currentCs === 'number' && currentCs > csMax)) {
-                    const baseSt = ALL_SVA_STUDENTS.find((b) => b.id === s.id);
-                    const baseCs = baseSt?.marks['Computer Science'];
-                    const fallbackCs =
-                      typeof currentCs === 'number' && currentCs > csMax
-                        ? Math.min(csMax, Math.max(0, Math.round((currentCs / (currentCs > 25 ? 100 : 25)) * csMax)))
-                        : typeof baseCs === 'number'
-                        ? Math.min(csMax, Math.max(0, Math.round((baseCs / 100) * csMax)))
-                        : Math.round(csMax * 0.88);
-                    return {
-                      ...s,
-                      marks: {
-                        ...s.marks,
-                        'Computer Science': fallbackCs,
-                      },
-                    };
-                  }
-                }
-                return s;
-              });
-              // Update stores for this exam
-              const marksMap: Record<string, Record<string, number | 'AB' | null>> = {};
-              const bdMap: Record<string, Record<string, SubjectBreakdown>> = {};
-              merged.forEach((s) => {
-                marksMap[s.id] = { ...s.marks };
-                if (s.breakdowns) {
-                  bdMap[s.id] = { ...s.breakdowns };
-                }
-              });
-              setExamMarksStore((prev) => ({ ...prev, [examName]: marksMap }));
-              setExamBreakdownsStore((prev) => ({ ...prev, [examName]: bdMap }));
-
-              if (selectedExamRef.current === examName) {
-                studentsRef.current = merged;
-                return merged;
-              }
-              return prevRoster;
-            });
-
-            if (!isSilent) {
-              showToast(`Pulled fresh ${examName} data from Google Sheets (${res.students.length} students)`);
-            }
-          }
-          setSheetsSyncStatus('synced');
-          setLastSyncTime(
-            new Date().toLocaleTimeString([], {
-              hour: '2-digit',
-              minute: '2-digit',
-              second: '2-digit',
-            })
-          );
-        } else {
-          setSheetsSyncStatus('error');
-          if (!isSilent && res.error) {
-            showToast(`Sync warning: ${res.error}`);
-          }
-        }
-      } catch (err: any) {
-        if (!isSilent) {
-          console.warn('Apps Script pull failed:', err);
-        }
-        setSheetsSyncStatus('error');
-      }
-    },
-    [showToast, setExamMarksStore, setExamBreakdownsStore, setSheetsSyncStatus, setLastSyncTime]
-  );
-
-  // Debounced push to Google Sheet via Google Apps Script Web App (only triggered when user edits data)
+  // Debounced push to Google Sheet via Google Apps Script Web App (auto-retried every 10s if needed)
   const triggerAutoSync = useCallback(
     (
       studentsToSync: StudentReportRow[],
       overrideExamId?: string,
       overrideExamCfg?: ExamConfig
     ) => {
+      const queuedExam = overrideExamId || selectedExamRef.current;
+      pendingSheetExamsRef.current.add(queuedExam);
+
       if (autoSyncTimerRef.current) {
         clearTimeout(autoSyncTimerRef.current);
       }
 
       autoSyncTimerRef.current = setTimeout(async () => {
+        if (isSheetSyncRunningRef.current) return;
+        isSheetSyncRunningRef.current = true;
         try {
           setSheetsSyncStatus('syncing');
           const targetExam = overrideExamId || selectedExamRef.current;
@@ -1909,6 +2163,7 @@ export default function SchoolErpPage({
             classesRef.current
           );
           if (res.success) {
+            pendingSheetExamsRef.current.delete(targetExam);
             setSheetsSyncStatus('synced');
             setLastSyncTime(
               new Date().toLocaleTimeString([], {
@@ -1917,13 +2172,15 @@ export default function SchoolErpPage({
                 second: '2-digit',
               })
             );
-          } else if (res.error?.includes('not configured')) {
-            setSheetsSyncStatus('idle');
           } else {
+            pendingSheetExamsRef.current.add(targetExam);
             setSheetsSyncStatus('error');
           }
         } catch {
+          pendingSheetExamsRef.current.add(queuedExam);
           setSheetsSyncStatus('error');
+        } finally {
+          isSheetSyncRunningRef.current = false;
         }
       }, 1200);
     },
@@ -2029,35 +2286,6 @@ export default function SchoolErpPage({
     setIsSelecting(false);
     showToast(`Switched ledger to ${newExam}`);
   };
-
-  const handleSaveAndTestGasUrl = useCallback(async (urlToSave: string) => {
-    const trimmed = urlToSave.trim();
-    setIsTestingGas(true);
-    try {
-      if (!trimmed) {
-        saveStoredGasUrl('');
-        setGasUrl('');
-        setSheetsSyncStatus('idle');
-        showToast('Google Apps Script URL cleared');
-        return;
-      }
-      saveStoredGasUrl(trimmed);
-      setGasUrl(trimmed);
-      const testRes = await GasSyncService.pushData(studentsRef.current, selectedExamRef.current, trimmed);
-      if (testRes.success) {
-        showToast('Successfully pushed data to Google Sheet!');
-        setSheetsSyncStatus('synced');
-      } else {
-        showToast(`Warning: ${testRes.error || 'Connection failed'}`);
-        setSheetsSyncStatus('error');
-      }
-    } catch (e: any) {
-      showToast(`Error: ${e.message || 'Connection failed'}`);
-      setSheetsSyncStatus('error');
-    } finally {
-      setIsTestingGas(false);
-    }
-  }, [showToast]);
 
   const handleSaveInternalBreakdown = useCallback((studentId: string, subjectName: string, updatedBd: SubjectBreakdown) => {
     const targetStudent = students.find((s) => s.id === studentId);
@@ -3307,7 +3535,7 @@ export default function SchoolErpPage({
     if (gridContainer && gridContainer.scrollWidth > gridContainer.clientWidth) {
       const containerRect = gridContainer.getBoundingClientRect();
       const cellRect = cellEl.getBoundingClientRect();
-      const frozenWidth = 238; // 48px Roll + 190px Student Name
+      const frozenWidth = window.innerWidth < 640 ? 164 : 238; // 40+124px on mobile, 48+190px on sm+
       const minVisibleLeft = containerRect.left + frozenWidth + 4;
       const maxVisibleRight = containerRect.right - 8;
       if (cellRect.left < minVisibleLeft) {
@@ -4348,198 +4576,184 @@ export default function SchoolErpPage({
     }
   };
 
-  // Google Apps Script Cloud Sync (syncs all exams, student particulars/remarks, teacher mappings, and ERP system state)
-  const handleGoogleSheetsSync = async () => {
-    setSheetsSyncStatus('syncing');
-    try {
-      const res = await GasSyncService.pushAllExams({
-        students: studentsRef.current,
-        selectedExam: selectedExamRef.current,
-        selectedClass: selectedClassRef.current,
-        examConfigs: examConfigsRef.current,
-        examMarksStore: examMarksStoreRef.current,
-        examBreakdownsStore: examBreakdownsStoreRef.current,
-        classes: classesRef.current,
-      });
-      if (res.success) {
-        setSheetsSyncStatus('synced');
-        setLastSyncTime(
-          new Date().toLocaleTimeString([], {
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-          })
-        );
-        const examCount = res.syncedExams?.length || Object.keys(examConfigsRef.current).length;
-        showToast(
-          `Synced ${studentsRef.current.length} students, ${examCount} exams & teacher mappings to Google Sheet!`
-        );
-      } else {
-        setSheetsSyncStatus('error');
-        showToast(`Sync error: ${res.error || 'Check Google Apps Script Web App URL'}`);
-      }
-    } catch (err: any) {
-      console.error('GAS Sync Error:', err);
-      setSheetsSyncStatus('error');
-      showToast(`Sync error: ${err.message || 'Check connection'}`);
-    }
-  };
-
   return (
     <div className="min-h-screen bg-[#F8FAFC] text-slate-900 font-sans flex flex-col">
       {/* Toast Notification */}
       {quickToast && (
-        <div className="fixed bottom-6 right-6 z-50 bg-slate-900 text-white text-xs font-medium px-4 py-2.5 rounded-lg shadow-xl flex items-center gap-2 border border-slate-800 animate-in fade-in duration-200">
+        <div className="fixed bottom-4 inset-x-3 sm:inset-x-auto sm:bottom-6 sm:right-6 z-50 bg-slate-900 text-white text-xs font-medium px-4 py-2.5 rounded-lg shadow-xl flex items-center gap-2 border border-slate-800 animate-in fade-in duration-200">
           <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-          <span>{quickToast}</span>
+          <span className="truncate">{quickToast}</span>
         </div>
       )}
 
       {/* TOP BAR: Clean, Minimal Brand & Segmented Navigation */}
-      <header className="bg-white/95 backdrop-blur-xs border-b border-slate-200/80 sticky top-0 z-50 px-5 sm:px-8 py-2.5">
-        <div className="max-w-[1400px] mx-auto flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-6">
+      <header className="bg-white/95 backdrop-blur-xs border-b border-slate-200/80 sticky top-0 z-50 px-3 sm:px-8 py-2 sm:py-2.5">
+        <div className="max-w-[1400px] mx-auto flex flex-wrap items-center justify-between gap-y-2 gap-x-2 sm:gap-4">
           {/* Brand Wordmark with Logo */}
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="order-1 flex items-center gap-1.5 sm:gap-2 min-w-0 flex-1 sm:flex-initial">
             <Image
               src={SCHOOL_LOGO_SRC}
               alt="Saraswati Vidya Academy Crest"
               width={32}
               height={32}
-              className="w-7 h-7 sm:w-8 sm:h-8 object-contain shrink-0"
+              className="w-6 h-6 sm:w-8 sm:h-8 object-contain shrink-0"
               priority
             />
-            <span className="text-sm sm:text-base font-semibold text-slate-900 tracking-tight whitespace-nowrap">
+            <span className="text-xs sm:text-base font-semibold text-slate-900 tracking-tight truncate">
               Saraswati Vidya Academy
             </span>
           </div>
 
           {/* Navigation Links (Minimal Segmented Tabs) */}
-          <div className="overflow-x-auto no-scrollbar -mx-1 px-1 py-0.5 flex items-center gap-2.5">
-            <nav className="flex items-center gap-0.5 bg-slate-100/80 p-0.5 rounded-lg border border-slate-200/60 text-xs font-medium w-max">
+          <div className="order-3 sm:order-2 w-full sm:w-auto sm:ml-auto overflow-x-auto no-scrollbar">
+            <nav
+              className={`grid ${
+                userRole === 'admin' ? 'grid-cols-5' : 'grid-cols-4'
+              } sm:flex items-center gap-0.5 bg-slate-100/80 p-0.5 rounded-lg border border-slate-200/60 text-[11px] sm:text-xs font-medium w-full sm:w-max`}
+            >
               <button
                 onClick={() => setActiveTab('spreadsheet')}
-                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                aria-label="Marks Entry"
+                className={`px-1.5 sm:px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center justify-center gap-1 sm:gap-1.5 cursor-pointer ${
                   activeTab === 'spreadsheet'
                     ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
                     : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-500" />
-                <span>Marks Entry</span>
+                <FileSpreadsheet className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <span className="sm:hidden">Marks</span>
+                <span className="hidden sm:inline">Marks Entry</span>
               </button>
               <button
                 onClick={() => setActiveTab('remarks')}
-                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                aria-label="Remarks Entry"
+                className={`px-1.5 sm:px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center justify-center gap-1 sm:gap-1.5 cursor-pointer ${
                   activeTab === 'remarks'
                     ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
                     : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                <MessageSquareText className="w-3.5 h-3.5 text-slate-500" />
-                <span>Remarks Entry</span>
+                <MessageSquareText className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <span className="sm:hidden">Remarks</span>
+                <span className="hidden sm:inline">Remarks Entry</span>
               </button>
               <button
                 onClick={() => setActiveTab('reportcards')}
-                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                aria-label="Report Cards"
+                className={`px-1.5 sm:px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center justify-center gap-1 sm:gap-1.5 cursor-pointer ${
                   activeTab === 'reportcards'
                     ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
                     : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                <FileText className="w-3.5 h-3.5 text-slate-500" />
-                <span>Report Cards</span>
+                <FileText className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <span className="sm:hidden">Reports</span>
+                <span className="hidden sm:inline">Report Cards</span>
               </button>
 
               <button
                 onClick={() => setActiveTab('export')}
-                className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                aria-label="Export Marks"
+                className={`px-1.5 sm:px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center justify-center gap-1 sm:gap-1.5 cursor-pointer ${
                   activeTab === 'export'
                     ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
                     : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                 }`}
               >
-                <Download className="w-3.5 h-3.5 text-slate-500" />
-                <span>Export Marks</span>
+                <Download className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <span className="sm:hidden">Export</span>
+                <span className="hidden sm:inline">Export Marks</span>
               </button>
 
               {userRole === 'admin' && (
                 <button
                   onClick={() => setActiveTab('admin')}
-                  className={`px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center gap-1.5 cursor-pointer ${
+                  aria-label="Settings"
+                  className={`px-1.5 sm:px-3 py-1.5 rounded-md transition-colors whitespace-nowrap shrink-0 flex items-center justify-center gap-1 sm:gap-1.5 cursor-pointer ${
                     activeTab === 'admin'
                       ? 'bg-white text-slate-900 font-semibold shadow-2xs border border-slate-200/80'
                       : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
                   }`}
                 >
-                  <Settings className="w-3.5 h-3.5 text-slate-500" />
+                  <Settings className="w-3.5 h-3.5 text-slate-500 shrink-0" />
                   <span>Settings</span>
                 </button>
               )}
             </nav>
-
-            {onLogout && (
-              <div className="flex items-center gap-2 shrink-0 pl-1 sm:border-l sm:border-slate-200/80 sm:pl-3">
-                <div
-                  data-testid="header-user-badge"
-                  className="hidden md:flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-slate-100/80 border border-slate-200/70 text-[11px] font-medium text-slate-700"
-                >
-                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
-                  <span className="truncate max-w-[160px]">
-                    {userRole === 'admin'
-                      ? 'Admin'
-                      : `${teacherProfile?.name || username || 'Teacher'}${
-                          teacherProfile?.assignedSubject
-                            ? ` · ${teacherProfile.assignedSubject}`
-                            : ''
-                        }`}
-                  </span>
-                </div>
-                <button
-                  type="button"
-                  data-testid="header-logout-btn"
-                  onClick={() => {
-                    if (serverSaveTimerRef.current) {
-                      clearTimeout(serverSaveTimerRef.current);
-                      serverSaveTimerRef.current = null;
-                      const snapshot: PersistedErpState = {
-                        version: 1,
-                        initialized: true,
-                        updatedAt: stateUpdatedAtRef.current || Date.now(),
-                        selectedClass: selectedClassRef.current,
-                        selectedExam: selectedExamRef.current,
-                        classes: classesRef.current,
-                        examConfigs: examConfigsRef.current,
-                        students: studentsRef.current,
-                        examMarksStore: examMarksStoreRef.current,
-                        examBreakdownsStore: examBreakdownsStoreRef.current,
-                      };
-                      persistToBackend(snapshot, true);
-                    }
-                    onLogout();
-                  }}
-                  title="Sign out and switch account"
-                  className="px-2.5 py-1.5 rounded-lg text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-slate-200/80 transition-colors flex items-center gap-1.5 cursor-pointer shrink-0"
-                >
-                  <LogOut className="w-3.5 h-3.5 text-slate-500" />
-                  <span>Sign Out</span>
-                </button>
-              </div>
-            )}
           </div>
+
+          {onLogout && (
+            <div className="order-2 sm:order-3 flex items-center gap-1.5 sm:gap-2 shrink-0 sm:border-l sm:border-slate-200/80 sm:pl-3">
+              <div
+                data-testid="header-user-badge"
+                className="flex items-center gap-1.5 px-2 sm:px-2.5 py-1 rounded-md bg-slate-100/80 border border-slate-200/70 text-[10px] sm:text-[11px] font-medium text-slate-700"
+              >
+                <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 shrink-0" />
+                <span className="truncate max-w-[90px] sm:max-w-[160px]">
+                  {userRole === 'admin'
+                    ? 'Admin'
+                    : `${teacherProfile?.name || username || 'Teacher'}${
+                        teacherProfile?.assignedSubject
+                          ? ` · ${teacherProfile.assignedSubject}`
+                          : ''
+                      }`}
+                </span>
+              </div>
+              <button
+                type="button"
+                data-testid="header-logout-btn"
+                onClick={async () => {
+                  try {
+                    await Promise.race([
+                      flushPendingBackendSaves(),
+                      new Promise<void>((resolve) => setTimeout(resolve, 6000)),
+                    ]);
+                  } catch {}
+                  onLogout();
+                }}
+                title="Sign out and switch account"
+                className="px-2 sm:px-2.5 py-1.5 rounded-lg text-[11px] sm:text-xs font-medium text-slate-600 hover:text-slate-900 hover:bg-slate-100 border border-slate-200/80 transition-colors flex items-center gap-1 sm:gap-1.5 cursor-pointer shrink-0"
+              >
+                <LogOut className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                <span>Sign Out</span>
+              </button>
+            </div>
+          )}
         </div>
       </header>
 
       {/* MAIN VIEWPORT */}
-      <main className="max-w-[1440px] mx-auto w-full min-w-0 px-5 sm:px-8 py-4 sm:py-5 flex-1 flex flex-col">
+      <main className="max-w-[1440px] mx-auto w-full min-w-0 px-3 sm:px-8 py-3 sm:py-5 flex-1 flex flex-col">
+        {!isStorageReady ? (
+          <div
+            data-testid="erp-hydrating-loader"
+            className="flex-1 flex flex-col items-center justify-center py-20 px-4 text-center"
+          >
+            <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xs px-6 py-8 max-w-sm w-full flex flex-col items-center gap-3">
+              <div className="w-10 h-10 rounded-xl bg-slate-100 border border-slate-200 flex items-center justify-center">
+                <RefreshCw className="w-5 h-5 text-slate-700 animate-spin" />
+              </div>
+              <div className="space-y-1">
+                <p className="text-sm font-semibold text-slate-900">
+                  Syncing Latest School Records
+                </p>
+                <p className="text-xs text-slate-500">
+                  Loading assigned classes, marks, and remarks...
+                </p>
+              </div>
+            </div>
+          </div>
+        ) : (
+          <>
         {/* ========================================================
             VIEW 1: MARKS SPREADSHEET (Apple Numbers / Linear Style)
            ======================================================== */}
         {activeTab === 'spreadsheet' && (
-          <div className="flex-1 flex flex-col gap-4">
+          <div className="flex-1 flex flex-col gap-3 sm:gap-4">
             {/* Page Header Strip */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 sm:gap-3">
               <div>
-                <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-slate-900">
+                <h1 className="text-lg sm:text-2xl font-bold tracking-tight text-slate-900">
                   Student Marks
                 </h1>
                 <p className="text-xs text-slate-500 mt-0.5 font-normal">
@@ -4579,83 +4793,92 @@ export default function SchoolErpPage({
             </div>
 
             {/* Class, Exam & Subject Unified Control Bar */}
-            <div className="bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 relative z-30">
-              <div className="flex flex-wrap items-center gap-2.5">
+            <div className="bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2 sm:gap-2.5 relative z-30">
+              <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 sm:gap-2.5 w-full lg:w-auto">
                 {/* 1. Class Dropdown */}
-                <CustomSelect
-                  id="class-select"
-                  icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
-                  prefixLabel="Class:"
-                  value={selectedClass}
-                  onChange={(val) => {
-                    if (!isStorageReadyRef.current) {
-                      userPickedClassBeforeReadyRef.current = val;
-                    }
-                    setSelectedClass(val);
-                    setExportClass(val);
-                    setCurrentPage(1);
-                    if (isPtExam(selectedExam) && !hasCsInPtExam(val)) {
-                      if (
-                        selectedSubject.toLowerCase() === 'computer science' ||
-                        selectedSubject.toLowerCase() === 'cs'
-                      ) {
-                        setSelectedSubject('all');
+                <div className="min-w-0">
+                  <CustomSelect
+                    id="class-select"
+                    fullWidth
+                    icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
+                    prefixLabel="Class:"
+                    value={selectedClass}
+                    onChange={(val) => {
+                      if (!isStorageReadyRef.current) {
+                        userPickedClassBeforeReadyRef.current = val;
                       }
-                    }
-                  }}
-                  options={[
-                    ...(userRole === 'admin'
-                      ? [{ value: 'all', label: `All Classes (${students.length})` }]
-                      : []),
-                    ...visibleClassSections.map((cls) => ({
-                      value: cls,
-                      label: `${getClassGradeLabel(cls)} (${classCounts[cls] || 0})`,
-                    })),
-                  ]}
-                />
+                      setSelectedClass(val);
+                      setExportClass(val);
+                      setCurrentPage(1);
+                      if (isPtExam(selectedExam) && !hasCsInPtExam(val)) {
+                        if (
+                          selectedSubject.toLowerCase() === 'computer science' ||
+                          selectedSubject.toLowerCase() === 'cs'
+                        ) {
+                          setSelectedSubject('all');
+                        }
+                      }
+                    }}
+                    options={[
+                      ...(userRole === 'admin'
+                        ? [{ value: 'all', label: `All Classes (${students.length})` }]
+                        : []),
+                      ...visibleClassSections.map((cls) => ({
+                        value: cls,
+                        label: `${getClassGradeLabel(cls)} (${classCounts[cls] || 0})`,
+                      })),
+                    ]}
+                  />
+                </div>
 
                 {/* 2. Exam Dropdown */}
-                <CustomSelect
-                  id="exam-select"
-                  icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
-                  prefixLabel="Exam:"
-                  value={selectedExam}
-                  onChange={(val) => handleExamChange(val)}
-                  options={Object.values(examConfigs).map((ex) => ({
-                    value: ex.id,
-                    label: ex.code || ex.id,
-                  }))}
-                />
+                <div className="min-w-0">
+                  <CustomSelect
+                    id="exam-select"
+                    fullWidth
+                    icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
+                    prefixLabel="Exam:"
+                    value={selectedExam}
+                    onChange={(val) => handleExamChange(val)}
+                    options={Object.values(examConfigs).map((ex) => ({
+                      value: ex.id,
+                      label: ex.code || ex.id,
+                    }))}
+                  />
+                </div>
 
                 {/* 3. Subject Dropdown */}
-                <CustomSelect
-                  id="subject-filter-select"
-                  icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
-                  prefixLabel="Subject:"
-                  value={selectedSubject}
-                  onChange={(val) => {
-                    setSelectedSubject(val);
-                    setSelectedRange(null);
-                    setIsSelecting(false);
-                    if (val !== 'all' && val !== 'consolidated') {
-                      setInternalActiveSubject(val);
-                    }
-                  }}
-                  options={[
-                    ...(userRole === 'admin' ||
-                    isClassTeacherOfSelectedClass ||
-                    activeSubjects.length > 1
-                      ? [
-                          { value: 'all', label: `All Subjects (${activeSubjects.length})` },
-                          { value: 'consolidated', label: 'Consolidated Sheet' },
-                        ]
-                      : []),
-                    ...activeSubjects.map((sub) => ({
-                      value: sub.name,
-                      label: sub.name,
-                    })),
-                  ]}
-                />
+                <div className="col-span-2 sm:col-span-1 min-w-0">
+                  <CustomSelect
+                    id="subject-filter-select"
+                    fullWidth
+                    icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
+                    prefixLabel="Subject:"
+                    value={selectedSubject}
+                    onChange={(val) => {
+                      setSelectedSubject(val);
+                      setSelectedRange(null);
+                      setIsSelecting(false);
+                      if (val !== 'all' && val !== 'consolidated') {
+                        setInternalActiveSubject(val);
+                      }
+                    }}
+                    options={[
+                      ...(userRole === 'admin' ||
+                      isClassTeacherOfSelectedClass ||
+                      activeSubjects.length > 1
+                        ? [
+                            { value: 'all', label: `All Subjects (${activeSubjects.length})` },
+                            { value: 'consolidated', label: 'Consolidated Sheet' },
+                          ]
+                        : []),
+                      ...activeSubjects.map((sub) => ({
+                        value: sub.name,
+                        label: sub.name,
+                      })),
+                    ]}
+                  />
+                </div>
               </div>
 
               {/* 4. Search Input */}
@@ -4666,7 +4889,7 @@ export default function SchoolErpPage({
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search name or roll no..."
-                  className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-50/60 border border-slate-200/80 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all"
+                  className="w-full pl-8 pr-7 py-2 sm:py-1.5 text-xs bg-slate-50/60 border border-slate-200/80 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-blue-500 focus:ring-1 focus:ring-blue-500/20 transition-all"
                 />
                 {searchQuery && (
                   <button
@@ -4702,7 +4925,7 @@ export default function SchoolErpPage({
                         {/* Frozen Roll Header */}
                         <th
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
@@ -4710,7 +4933,7 @@ export default function SchoolErpPage({
                         {/* Frozen Student Name Header */}
                         <th
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-30 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-[40px] sm:left-[48px] z-30 bg-slate-50 py-2.5 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
@@ -4806,7 +5029,7 @@ export default function SchoolErpPage({
                             >
                               {/* Frozen Roll Number */}
                               <td
-                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 transition-colors select-none cursor-default ${
+                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] border-b border-r border-slate-200 transition-colors select-none cursor-default ${
                                   isRowActive
                                     ? 'bg-blue-100 font-bold text-blue-950'
                                     : 'bg-white group-hover/row:bg-slate-100'
@@ -4817,7 +5040,7 @@ export default function SchoolErpPage({
 
                               {/* Frozen Student Name */}
                               <td
-                                className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 transition-colors ${
+                                className={`sticky left-[40px] sm:left-[48px] z-10 h-10 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] border-b border-r border-slate-200 transition-colors ${
                                   isRowActive
                                     ? 'bg-blue-100 font-semibold text-blue-950'
                                     : 'bg-white group-hover/row:bg-slate-100'
@@ -5126,14 +5349,14 @@ export default function SchoolErpPage({
                         <th
                           rowSpan={2}
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-30 bg-slate-50 py-2 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200 cursor-pointer align-middle"
+                          className="sticky left-0 z-30 bg-slate-50 py-2 px-1 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200 cursor-pointer align-middle"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
                         <th
                           rowSpan={2}
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-30 bg-slate-50 py-2 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200 cursor-pointer align-middle"
+                          className="sticky left-[40px] sm:left-[48px] z-30 bg-slate-50 py-2 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200 cursor-pointer align-middle"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
@@ -5291,7 +5514,7 @@ export default function SchoolErpPage({
                             >
                               {/* Frozen Roll Number */}
                               <td
-                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 transition-colors select-none cursor-default ${
+                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] border-b border-r border-slate-200 transition-colors select-none cursor-default ${
                                   isRowActive
                                     ? 'bg-blue-100 font-bold text-blue-950'
                                     : 'bg-white group-hover/row:bg-slate-100'
@@ -5302,7 +5525,7 @@ export default function SchoolErpPage({
 
                               {/* Frozen Student Name */}
                               <td
-                                className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 transition-colors ${
+                                className={`sticky left-[40px] sm:left-[48px] z-10 h-10 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] border-b border-r border-slate-200 transition-colors ${
                                   isRowActive
                                     ? 'bg-blue-100 font-semibold text-blue-950'
                                     : 'bg-white group-hover/row:bg-slate-100'
@@ -5727,7 +5950,7 @@ export default function SchoolErpPage({
                         {/* Frozen Roll Header */}
                         <th
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
@@ -5735,7 +5958,7 @@ export default function SchoolErpPage({
                         {/* Frozen Student Name Header */}
                         <th
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-30 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-[40px] sm:left-[48px] z-30 bg-slate-50 py-2.5 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
@@ -5853,7 +6076,7 @@ export default function SchoolErpPage({
                               }`}
                             >
                               {/* Frozen Roll Number */}
-                              <td className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 transition-colors select-none cursor-default ${
+                              <td className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] border-b border-r border-slate-200 transition-colors select-none cursor-default ${
                                 isRowActive
                                   ? 'bg-blue-100 font-bold text-blue-950'
                                   : 'bg-white group-hover/row:bg-slate-100'
@@ -5862,7 +6085,7 @@ export default function SchoolErpPage({
                               </td>
 
                               {/* Frozen Student Name */}
-                              <td className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 transition-colors ${
+                              <td className={`sticky left-[40px] sm:left-[48px] z-10 h-10 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] border-b border-r border-slate-200 transition-colors ${
                                 isRowActive
                                   ? 'bg-blue-100 font-semibold text-blue-950'
                                   : 'bg-white group-hover/row:bg-slate-100'
@@ -6475,74 +6698,83 @@ export default function SchoolErpPage({
             </div>
 
             {/* Unified Control Bar (Identical styling to Marks Entry) */}
-            <div className="bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 relative z-30">
-              <div className="flex flex-wrap items-center gap-2.5">
+            <div className="bg-white border border-slate-200/80 rounded-xl p-2.5 shadow-2xs flex flex-col lg:flex-row lg:items-center justify-between gap-2 sm:gap-2.5 relative z-30">
+              <div className="grid grid-cols-2 sm:flex sm:flex-wrap items-center gap-2 sm:gap-2.5 w-full lg:w-auto">
                 {/* 1. Class Dropdown */}
+                <div className="min-w-0">
                   <CustomSelect
-                  id="remarks-class-select"
-                  icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
-                  prefixLabel="Class:"
-                  value={selectedClass}
-                  onChange={(val) => {
-                    if (!isStorageReadyRef.current) {
-                      userPickedClassBeforeReadyRef.current = val;
-                    }
-                    setSelectedClass(val);
-                    setExportClass(val);
-                    setCurrentPage(1);
-                    if (isPtExam(selectedExam) && !hasCsInPtExam(val)) {
-                      if (
-                        selectedRemarkScope.toLowerCase() === 'computer science' ||
-                        selectedRemarkScope.toLowerCase() === 'cs'
-                      ) {
-                        setSelectedRemarkScope('all');
+                    id="remarks-class-select"
+                    fullWidth
+                    icon={<Layers className="w-3.5 h-3.5 text-slate-400" />}
+                    prefixLabel="Class:"
+                    value={selectedClass}
+                    onChange={(val) => {
+                      if (!isStorageReadyRef.current) {
+                        userPickedClassBeforeReadyRef.current = val;
                       }
-                    }
-                  }}
-                  options={[
-                    ...(userRole === 'admin'
-                      ? [{ value: 'all', label: `All Classes (${students.length})` }]
-                      : []),
-                    ...visibleClassSections.map((cls) => ({
-                      value: cls,
-                      label: `${getClassGradeLabel(cls)} (${classCounts[cls] || 0})`,
-                    })),
-                  ]}
-                />
+                      setSelectedClass(val);
+                      setExportClass(val);
+                      setCurrentPage(1);
+                      if (isPtExam(selectedExam) && !hasCsInPtExam(val)) {
+                        if (
+                          selectedRemarkScope.toLowerCase() === 'computer science' ||
+                          selectedRemarkScope.toLowerCase() === 'cs'
+                        ) {
+                          setSelectedRemarkScope('all');
+                        }
+                      }
+                    }}
+                    options={[
+                      ...(userRole === 'admin'
+                        ? [{ value: 'all', label: `All Classes (${students.length})` }]
+                        : []),
+                      ...visibleClassSections.map((cls) => ({
+                        value: cls,
+                        label: `${getClassGradeLabel(cls)} (${classCounts[cls] || 0})`,
+                      })),
+                    ]}
+                  />
+                </div>
 
                 {/* 2. Exam Dropdown */}
-                <CustomSelect
-                  id="remarks-exam-select"
-                  icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
-                  prefixLabel="Exam:"
-                  value={selectedExam}
-                  onChange={(val) => handleExamChange(val)}
-                  options={Object.values(examConfigs).map((ex) => ({
-                    value: ex.id,
-                    label: ex.code || ex.id,
-                  }))}
-                />
+                <div className="min-w-0">
+                  <CustomSelect
+                    id="remarks-exam-select"
+                    fullWidth
+                    icon={<BookOpen className="w-3.5 h-3.5 text-slate-400" />}
+                    prefixLabel="Exam:"
+                    value={selectedExam}
+                    onChange={(val) => handleExamChange(val)}
+                    options={Object.values(examConfigs).map((ex) => ({
+                      value: ex.id,
+                      label: ex.code || ex.id,
+                    }))}
+                  />
+                </div>
 
                 {/* 3. Subject / Remark Scope Dropdown */}
-                <CustomSelect
-                  id="remarks-scope-select"
-                  icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
-                  prefixLabel="Subject:"
-                  value={selectedRemarkScope}
-                  onChange={(val) => setSelectedRemarkScope(val)}
-                  options={[
-                    ...(userRole === 'admin' || isClassTeacherOfSelectedClass
-                      ? [
-                          { value: 'all', label: 'All Remarks' },
-                          { value: 'class_teacher', label: 'Class Teacher Remarks' },
-                        ]
-                      : []),
-                    ...activeSubjects.map((sub) => ({
-                      value: sub.name,
-                      label: sub.name,
-                    })),
-                  ]}
-                />
+                <div className="col-span-2 sm:col-span-1 min-w-0">
+                  <CustomSelect
+                    id="remarks-scope-select"
+                    fullWidth
+                    icon={<Award className="w-3.5 h-3.5 text-slate-400" />}
+                    prefixLabel="Subject:"
+                    value={selectedRemarkScope}
+                    onChange={(val) => setSelectedRemarkScope(val)}
+                    options={[
+                      ...(userRole === 'admin' || isClassTeacherOfSelectedClass
+                        ? [
+                            { value: 'all', label: 'All Remarks' },
+                            { value: 'class_teacher', label: 'Class Teacher Remarks' },
+                          ]
+                        : []),
+                      ...activeSubjects.map((sub) => ({
+                        value: sub.name,
+                        label: sub.name,
+                      })),
+                    ]}
+                  />
+                </div>
               </div>
 
               {/* 4. Search Input */}
@@ -6553,7 +6785,7 @@ export default function SchoolErpPage({
                   value={searchQuery}
                   onChange={(e) => setSearchQuery(e.target.value)}
                   placeholder="Search name or roll no..."
-                  className="w-full pl-8 pr-7 py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-slate-900 transition-colors"
+                  className="w-full pl-8 pr-7 py-2 sm:py-1.5 text-xs bg-slate-50 border border-slate-200 rounded-lg text-slate-900 placeholder-slate-400 focus:outline-none focus:bg-white focus:border-slate-900 transition-colors"
                 />
                 {searchQuery && (
                   <button
@@ -6619,13 +6851,13 @@ export default function SchoolErpPage({
                       <tr className="sticky top-0 z-20 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
                         <th
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
                         <th
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-30 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-[40px] sm:left-[48px] z-30 bg-slate-50 py-2.5 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
@@ -6679,7 +6911,7 @@ export default function SchoolErpPage({
                               }`}
                             >
                               <td
-                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 select-none cursor-default ${
+                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] border-b border-r border-slate-200 select-none cursor-default ${
                                   isSelectedForReport
                                     ? 'bg-blue-100 font-bold text-blue-950'
                                     : 'bg-white group-hover/row:bg-slate-100'
@@ -6688,7 +6920,7 @@ export default function SchoolErpPage({
                                 {student.rollNo}
                               </td>
                               <td
-                                className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 ${
+                                className={`sticky left-[40px] sm:left-[48px] z-10 h-10 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] border-b border-r border-slate-200 ${
                                   isSelectedForReport
                                     ? 'bg-blue-100 font-semibold text-blue-950'
                                     : 'bg-white group-hover/row:bg-slate-100'
@@ -6782,13 +7014,13 @@ export default function SchoolErpPage({
                       <tr className="sticky top-0 z-20 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
                         <th
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
                         <th
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-30 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-[40px] sm:left-[48px] z-30 bg-slate-50 py-2.5 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
@@ -6842,7 +7074,7 @@ export default function SchoolErpPage({
                               }`}
                             >
                               <td
-                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 select-none cursor-default ${
+                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] border-b border-r border-slate-200 select-none cursor-default ${
                                   isSelectedForReport
                                     ? 'bg-blue-100 font-bold text-blue-950'
                                     : 'bg-white group-hover/row:bg-slate-100'
@@ -6851,7 +7083,7 @@ export default function SchoolErpPage({
                                 {student.rollNo}
                               </td>
                               <td
-                                className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 ${
+                                className={`sticky left-[40px] sm:left-[48px] z-10 h-10 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] border-b border-r border-slate-200 ${
                                   isSelectedForReport
                                     ? 'bg-blue-100 font-semibold text-blue-950'
                                     : 'bg-white group-hover/row:bg-slate-100'
@@ -6971,13 +7203,13 @@ export default function SchoolErpPage({
                       <tr className="sticky top-0 z-20 bg-slate-50 border-b border-slate-200 text-slate-700 font-semibold uppercase tracking-wider text-[11px] select-none h-11">
                         <th
                           onClick={() => toggleSort('rollNo')}
-                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-12 min-w-[48px] max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-0 z-30 bg-slate-50 py-2.5 px-1 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Roll</div>
                         </th>
                         <th
                           onClick={() => toggleSort('name')}
-                          className="sticky left-[48px] z-30 bg-slate-50 py-2.5 px-3 w-[190px] min-w-[190px] max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
+                          className="sticky left-[40px] sm:left-[48px] z-30 bg-slate-50 py-2.5 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] text-center hover:bg-slate-100 transition-colors border-b border-r border-slate-200"
                         >
                           <div className="text-center font-bold">Student Name</div>
                         </th>
@@ -7017,7 +7249,7 @@ export default function SchoolErpPage({
                               }`}
                             >
                               <td
-                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-12 min-w-[48px] max-w-[48px] border-b border-r border-slate-200 select-none cursor-default ${
+                                className={`sticky left-0 z-10 h-10 p-0 text-center font-mono text-xs text-slate-700 w-10 min-w-[40px] max-w-[40px] sm:w-12 sm:min-w-[48px] sm:max-w-[48px] border-b border-r border-slate-200 select-none cursor-default ${
                                   isSelectedForReport
                                     ? 'bg-blue-100 font-bold text-blue-950'
                                     : 'bg-white group-hover/row:bg-slate-100'
@@ -7026,7 +7258,7 @@ export default function SchoolErpPage({
                                 {student.rollNo}
                               </td>
                               <td
-                                className={`sticky left-[48px] z-10 h-10 px-3 w-[190px] min-w-[190px] max-w-[210px] border-b border-r border-slate-200 ${
+                                className={`sticky left-[40px] sm:left-[48px] z-10 h-10 px-2 sm:px-3 w-[124px] min-w-[124px] max-w-[132px] sm:w-[190px] sm:min-w-[190px] sm:max-w-[210px] border-b border-r border-slate-200 ${
                                   isSelectedForReport
                                     ? 'bg-blue-100 font-semibold text-blue-950'
                                     : 'bg-white group-hover/row:bg-slate-100'
@@ -7436,7 +7668,7 @@ export default function SchoolErpPage({
                   </div>
 
                   {/* Student List - Strictly Roll Number Wise */}
-                  <div className="space-y-1 max-h-[380px] overflow-y-auto pr-1">
+                  <div className="space-y-1 max-h-[210px] lg:max-h-[380px] overflow-y-auto pr-1">
                     {[...processedStudents]
                       .sort((a, b) => (parseInt(a.rollNo, 10) || 0) - (parseInt(b.rollNo, 10) || 0))
                       .map((stu) => {
@@ -7502,7 +7734,7 @@ export default function SchoolErpPage({
               </div>
 
               {/* Right Column: Report Card Preview (9 columns) */}
-              <div className="lg:col-span-9 flex flex-col items-center">
+              <div className="lg:col-span-9 w-full min-w-0 flex flex-col items-center">
                 {!canViewFullReportCards ? (
                   <div
                     data-testid="report-card-restricted-notice"
@@ -7543,20 +7775,20 @@ export default function SchoolErpPage({
                 ) : (
                   <>
                 {/* Navigation Bar Above Report Card */}
-                <div className="w-full max-w-[794px] flex items-center justify-between pb-3 text-xs text-slate-500">
+                <div className="w-full max-w-[794px] flex items-center justify-between pb-3 text-xs text-slate-500 gap-2">
                   <button
                     onClick={handlePrevStudent}
-                    className="inline-flex items-center gap-1 hover:text-slate-900 transition-colors"
+                    className="inline-flex items-center gap-1 hover:text-slate-900 transition-colors shrink-0"
                   >
                     <ChevronLeft className="w-4 h-4" />
                     <span>Previous</span>
                   </button>
-                  <span className="text-slate-700 font-medium">
+                  <span className="text-slate-700 font-medium text-center truncate">
                     Student {currentStudentIndex + 1} of {processedStudents.length} ({activeStudentResult?.student.section}) · {selectedExam}
                   </span>
                   <button
                     onClick={handleNextStudent}
-                    className="inline-flex items-center gap-1 hover:text-slate-900 transition-colors"
+                    className="inline-flex items-center gap-1 hover:text-slate-900 transition-colors shrink-0"
                   >
                     <span>Next</span>
                     <ChevronRight className="w-4 h-4" />
@@ -7578,29 +7810,37 @@ export default function SchoolErpPage({
                     activeStudentResult.totalObtained,
                     activeStudentResult.totalMax
                   );
+                  const hasAnyPtMarks = activeStudentResult.subjectDetails.some(
+                    (s) => s.obtained !== null && s.obtained !== undefined
+                  );
                   const ctRemark =
-                    activeStudentResult.student.customRemarks ||
-                    getDefaultClassTeacherRemark(
-                      activeStudentResult.percentage,
-                      activeStudentResult.status
-                    );
+                    activeStudentResult.student.customRemarks &&
+                    activeStudentResult.student.customRemarks.trim().length > 0
+                      ? activeStudentResult.student.customRemarks.trim()
+                      : hasAnyPtMarks
+                      ? getDefaultClassTeacherRemark(
+                          activeStudentResult.percentage,
+                          activeStudentResult.status
+                        )
+                      : '';
 
                   return (
-                    <div
-                      style={{
-                        transform:
-                          reportZoom === '80%'
-                            ? 'scale(0.8)'
-                            : reportZoom === '90%'
-                            ? 'scale(0.9)'
-                            : 'scale(1)',
-                        transformOrigin: 'top center',
-                        transition: 'transform 0.2s ease',
-                        fontFamily: "'Aptos', 'Calibri', 'Segoe UI', sans-serif",
-                      }}
-                      id="report-card-print-area"
-                      className="printable-report-card w-full max-w-[794px] flex flex-col gap-6 font-aptos text-black"
-                    >
+                    <div className="w-full overflow-x-auto pb-2 -mx-1 px-1">
+                      <div
+                        style={{
+                          transform:
+                            reportZoom === '80%'
+                              ? 'scale(0.8)'
+                              : reportZoom === '90%'
+                              ? 'scale(0.9)'
+                              : 'scale(1)',
+                          transformOrigin: 'top center',
+                          transition: 'transform 0.2s ease',
+                          fontFamily: "'Aptos', 'Calibri', 'Segoe UI', sans-serif",
+                        }}
+                        id="report-card-print-area"
+                        className="printable-report-card w-full min-w-[740px] sm:min-w-0 max-w-[794px] mx-auto flex flex-col gap-6 font-aptos text-black"
+                      >
                       {/* =========================================================
                           PAGE 1: EXACT PT REPORT CARD (MATCHING SAMPLE PDF)
                          ========================================================= */}
@@ -8045,6 +8285,7 @@ export default function SchoolErpPage({
                           </div>
                         </div>
                       </div>
+                      </div>
                     </div>
                   );
                 })() : activeStudentResult ? (() => {
@@ -8053,12 +8294,19 @@ export default function SchoolErpPage({
                     activeStudentResult.totalObtained,
                     activeStudentResult.totalMax
                   );
+                  const hasAnySaMarks = activeStudentResult.subjectDetails.some(
+                    (s) => s.obtained !== null && s.obtained !== undefined
+                  );
                   const saRemark =
-                    activeStudentResult.student.customRemarks ||
-                    getDefaultClassTeacherRemark(
-                      activeStudentResult.percentage,
-                      activeStudentResult.status
-                    );
+                    activeStudentResult.student.customRemarks &&
+                    activeStudentResult.student.customRemarks.trim().length > 0
+                      ? activeStudentResult.student.customRemarks.trim()
+                      : hasAnySaMarks
+                      ? getDefaultClassTeacherRemark(
+                          activeStudentResult.percentage,
+                          activeStudentResult.status
+                        )
+                      : '';
                   const saHeading = (
                     currentExamConfig.name ||
                     getPtExamHeading(selectedExam)
@@ -8073,21 +8321,22 @@ export default function SchoolErpPage({
                     );
 
                   return (
-                    <div
-                      style={{
-                        transform:
-                          reportZoom === '80%'
-                            ? 'scale(0.8)'
-                            : reportZoom === '90%'
-                            ? 'scale(0.9)'
-                            : 'scale(1)',
-                        transformOrigin: 'top center',
-                        transition: 'transform 0.2s ease',
-                        fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
-                      }}
-                      id="report-card-print-area"
-                      className="printable-report-card w-full max-w-[794px] flex flex-col gap-6 font-aptos text-black"
-                    >
+                    <div className="w-full overflow-x-auto pb-2 -mx-1 px-1">
+                      <div
+                        style={{
+                          transform:
+                            reportZoom === '80%'
+                              ? 'scale(0.8)'
+                              : reportZoom === '90%'
+                              ? 'scale(0.9)'
+                              : 'scale(1)',
+                          transformOrigin: 'top center',
+                          transition: 'transform 0.2s ease',
+                          fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
+                        }}
+                        id="report-card-print-area"
+                        className="printable-report-card w-full min-w-[740px] sm:min-w-0 max-w-[794px] mx-auto flex flex-col gap-6 font-aptos text-black"
+                      >
                       {/* =========================================================
                           PAGE 1: OFFICIAL SVA REPORT CARD (SUMMATIVE ASSESSMENT)
                          ========================================================= */}
@@ -8575,6 +8824,7 @@ export default function SchoolErpPage({
                             <div>Parent / Guardian</div>
                           </div>
                         </div>
+                      </div>
                       </div>
                     </div>
                   );
@@ -9495,10 +9745,10 @@ export default function SchoolErpPage({
             spreadsheetId={LOCKED_SPREADSHEET_ID}
             sheetsSyncStatus={sheetsSyncStatus}
             lastSyncTime={lastSyncTime}
-            onGoogleSheetsSync={handleGoogleSheetsSync}
-            onPullFromGoogleSheets={(examId) =>
-              pullFromLockedSheet(examId || selectedExam, false)
-            }
+            onGasUrlSaved={() => {
+              needsFullSheetSyncRef.current = true;
+              void flushPendingGoogleSheetSync();
+            }}
             students={students}
             exportExam={exportExam}
             setExportExam={setExportExam}
@@ -9513,6 +9763,8 @@ export default function SchoolErpPage({
             teacherMappingsVersion={teacherMappingsVersion}
           />
         )}
+          </>
+        )}
       </main>
 
       {/* EDIT STUDENT PARTICULAR DRAWER / MODAL */}
@@ -9521,7 +9773,7 @@ export default function SchoolErpPage({
           onClick={(e) => { if (e.target === e.currentTarget) setEditingStudent(null); }}
           className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4 animate-in fade-in duration-150"
         >
-          <div className="bg-white border border-slate-200/90 rounded-xl shadow-xl w-full max-w-md p-5 flex flex-col gap-3.5 animate-in zoom-in-95 duration-150">
+          <div className="bg-white border border-slate-200/90 rounded-xl shadow-xl w-full max-w-md max-h-[90vh] overflow-y-auto p-4 sm:p-5 flex flex-col gap-3.5 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-200/80">
               <h3 className="text-sm font-semibold text-slate-900">Edit Student Details</h3>
               <button
@@ -9628,7 +9880,7 @@ export default function SchoolErpPage({
                 </div>
               </div>
 
-              <div className="grid grid-cols-4 gap-2">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                 <div>
                   <label className="font-medium text-slate-700 block mb-1">Height (cm)</label>
                   <input
@@ -9900,33 +10152,6 @@ export default function SchoolErpPage({
         </div>
       )}
 
-      {/* GOOGLE APPS SCRIPT 2-WAY SYNC MODAL */}
-      {isGasModalOpen && (
-        <div 
-          onClick={(e) => { if (e.target === e.currentTarget) setIsGasModalOpen(false); }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/50 backdrop-blur-md p-4 animate-in fade-in duration-200"
-        >
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-2xl shadow-slate-950/10 w-full max-w-2xl overflow-hidden p-6 flex flex-col gap-4 animate-in zoom-in-95 duration-200 relative">
-            <button
-              onClick={() => setIsGasModalOpen(false)}
-              className="absolute top-4 right-4 text-slate-400 hover:text-slate-600 p-1.5 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer z-10"
-              title="Close"
-            >
-              <X className="w-5 h-5" />
-            </button>
-            <GoogleSheetsConnectCard
-              students={students}
-              selectedExam={selectedExam}
-              onSyncSuccess={() => {
-                pushToLockedSheet(false);
-              }}
-              showToast={showToast}
-              lastSyncTime={lastSyncTime}
-              sheetsSyncStatus={sheetsSyncStatus}
-            />
-          </div>
-        </div>
-      )}
       {/* INTERNAL ASSESSMENT BREAKDOWN MODAL (Supports CBSE 80+20 and Class 9 Hindi Listening/Speaking/Project/SA) */}
       {internalModalData && (
         <InternalAssessmentModal
@@ -9972,6 +10197,29 @@ export default function SchoolErpPage({
               selectedStudentId,
               options,
             });
+            const clearedUpdatedAt = Date.now();
+            const clearedState: PersistedErpState = {
+              version: 1,
+              initialized: true,
+              updatedAt: clearedUpdatedAt,
+              selectedClass,
+              selectedExam,
+              classes,
+              examConfigs,
+              students: result.students,
+              examMarksStore: result.examMarksStore,
+              examBreakdownsStore: result.examBreakdownsStore,
+            };
+            stateUpdatedAtRef.current = clearedUpdatedAt;
+            lastSyncedSnapshotRef.current = {
+              selectedClass,
+              selectedExam,
+              classes,
+              examConfigs,
+              students: result.students,
+              examMarksStore: result.examMarksStore,
+              examBreakdownsStore: result.examBreakdownsStore,
+            };
             examMarksStoreRef.current = result.examMarksStore;
             examBreakdownsStoreRef.current = result.examBreakdownsStore;
             studentsRef.current = result.students;
@@ -9982,6 +10230,9 @@ export default function SchoolErpPage({
               setSelectedStudentId(result.selectedStudentId);
             }
             setClearModalState(null);
+            writeStateToLocalStorage(clearedState);
+            void persistToBackend(clearedState, true);
+
             const affectedExamIds =
               options.targetExam === 'ALL' || options.removeStudents
                 ? Object.keys(examConfigs)
@@ -9997,6 +10248,7 @@ export default function SchoolErpPage({
                 examBreakdownsStore: result.examBreakdownsStore,
                 classes,
                 examIdsToPush: affectedExamIds,
+                skipCloudBackup: true,
               })
                 .then((res) => {
                   if (res.success) {
@@ -10009,10 +10261,14 @@ export default function SchoolErpPage({
                       })
                     );
                   } else {
+                    needsFullSheetSyncRef.current = true;
                     setSheetsSyncStatus('error');
                   }
                 })
-                .catch(() => setSheetsSyncStatus('error'));
+                .catch(() => {
+                  needsFullSheetSyncRef.current = true;
+                  setSheetsSyncStatus('error');
+                });
             } else {
               triggerAutoSync(result.students);
             }

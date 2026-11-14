@@ -1,4 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import path from 'node:path';
 import {
   ADMIN_SESSION_COOKIE_NAME,
   ADMIN_SESSION_TTL_SECONDS,
@@ -9,11 +11,15 @@ import {
   getStoredTeacherAccountsForBackup,
   recordLoginFailure,
   restoreTeacherAccountsFromBackup,
+  shouldRestoreTeachersFromCloud,
 } from '@/lib/auth';
 import { getRequestClientKey, isHttpsRequest } from '@/lib/auth-server';
 import { pullCloudBackupFromGoogleSheet } from '@/lib/sheets-cloud-store';
 
 export const dynamic = 'force-dynamic';
+
+const DATA_DIR = path.join(process.cwd(), '.data');
+const STATE_FILE = path.join(DATA_DIR, 'erp-state.json');
 
 export async function POST(req: NextRequest) {
   try {
@@ -47,22 +53,39 @@ export async function POST(req: NextRequest) {
 
     let authResult = authenticateUserCredentials(username, password);
     if (username.toLowerCase() !== 'admin') {
+      // Always pull authoritative cloud state on teacher login so Admin changes made just seconds ago
+      // or on another server instance take effect immediately.
       const cloud = await pullCloudBackupFromGoogleSheet({
-        force: !authResult.authenticated,
+        force: true,
       });
-      if (cloud?.teachers && cloud.teachers.length > 0) {
-        const localMaxUpdated = Math.max(
-          0,
-          ...getStoredTeacherAccountsForBackup().map((t) => t.updatedAt || 0)
-        );
-        const cloudMaxUpdated = Math.max(
-          0,
-          ...cloud.teachers.map((t) => t.updatedAt || 0)
-        );
-        if (!authResult.authenticated || cloudMaxUpdated > localMaxUpdated) {
-          restoreTeacherAccountsFromBackup(cloud.teachers);
-          authResult = authenticateUserCredentials(username, password);
-        }
+      if (
+        cloud?.teachers &&
+        cloud.teachers.length > 0 &&
+        (!authResult.authenticated ||
+          shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloud))
+      ) {
+        restoreTeacherAccountsFromBackup(cloud.teachers);
+        authResult = authenticateUserCredentials(username, password);
+      }
+
+      // Warm local ERP state cache if cloud state is newer than local disk
+      if (cloud?.state?.initialized) {
+        try {
+          let localUpdatedAt = 0;
+          try {
+            const raw = await readFile(STATE_FILE, 'utf8');
+            const parsed = JSON.parse(raw);
+            if (parsed?.initialized && typeof parsed.updatedAt === 'number') {
+              localUpdatedAt = parsed.updatedAt;
+            }
+          } catch {}
+          if ((cloud.state.updatedAt || 0) > localUpdatedAt) {
+            await mkdir(DATA_DIR, { recursive: true });
+            const tmp = `${STATE_FILE}.${Date.now()}.tmp`;
+            await writeFile(tmp, JSON.stringify(cloud.state), 'utf8');
+            await rename(tmp, STATE_FILE);
+          }
+        } catch {}
       }
     }
     if (!authResult.authenticated || !authResult.role || !authResult.username) {

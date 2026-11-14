@@ -4,9 +4,11 @@ import {
   buildTeachersMappingSheetRows,
   decodeCloudBackupRows,
   encodeCloudBackupRows,
+  mergeCloudBackupForPush,
 } from './sheets-cloud-store';
 import { PersistedErpState } from './erp-persistence';
 import { StoredTeacherAccount } from './auth';
+import { GAS_SCRIPT_CODE } from './gas-sync';
 
 test('encodeCloudBackupRows and decodeCloudBackupRows round-trip full ERP state and teacher accounts losslessly', () => {
   const sampleState: PersistedErpState = {
@@ -117,4 +119,133 @@ test('buildTeachersMappingSheetRows formats readable rows for Teachers & Mapping
   assert.ok(rows[0].section.includes('Sparkle, Twinkle'));
   assert.equal(rows[1].rollNo, '@anita');
   assert.ok(rows[1].name.includes('Class Teacher: Ruby'));
+});
+
+test('mergeCloudBackupForPush never clobbers non-null cloud state, keeps newer state, and protects teacher edits/deletions', () => {
+  const cloudState: PersistedErpState = {
+    version: 1,
+    initialized: true,
+    updatedAt: 5000,
+    selectedClass: 'Sparkle',
+    selectedExam: 'SA-1',
+    classes: [{ id: 'c1', section: 'Sparkle', grade: '6' }],
+    examConfigs: {},
+    students: [],
+    examMarksStore: {},
+    examBreakdownsStore: {},
+  };
+
+  const olderTeacher: StoredTeacherAccount = {
+    id: 't-1',
+    name: 'Pratham',
+    username: 'pratham',
+    passwordHashHex: 'hash1',
+    assignedSubject: 'Science',
+    assignedClasses: ['Diamond'],
+    classTeacherOf: null,
+    assignments: [{ section: 'Diamond', subject: 'Science' }],
+    createdAt: 1000,
+    updatedAt: 1000,
+  };
+
+  const newerTeacher: StoredTeacherAccount = {
+    ...olderTeacher,
+    assignedSubject: 'Computer Science',
+    assignedClasses: ['Sparkle', 'Twinkle'],
+    assignments: [
+      { section: 'Sparkle', subject: 'Computer Science' },
+      { section: 'Twinkle', subject: 'Computer Science' },
+    ],
+    updatedAt: 6000,
+  };
+
+  const existingCloud = {
+    v: 1 as const,
+    updatedAt: 6000,
+    state: cloudState,
+    teachers: [newerTeacher],
+  };
+
+  // 1. Incoming null state (e.g., teacher mutation on cold container) preserves existing cloud state
+  const preserveStateRes = mergeCloudBackupForPush({
+    incomingState: null,
+    incomingTeachers: [newerTeacher],
+    existingCloud,
+    nowMs: 5500,
+    authoritativeTeachers: true,
+  });
+  assert.equal(preserveStateRes.state?.updatedAt, 5000);
+  // Also guarantees strictly increasing updatedAt over existingCloud.updatedAt (6000)
+  assert.equal(preserveStateRes.updatedAt, 6001);
+
+  // 2. Non-authoritative state push with stale teachers keeps newer cloud teachers
+  const clearedState: PersistedErpState = { ...cloudState, updatedAt: 7000 };
+  const protectTeachersRes = mergeCloudBackupForPush({
+    incomingState: clearedState,
+    incomingTeachers: [olderTeacher],
+    existingCloud,
+    nowMs: 7000,
+    authoritativeTeachers: false,
+  });
+  assert.equal(protectTeachersRes.state?.updatedAt, 7000);
+  assert.equal(protectTeachersRes.teachers[0].assignedSubject, 'Computer Science');
+
+  // 3. Stale incoming state cannot regress newer cloud state
+  const staleStateRes = mergeCloudBackupForPush({
+    incomingState: { ...cloudState, updatedAt: 4000, selectedClass: 'Ruby' },
+    incomingTeachers: [newerTeacher],
+    existingCloud,
+    nowMs: 7000,
+    authoritativeTeachers: false,
+  });
+  assert.equal(staleStateRes.state?.selectedClass, 'Sparkle');
+  assert.equal(staleStateRes.state?.updatedAt, 5000);
+
+  // 4. Authoritative teacher deletion replaces existing cloud roster even with smaller list
+  const deleteTeacherRes = mergeCloudBackupForPush({
+    incomingState: cloudState,
+    incomingTeachers: [olderTeacher],
+    existingCloud: {
+      ...existingCloud,
+      teachers: [olderTeacher, newerTeacher],
+    },
+    nowMs: 8000,
+    authoritativeTeachers: true,
+  });
+  assert.equal(deleteTeacherRes.teachers.length, 1);
+  assert.equal(deleteTeacherRes.updatedAt, 8000);
+});
+
+test('decodeCloudBackupRows strips leading apostrophes escaped by Google Sheets and GAS_SCRIPT_CODE v3.0 includes locking/escaping', () => {
+  const sampleState: PersistedErpState = {
+    version: 1,
+    initialized: true,
+    updatedAt: 1763200000000,
+    selectedClass: 'Sparkle',
+    selectedExam: 'SA-1',
+    classes: [{ id: 'c1', section: 'Sparkle', grade: '6' }],
+    examConfigs: {},
+    students: [],
+    examMarksStore: {},
+    examBreakdownsStore: {},
+  };
+  const encoded = encodeCloudBackupRows(sampleState, [], 1763200000000);
+  const apostrophePrefixed = encoded.map((row) => ({
+    ...row,
+    name: `'${row.name}`,
+  }));
+
+  const decoded = decodeCloudBackupRows(apostrophePrefixed);
+  assert.ok(decoded);
+  assert.equal(decoded.updatedAt, 1763200000000);
+  assert.equal(decoded.state?.selectedClass, 'Sparkle');
+
+  // Verify v3.0 Apps Script invariants
+  assert.ok(GAS_SCRIPT_CODE.includes('v3.0'));
+  assert.ok(GAS_SCRIPT_CODE.includes('LockService.getScriptLock()'));
+  assert.ok(GAS_SCRIPT_CODE.includes('SpreadsheetApp.flush()'));
+  assert.ok(GAS_SCRIPT_CODE.includes('safeSheetTextValue'));
+  assert.ok(GAS_SCRIPT_CODE.includes('setNumberFormat("@")'));
+  assert.ok(GAS_SCRIPT_CODE.includes('"Teachers & Mapping"'));
+  assert.ok(GAS_SCRIPT_CODE.includes('"Mapped Classes"'));
 });

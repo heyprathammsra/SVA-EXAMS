@@ -104,7 +104,7 @@ export function decodeCloudBackupRows(
 
   const combinedB64 = sorted
     .slice(0, expectedChunks)
-    .map((r) => String(r?.name || '').trim())
+    .map((r) => String(r?.name || '').trim().replace(/^'+/, ''))
     .join('');
 
   if (!combinedB64) return null;
@@ -160,91 +160,208 @@ export function buildTeachersMappingSheetRows(
   });
 }
 
+export interface CloudPushOptions {
+  authoritativeTeachers?: boolean;
+  allowNullState?: boolean;
+}
+
+function getTeachersSnapshotSignature(teachers: StoredTeacherAccount[]): string {
+  return JSON.stringify(
+    [...teachers]
+      .sort((a, b) => a.username.localeCompare(b.username))
+      .map((t) => ({
+        id: t.id,
+        username: t.username,
+        name: t.name,
+        assignedSubject: t.assignedSubject,
+        assignedClasses: [...(t.assignedClasses || [])].sort(),
+        classTeacherOf: t.classTeacherOf ?? null,
+        assignments: [...(t.assignments || [])].sort((a, b) =>
+          `${a.section}::${a.subject}`.localeCompare(`${b.section}::${b.subject}`)
+        ),
+        passwordHashHex: t.passwordHashHex,
+        updatedAt: t.updatedAt || 0,
+      }))
+  );
+}
+
+export function mergeCloudBackupForPush(params: {
+  incomingState: PersistedErpState | null;
+  incomingTeachers: StoredTeacherAccount[];
+  existingCloud: CloudBackupPayload | null;
+  nowMs?: number;
+  authoritativeTeachers?: boolean;
+  allowNullState?: boolean;
+}): {
+  state: PersistedErpState | null;
+  teachers: StoredTeacherAccount[];
+  updatedAt: number;
+} {
+  const {
+    incomingState,
+    incomingTeachers,
+    existingCloud,
+    nowMs = Date.now(),
+    authoritativeTeachers = false,
+    allowNullState = false,
+  } = params;
+
+  let mergedState: PersistedErpState | null = incomingState;
+  if (!mergedState) {
+    mergedState = allowNullState ? null : existingCloud?.state ?? null;
+  } else if (
+    existingCloud?.state?.initialized &&
+    (existingCloud.state.updatedAt || 0) > (mergedState.updatedAt || 0)
+  ) {
+    mergedState = existingCloud.state;
+  }
+
+  let mergedTeachers: StoredTeacherAccount[] = Array.isArray(incomingTeachers)
+    ? incomingTeachers
+    : [];
+
+  if (!authoritativeTeachers && existingCloud?.teachers && existingCloud.teachers.length > 0) {
+    const incomingMax = Math.max(0, ...mergedTeachers.map((t) => t.updatedAt || 0));
+    const existingMax = Math.max(0, ...existingCloud.teachers.map((t) => t.updatedAt || 0));
+    const cloudIsNewer =
+      existingMax > incomingMax ||
+      ((existingCloud.updatedAt || 0) > incomingMax &&
+        getTeachersSnapshotSignature(existingCloud.teachers) !==
+          getTeachersSnapshotSignature(mergedTeachers));
+
+    if (mergedTeachers.length === 0 || cloudIsNewer) {
+      mergedTeachers = existingCloud.teachers;
+    }
+  }
+
+  const baseTs = Math.max(
+    nowMs,
+    mergedState?.updatedAt || 0,
+    ...mergedTeachers.map((t) => t.updatedAt || 0)
+  );
+  const updatedAt =
+    existingCloud && baseTs <= (existingCloud.updatedAt || 0)
+      ? existingCloud.updatedAt + 1
+      : baseTs;
+
+  return {
+    state: mergedState,
+    teachers: mergedTeachers,
+    updatedAt,
+  };
+}
+
 let lastCloudPullMs = 0;
 let cachedCloudPayload: CloudBackupPayload | null = null;
+let cloudPushQueue: Promise<unknown> = Promise.resolve();
+
+export function getCachedCloudPayload(): CloudBackupPayload | null {
+  return cachedCloudPayload;
+}
 
 /**
  * Pushes the compressed ERP state & teacher accounts to `ERP_System_State`
  * and human-readable teacher mappings to `Teachers & Mapping` in Google Sheets.
+ * Pushes are serialized via an async queue so concurrent mutations never arrive out-of-order.
  */
 export async function pushCloudBackupToGoogleSheet(
   state: PersistedErpState | null,
   teachers: StoredTeacherAccount[],
-  gasUrl: string = DEFAULT_GAS_URL
-): Promise<{ success: boolean; error?: string }> {
+  gasUrl: string = DEFAULT_GAS_URL,
+  options: CloudPushOptions = {}
+): Promise<{ success: boolean; error?: string; updatedAt?: number }> {
   const cleanUrl = (gasUrl || DEFAULT_GAS_URL).trim();
   if (!cleanUrl || !cleanUrl.includes('script.google.com/macros/s/')) {
     return { success: false, error: 'Invalid GAS URL' };
   }
 
-  try {
-    const nowMs = Date.now();
-    const stateRows = encodeCloudBackupRows(state, teachers, nowMs);
-    const teacherProfiles: TeacherProfile[] = teachers.map(
-      ({ passwordHashHex: _ignored, ...rest }) => rest
-    );
-    const teacherSheetRows = buildTeachersMappingSheetRows(teacherProfiles);
+  const runPush = async (): Promise<{ success: boolean; error?: string; updatedAt?: number }> => {
+    try {
+      // If local state or teachers might lag behind another container on cold start, inspect cloud first
+      if (!cachedCloudPayload && (!state || !options.authoritativeTeachers)) {
+        await pullCloudBackupFromGoogleSheet({ force: true, gasUrl: cleanUrl }).catch(() => null);
+      }
 
-    cachedCloudPayload = {
-      v: 1,
-      updatedAt: Math.max(
-        state?.updatedAt || 0,
-        ...teachers.map((t) => t.updatedAt || 0),
-        nowMs
-      ),
-      state,
-      teachers,
-    };
-    lastCloudPullMs = nowMs;
+      const nowMs = Date.now();
+      const merged = mergeCloudBackupForPush({
+        incomingState: state,
+        incomingTeachers: teachers,
+        existingCloud: cachedCloudPayload,
+        nowMs,
+        authoritativeTeachers: options.authoritativeTeachers,
+        allowNullState: options.allowNullState,
+      });
 
-    const [stateRes] = await Promise.all([
-      fetch(cleanUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-        },
-        body: JSON.stringify({
-          examName: CLOUD_STATE_SHEET_TAB,
-          students: stateRows,
-          isSystemBackup: true,
-          timestamp: new Date(nowMs).toISOString(),
+      const stateRows = encodeCloudBackupRows(merged.state, merged.teachers, merged.updatedAt);
+      const teacherProfiles: TeacherProfile[] = merged.teachers.map(
+        ({ passwordHashHex: _ignored, ...rest }) => rest
+      );
+      const teacherSheetRows = buildTeachersMappingSheetRows(teacherProfiles);
+
+      const nextPayload: CloudBackupPayload = {
+        v: 1,
+        updatedAt: merged.updatedAt,
+        state: merged.state,
+        teachers: merged.teachers,
+      };
+      cachedCloudPayload = nextPayload;
+      lastCloudPullMs = nowMs;
+
+      const [stateRes] = await Promise.all([
+        fetch(cleanUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            examName: CLOUD_STATE_SHEET_TAB,
+            students: stateRows,
+            isSystemBackup: true,
+            timestamp: new Date(nowMs).toISOString(),
+          }),
+          redirect: 'follow',
+          signal: AbortSignal.timeout(10000),
         }),
-        redirect: 'follow',
-        signal: AbortSignal.timeout(10000),
-      }),
-      teacherSheetRows.length > 0
-        ? fetch(cleanUrl, {
-            method: 'POST',
-            headers: {
-              'Content-Type': 'application/json',
-              Accept: 'application/json',
-            },
-            body: JSON.stringify({
-              examName: TEACHERS_MAPPING_SHEET_TAB,
-              students: teacherSheetRows,
-              isTeachersTab: true,
-              teachers: teacherProfiles,
-              timestamp: new Date(nowMs).toISOString(),
-            }),
-            redirect: 'follow',
-            signal: AbortSignal.timeout(10000),
-          }).catch(() => null)
-        : Promise.resolve(null),
-    ]);
+        fetch(cleanUrl, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+          },
+          body: JSON.stringify({
+            examName: TEACHERS_MAPPING_SHEET_TAB,
+            students: teacherSheetRows,
+            isTeachersTab: true,
+            teachers: teacherProfiles,
+            timestamp: new Date(nowMs).toISOString(),
+          }),
+          redirect: 'follow',
+          signal: AbortSignal.timeout(10000),
+        }).catch(() => null),
+      ]);
 
-    if (!stateRes.ok) {
-      return { success: false, error: `HTTP ${stateRes.status}` };
+      if (!stateRes.ok) {
+        return { success: false, error: `HTTP ${stateRes.status}` };
+      }
+      lastCloudPullMs = Date.now();
+      return { success: true, updatedAt: merged.updatedAt };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Cloud backup push failed' };
     }
-    return { success: true };
-  } catch (err: any) {
-    return { success: false, error: err?.message || 'Cloud backup push failed' };
-  }
+  };
+
+  const task = cloudPushQueue.then(runPush, runPush);
+  cloudPushQueue = task.then(
+    () => undefined,
+    () => undefined
+  );
+  return task;
 }
 
 /**
  * Pulls the latest ERP state & teacher accounts from `ERP_System_State` in Google Sheets.
- * Uses a short 4-second cooldown cache so repeated API calls remain fast.
+ * Uses a short 4-second cooldown cache unless `force: true` is specified.
  */
 export async function pullCloudBackupFromGoogleSheet(
   options: { force?: boolean; gasUrl?: string } = {}
@@ -283,9 +400,15 @@ export async function pullCloudBackupFromGoogleSheet(
     const decoded = decodeCloudBackupRows(rows);
     lastCloudPullMs = Date.now();
     if (decoded) {
-      cachedCloudPayload = decoded;
+      if (
+        !cachedCloudPayload ||
+        options.force ||
+        decoded.updatedAt >= (cachedCloudPayload.updatedAt || 0)
+      ) {
+        cachedCloudPayload = decoded;
+      }
     }
-    return decoded;
+    return cachedCloudPayload || decoded;
   } catch {
     return cachedCloudPayload;
   }

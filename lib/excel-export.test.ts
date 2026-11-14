@@ -169,7 +169,7 @@ describe('Reference Sheet Format Excel Export (1FuU-gS2AxSG81nDnwSOL5NFlV4PlZ99t
     assert.ok(fileName.includes('SA-1'));
 
     const wb = XLSX.read(bytes, { type: 'array', cellFormula: true });
-    assert.deepEqual(wb.SheetNames, ['Consolidated', 'Result Analysis']);
+    assert.deepEqual(wb.SheetNames, ['Consolidated']);
 
     const conWs = wb.Sheets['Consolidated'];
     const conAoa = XLSX.utils.sheet_to_json(conWs, { header: 1, defval: '' }) as (string | number)[][];
@@ -208,27 +208,6 @@ describe('Reference Sheet Format Excel Export (1FuU-gS2AxSG81nDnwSOL5NFlV4PlZ99t
     assert.equal(conWs['AV6']?.f, 'SUM(H6,N6,U6,AB6,AI6,AP6,AT6)');
     assert.equal(conWs['AW6']?.f, 'AV6/7');
     assert.ok(conWs['AX6']?.f?.includes('IF(AW6>=91,"A1"'));
-
-    // Check Result Analysis sheet
-    const resWs = wb.Sheets['Result Analysis'];
-    const resAoa = XLSX.utils.sheet_to_json(resWs, { header: 1, defval: '' }) as (string | number)[][];
-    assert.deepEqual(resAoa[0], [
-      'ROLL NO',
-      'NAME OF THE STUDENT',
-      'ENGLISH',
-      'HINDI',
-      'MARATHI',
-      'MATHS',
-      'SCIENCE',
-      'SS',
-      'CS',
-      'TOTAL',
-      'PERCENTAGE',
-    ]);
-    assert.equal(resAoa[1][0], 1);
-    assert.equal(resAoa[1][1], 'Anjali Sandip Chavan');
-    assert.equal(resWs['J2']?.f, 'SUM(C2:I2)');
-    assert.equal(resWs['K2']?.f, 'ROUND(J2/700*100,2)');
 
     // Verify XML styles
     const zip = await JSZip.loadAsync(bytes);
@@ -305,9 +284,12 @@ describe('Reference Sheet Format Excel Export (1FuU-gS2AxSG81nDnwSOL5NFlV4PlZ99t
       classScope: 'Diamond',
     });
     const best5Wb = XLSX.read(best5Bytes, { type: 'array', cellFormula: true });
-    const best5Res = best5Wb.Sheets['Result Analysis'];
-    assert.ok(best5Res['J2']?.f?.includes('LARGE(C2:I2,1)'));
-    assert.equal(best5Res['K2']?.f, 'ROUND(J2/500*100,2)');
+    assert.deepEqual(best5Wb.SheetNames, ['Consolidated']);
+    const best5Con = best5Wb.Sheets['Consolidated'];
+    const best5Aoa = XLSX.utils.sheet_to_json(best5Con, { header: 1, defval: '' }) as (string | number)[][];
+    assert.equal(best5Aoa[4][47], 'GRAND TOTAL 500');
+    assert.ok(best5Con['AV6']?.f?.includes('LARGE((H6,N6,U6,AB6,AI6,AP6,AT6),1)'));
+    assert.equal(best5Con['AW6']?.f, 'AV6/5');
 
     // 2. Bracket subset excludes CS from SUM
     const subsetCfg: ExamConfig = {

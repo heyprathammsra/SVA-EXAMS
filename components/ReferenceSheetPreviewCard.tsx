@@ -74,24 +74,20 @@ export default function ReferenceSheetPreviewCard({
       );
       return fromLocal ? fromLocal.name : allReferenceSubjects[0]?.name || '';
     }
-    if (localTab === 'result_analysis' && (subjectScope === 'consolidated' || subjectScope === 'all_consolidated' || !subjectScope)) {
-      return 'result_analysis';
-    }
     if (subjectScope === 'consolidated') return 'consolidated';
     if (subjectScope && subjectScope !== 'all_consolidated') return subjectScope;
     return localTab || 'consolidated';
   }, [allowConsolidated, allReferenceSubjects, subjectScope, localTab]);
 
   const isConsolidated = allowConsolidated && activeTab === 'consolidated';
-  const isResultAnalysis = allowConsolidated && activeTab === 'result_analysis';
 
   const currentSubject = useMemo(() => {
-    if (isConsolidated || isResultAnalysis) return allReferenceSubjects[0];
+    if (isConsolidated) return allReferenceSubjects[0];
     const found = allReferenceSubjects.find(
       (s) => s.name.toLowerCase() === activeTab.toLowerCase()
     );
     return found || allReferenceSubjects[0];
-  }, [allReferenceSubjects, isConsolidated, isResultAnalysis, activeTab]);
+  }, [allReferenceSubjects, isConsolidated, activeTab]);
 
   const filteredStudents = useMemo(() => {
     const list = students.filter(
@@ -199,8 +195,6 @@ export default function ReferenceSheetPreviewCard({
 
   const sheetRow3Title = isConsolidated
     ? 'CONSOLIDATED SHEET'
-    : isResultAnalysis
-    ? 'RESULT ANALYSIS SHEET'
     : getReferenceSubjectHeaderTitle(currentSubject.name);
 
   const resolvedClassGrade = classGrade || filteredStudents[0]?.class || '';
@@ -224,43 +218,25 @@ export default function ReferenceSheetPreviewCard({
         {/* Workbook Sheet Tabs */}
         <div className="flex items-center flex-wrap gap-1.5">
           {allowConsolidated && (
-            <>
-              <button
-                type="button"
-                onClick={() => {
-                  setLocalTab('consolidated');
-                  onSubjectScopeChange?.('consolidated');
-                }}
-                className={`px-3 py-1 text-xs font-semibold rounded-md border transition-colors cursor-pointer ${
-                  activeTab === 'consolidated'
-                    ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
-                    : 'bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 border-slate-200'
-                }`}
-              >
-                Consolidated Sheet
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setLocalTab('result_analysis');
-                  onSubjectScopeChange?.('consolidated');
-                }}
-                className={`px-3 py-1 text-xs font-semibold rounded-md border transition-colors cursor-pointer ${
-                  activeTab === 'result_analysis'
-                    ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
-                    : 'bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 border-slate-200'
-                }`}
-              >
-                Result Analysis
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={() => {
+                setLocalTab('consolidated');
+                onSubjectScopeChange?.('consolidated');
+              }}
+              className={`px-3 py-1 text-xs font-semibold rounded-md border transition-colors cursor-pointer ${
+                activeTab === 'consolidated'
+                  ? 'bg-blue-600 text-white border-blue-600 shadow-xs'
+                  : 'bg-white text-slate-700 hover:bg-slate-100 hover:text-slate-900 border-slate-200'
+              }`}
+            >
+              Consolidated Sheet
+            </button>
           )}
 
           {allReferenceSubjects.map((sub) => {
             const isSubActive =
               !isConsolidated &&
-              !isResultAnalysis &&
               activeTab.toLowerCase() === sub.name.toLowerCase();
             return (
               <button
@@ -526,94 +502,6 @@ export default function ReferenceSheetPreviewCard({
                   })}
                 </tbody>
               </table>
-            ) : isResultAnalysis ? (
-              /* =========================================================
-                 RESULT ANALYSIS SHEET PREVIEW (Subject Totals + Overall)
-                 ========================================================= */
-              <table className="w-full border-collapse text-slate-900 text-xs">
-                <thead>
-                  <tr className="bg-slate-50">
-                    <th className="border-b border-r border-slate-900 px-2.5 py-2 text-center font-bold uppercase w-16 text-slate-900">
-                      ROLL NO
-                    </th>
-                    <th className="border-b border-r border-slate-900 px-3 py-2 text-center font-bold uppercase min-w-[200px] text-slate-900">
-                      NAME OF THE STUDENT
-                    </th>
-                    {consolidatedSubjects.map((sub) => (
-                      <th
-                        key={sub.name}
-                        className="border-b border-r border-slate-900 px-2.5 py-2 text-center font-bold uppercase min-w-[84px] text-slate-900 bg-white"
-                      >
-                        <div>{getReferenceSubjectTabName(sub.name)}</div>
-                        <div className="text-[10px] font-semibold text-slate-500 mt-0.5">
-                          ({sub.maxMarks || (isPtExam ? 25 : 100)})
-                        </div>
-                      </th>
-                    ))}
-                    <th className="border-b border-r border-slate-900 px-2.5 py-2 text-center font-bold uppercase min-w-[92px] bg-emerald-50 text-emerald-950">
-                      <div>TOTAL</div>
-                      <div className="text-[10px] font-semibold text-emerald-700 mt-0.5">
-                        ({consolidatedStructure.grandMaxMarks})
-                      </div>
-                    </th>
-                    <th className="border-b border-r border-slate-900 px-2.5 py-2 text-center font-bold uppercase min-w-[92px] bg-emerald-50 text-emerald-950">
-                      PERCENTAGE
-                    </th>
-                    <th className="border-b border-slate-900 px-2.5 py-2 text-center font-bold uppercase min-w-[68px] bg-emerald-50 text-emerald-950">
-                      GRADE
-                    </th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {filteredStudents.map((student, idx) => {
-                    const rollNum = parseInt(String(student.rollNo), 10) || idx + 1;
-                    const studentResult = studentResultsMap.get(student.id);
-                    const isLastRow = idx === filteredStudents.length - 1;
-                    const rowBorderB = isLastRow ? '' : 'border-b border-slate-900';
-
-                    return (
-                      <tr key={student.id} className="hover:bg-blue-50/40 transition-colors">
-                        <td
-                          className={`${rowBorderB} border-r border-slate-900 px-2.5 py-1.5 text-center font-mono tabular-nums font-medium`}
-                        >
-                          {rollNum}
-                        </td>
-                        <td
-                          className={`${rowBorderB} border-r border-slate-900 px-3 py-1.5 text-left font-medium whitespace-nowrap`}
-                        >
-                          {student.name}
-                        </td>
-                        {consolidatedSubjects.map((sub) => {
-                          const markVal = student.marks[sub.name];
-                          return (
-                            <td
-                              key={sub.name}
-                              className={`${rowBorderB} border-r border-slate-900 px-2.5 py-1.5 text-center font-mono tabular-nums`}
-                            >
-                              {markVal ?? 0}
-                            </td>
-                          );
-                        })}
-                        <td
-                          className={`${rowBorderB} border-r border-slate-900 px-2.5 py-1.5 text-center font-mono tabular-nums font-bold bg-emerald-50/40 text-emerald-950`}
-                        >
-                          {studentResult?.totalObtained ?? 0}
-                        </td>
-                        <td
-                          className={`${rowBorderB} border-r border-slate-900 px-2.5 py-1.5 text-center font-mono tabular-nums font-bold bg-emerald-50/40 text-emerald-950`}
-                        >
-                          {studentResult ? studentResult.percentage.toFixed(2) : '0.00'}%
-                        </td>
-                        <td
-                          className={`${rowBorderB} px-2.5 py-1.5 text-center font-mono tabular-nums font-bold bg-emerald-50/40 text-emerald-950`}
-                        >
-                          {studentResult?.grade ?? 'E2'}
-                        </td>
-                      </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
             ) : (
               /* =========================================================
                  SINGLE SUBJECT SHEET PREVIEW (Reference Sheet Format)
@@ -727,8 +615,6 @@ export default function ReferenceSheetPreviewCard({
         <span className="text-[11px] text-slate-400">
           {isConsolidated
             ? `End of Consolidated Marksheet (${consolidatedSubjects.length} Subjects + Overall Performance)`
-            : isResultAnalysis
-            ? `End of Result Analysis Sheet (${consolidatedSubjects.length} Subjects)`
             : `End of ${currentSubject.name} Marksheet`}
         </span>
       </div>

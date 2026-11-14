@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
+import { getTeacherProfileByUsername } from '@/lib/auth';
 import { getRequestAuthSession } from '@/lib/auth-server';
 
 export const dynamic = 'force-dynamic';
@@ -12,5 +13,7 @@ export async function GET(req: NextRequest) {
     authenticated: true,
     username: session.sub,
     role: session.role,
+    teacherProfile:
+      session.role === 'teacher' ? getTeacherProfileByUsername(session.sub) : null,
   });
 }

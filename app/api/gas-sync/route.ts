@@ -359,12 +359,15 @@ export async function POST(req: NextRequest) {
 
       const syncedExams: string[] = [];
 
-      // 1. Push ERP_System_State + Teachers & Mapping tabs
-      await pushCloudBackupToGoogleSheet(
-        fullState,
-        getStoredTeacherAccountsForBackup(),
-        gasUrl
-      );
+      // 1. Push ERP_System_State + Teachers & Mapping tabs (unless caller already awaited /api/erp-state)
+      if (!body.skipCloudBackup) {
+        await pushCloudBackupToGoogleSheet(
+          fullState,
+          getStoredTeacherAccountsForBackup(),
+          gasUrl,
+          { authoritativeTeachers: false }
+        );
+      }
 
       // 2. Push each requested exam tab with its exam-specific marks, breakdowns, and examConfig
       for (const examId of examIds) {

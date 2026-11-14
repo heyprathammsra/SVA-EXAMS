@@ -162,6 +162,9 @@ export function applyClearErpData(params: {
 
     const nextCustomRemarks = options.clearRemarks ? '' : st.customRemarks;
     const nextSubjectRemarks = options.clearRemarks ? {} : st.subjectRemarks;
+    const nextLegacyRemarks = options.clearRemarks
+      ? ''
+      : (st as { remarks?: string }).remarks;
     const nextAttendance = options.clearAttendance ? '' : st.attendance;
 
     return {
@@ -169,6 +172,7 @@ export function applyClearErpData(params: {
       marks: nextMarks,
       breakdowns: nextBreakdowns,
       customRemarks: nextCustomRemarks,
+      ...(nextLegacyRemarks !== undefined ? { remarks: nextLegacyRemarks } : {}),
       subjectRemarks: nextSubjectRemarks,
       attendance: nextAttendance,
     };

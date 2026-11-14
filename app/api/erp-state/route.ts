@@ -6,6 +6,7 @@ import {
   getStoredTeacherAccountsForBackup,
   getTeacherProfileByUsername,
   restoreTeacherAccountsFromBackup,
+  shouldRestoreTeachersFromCloud,
 } from '@/lib/auth';
 import { getRequestAuthSession } from '@/lib/auth-server';
 import { PersistedErpState } from '@/lib/erp-persistence';
@@ -48,25 +49,18 @@ export async function GET(req: NextRequest) {
   }
 
   try {
+    const { searchParams } = new URL(req.url);
+    const freshParam = searchParams.get('fresh') === '1';
+
     let localState = await readLocalStateFile();
 
-    // Check Google Sheets cloud store when local disk is empty (e.g., fresh Cloud Run container) or to pull newer updates
+    // Force-pull from Google Sheets when local disk is empty, or when caller requests a fresh session hydrate
     const cloudBackup = await pullCloudBackupFromGoogleSheet({
-      force: !localState,
+      force: freshParam || !localState,
     });
 
-    if (cloudBackup?.teachers && cloudBackup.teachers.length > 0) {
-      const localMaxTeacherUpdate = Math.max(
-        0,
-        ...getStoredTeacherAccountsForBackup().map((t) => t.updatedAt || 0)
-      );
-      const cloudMaxTeacherUpdate = Math.max(
-        0,
-        ...cloudBackup.teachers.map((t) => t.updatedAt || 0)
-      );
-      if (cloudMaxTeacherUpdate > localMaxTeacherUpdate) {
-        restoreTeacherAccountsFromBackup(cloudBackup.teachers);
-      }
+    if (shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloudBackup)) {
+      restoreTeacherAccountsFromBackup(cloudBackup!.teachers);
     }
 
     if (
@@ -136,14 +130,17 @@ export async function POST(req: NextRequest) {
     }
 
     let existingParsed = await readLocalStateFile();
-    if (!existingParsed) {
-      const cloudBackup = await pullCloudBackupFromGoogleSheet({ force: true });
-      if (cloudBackup?.teachers && cloudBackup.teachers.length > 0) {
-        restoreTeacherAccountsFromBackup(cloudBackup.teachers);
-      }
-      if (cloudBackup?.state && cloudBackup.state.initialized) {
-        existingParsed = cloudBackup.state;
-      }
+    const cloudBackup = await pullCloudBackupFromGoogleSheet({
+      force: !existingParsed,
+    }).catch(() => null);
+    if (shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloudBackup)) {
+      restoreTeacherAccountsFromBackup(cloudBackup!.teachers);
+    }
+    if (
+      cloudBackup?.state?.initialized &&
+      (cloudBackup.state.updatedAt || 0) > (existingParsed?.updatedAt || 0)
+    ) {
+      existingParsed = cloudBackup.state;
     }
 
     const teacherProfile =
@@ -167,10 +164,12 @@ export async function POST(req: NextRequest) {
 
     await writeLocalStateFile(stateToPersist);
 
-    // Mirror state + teacher accounts to Google Sheets cloud store
-    pushCloudBackupToGoogleSheet(
+    // Mirror state + teacher accounts to Google Sheets cloud store synchronously so immediate logout sees latest state
+    await pushCloudBackupToGoogleSheet(
       stateToPersist as PersistedErpState,
-      getStoredTeacherAccountsForBackup()
+      getStoredTeacherAccountsForBackup(),
+      undefined,
+      { authoritativeTeachers: false }
     ).catch(() => {});
 
     return NextResponse.json({

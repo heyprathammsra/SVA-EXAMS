@@ -40,6 +40,10 @@ export function setStoredAdminToken(token: string): void {
   inMemorySessionToken = token;
 }
 
+export function setStoredTeacherProfile(profile: TeacherProfile | null): void {
+  inMemoryTeacherProfile = profile;
+}
+
 export function clearStoredAdminToken(): void {
   inMemorySessionToken = null;
   inMemoryUserRole = null;

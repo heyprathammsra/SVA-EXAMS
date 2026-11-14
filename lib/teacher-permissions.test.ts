@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {
   canUserEditSubjectInClass,
   canUserViewSection,
+  didTeacherPermissionsChange,
   filterImportedStudentsForRole,
   getDefaultTeacherScopesForSection,
   getEditableSubjectsForClass,
@@ -14,6 +15,7 @@ import {
   removeSectionFromTeacherProfile,
   renameSectionInTeacherProfile,
   renameSubjectInTeacherProfile,
+  resolveInitialTeacherExam,
   resolveInitialTeacherSection,
 } from './teacher-permissions';
 
@@ -308,6 +310,108 @@ describe('teacher-permissions & class-subject mapping', () => {
         selectedRemarkScope: 'all',
         exportSubjectScope: 'all_consolidated',
       }
+    );
+  });
+
+  it('switches initial teacher exam away from PT-2 to SA-1 when Computer Science is excluded from PT in Classes 6-8', () => {
+    const csMiddleSchoolTeacher = normalizeTeacherProfile({
+      name: 'Pratham',
+      username: 'pratham',
+      assignedSubject: 'Computer Science',
+      assignedClasses: ['Sparkle', 'Twinkle', 'Topaz', 'Jade', 'Garnet', 'Emerald'],
+      classTeacherOf: null,
+    });
+
+    const getSubjectsForExamAndSection = (examId: string, section: string): string[] => {
+      const isSenior = section === 'Ruby' || section === 'Diamond';
+      if (examId === 'PT-1' || examId === 'PT-2') {
+        return isSenior
+          ? ['English', 'Hindi', 'Maths', 'Science', 'Social Science', 'Computer Science']
+          : ['English', 'Hindi', 'Marathi', 'Maths', 'Science', 'Social Science'];
+      }
+      return ['English', 'Hindi', 'Marathi', 'Maths', 'Science', 'Social Science', 'Computer Science'];
+    };
+
+    // Admin left active exam on PT-2, but Computer Science only runs in SA-1/SA-2 for Classes 6-8
+    assert.equal(
+      resolveInitialTeacherExam({
+        preferredExam: 'PT-2',
+        examIds: ['PT-1', 'SA-1', 'PT-2', 'SA-2'],
+        getSubjectsForExamAndSection,
+        allSections: ALL_CLASSES,
+        profile: csMiddleSchoolTeacher,
+      }),
+      'SA-1'
+    );
+
+    // If assigned Class 9 (Diamond), PT-2 includes Computer Science so PT-2 is preserved
+    const csSeniorTeacher = normalizeTeacherProfile({
+      name: 'Pratham',
+      username: 'pratham',
+      assignedSubject: 'Computer Science',
+      assignedClasses: ['Diamond'],
+      classTeacherOf: null,
+    });
+    assert.equal(
+      resolveInitialTeacherExam({
+        preferredExam: 'PT-2',
+        examIds: ['PT-1', 'SA-1', 'PT-2', 'SA-2'],
+        getSubjectsForExamAndSection,
+        allSections: ALL_CLASSES,
+        profile: csSeniorTeacher,
+      }),
+      'PT-2'
+    );
+  });
+
+  it('detects Admin permission changes on subject, classes, and classTeacherOf cleanly', () => {
+    const base = normalizeTeacherProfile({
+      name: 'Pratham',
+      username: 'pratham',
+      assignedSubject: 'Science',
+      assignedClasses: ['Sparkle', 'Twinkle'],
+      classTeacherOf: null,
+    });
+    const identicalClone = normalizeTeacherProfile({
+      name: 'Pratham',
+      username: 'pratham',
+      assignedSubject: 'science',
+      assignedClasses: ['Twinkle', 'Sparkle'],
+      classTeacherOf: null,
+    });
+    assert.equal(didTeacherPermissionsChange(base, identicalClone), false);
+
+    assert.equal(
+      didTeacherPermissionsChange(
+        base,
+        normalizeTeacherProfile({
+          ...base,
+          assignedSubject: 'Maths',
+        })
+      ),
+      true
+    );
+
+    assert.equal(
+      didTeacherPermissionsChange(
+        base,
+        normalizeTeacherProfile({
+          ...base,
+          assignedClasses: ['Sparkle'],
+        })
+      ),
+      true
+    );
+
+    assert.equal(
+      didTeacherPermissionsChange(
+        base,
+        normalizeTeacherProfile({
+          ...base,
+          classTeacherOf: 'Sparkle',
+        })
+      ),
+      true
     );
   });
 });

@@ -3,54 +3,44 @@
     "id": "teacher-pratham",
     "name": "Pratham",
     "username": "pratham",
-    "assignedSubject": "Science",
+    "assignedSubject": "Computer Science",
     "assignedClasses": [
-      "Sparkle",
-      "Twinkle",
       "Topaz",
       "Jade",
+      "Sparkle",
+      "Twinkle",
       "Garnet",
-      "Emerald",
-      "Ruby",
-      "Diamond"
+      "Emerald"
     ],
     "classTeacherOf": null,
     "assignments": [
       {
-        "section": "Sparkle",
-        "subject": "Science"
-      },
-      {
-        "section": "Twinkle",
-        "subject": "Science"
-      },
-      {
         "section": "Topaz",
-        "subject": "Science"
+        "subject": "Computer Science"
       },
       {
         "section": "Jade",
-        "subject": "Science"
+        "subject": "Computer Science"
+      },
+      {
+        "section": "Sparkle",
+        "subject": "Computer Science"
+      },
+      {
+        "section": "Twinkle",
+        "subject": "Computer Science"
       },
       {
         "section": "Garnet",
-        "subject": "Science"
+        "subject": "Computer Science"
       },
       {
         "section": "Emerald",
-        "subject": "Science"
-      },
-      {
-        "section": "Ruby",
-        "subject": "Science"
-      },
-      {
-        "section": "Diamond",
-        "subject": "Science"
+        "subject": "Computer Science"
       }
     ],
     "createdAt": 1700000000000,
-    "updatedAt": 1700000000000,
+    "updatedAt": 1794668354227,
     "passwordHashHex": "4c78b327e40c997d386f4dd864ef8cc15b56ec4e3afd853f9e378b41228c9b52"
   }
 ]
