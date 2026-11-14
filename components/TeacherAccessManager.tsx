@@ -9,7 +9,6 @@ import {
   Layers,
   Plus,
   Trash2,
-  UserCheck,
   UserPlus,
   Users,
   X,
@@ -39,6 +38,12 @@ const DEFAULT_SUBJECT_LIST = [
   'Social Science',
   'Computer Science',
 ];
+
+const MODAL_SELECT_CONTAINER_CLASS =
+  'flex items-center justify-between gap-2 w-full h-9 bg-slate-50/70 hover:bg-slate-50 focus-within:bg-white border border-slate-200/90 hover:border-slate-300 focus-within:border-blue-600 focus-within:ring-2 focus-within:ring-blue-500/15 rounded-lg px-3 transition-all duration-150';
+
+const MODAL_INPUT_CLASS =
+  'w-full h-9 px-3 text-xs bg-slate-50/70 hover:bg-slate-50 focus:bg-white border border-slate-200/90 rounded-lg text-slate-900 placeholder:text-slate-400 transition-all duration-150 focus:outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-500/15';
 
 export default function TeacherAccessManager({
   classes,
@@ -157,6 +162,35 @@ export default function TeacherAccessManager({
     [classes]
   );
 
+  const teacherDropdownOptions = useMemo(
+    () =>
+      teachers.map((t) => ({
+        value: t.username,
+        label: `${t.name} (@${t.username}) · ${t.assignedSubject}`,
+        meta: `${t.assignedClasses.length} ${
+          t.assignedClasses.length === 1 ? 'class' : 'classes'
+        }`,
+      })),
+    [teachers]
+  );
+
+  const activeTeacherSummary = useMemo(() => {
+    if (!activeTeacher) return '';
+    const count = activeTeacher.assignedClasses.length;
+    const classSummary =
+      count === 0
+        ? 'No subject classes'
+        : count <= 2
+        ? activeTeacher.assignedClasses
+            .map((sec) => formatClassGradeShortLabel(classes, sec))
+            .join(', ')
+        : `${count} classes`;
+    const ctSummary = activeTeacher.classTeacherOf
+      ? `CT: ${formatClassGradeShortLabel(classes, activeTeacher.classTeacherOf)}`
+      : 'Not a Class Teacher';
+    return `${activeTeacher.assignedSubject} (${classSummary}) · ${ctSummary}`;
+  }, [activeTeacher, classes]);
+
   const openCreateModal = () => {
     setUserModalMode('create');
     setEditingTeacherId(undefined);
@@ -229,16 +263,26 @@ export default function TeacherAccessManager({
       setFormError('Please enter the teacher name.');
       return;
     }
-    if (!cleanUsername) {
-      setFormError('Please enter a username.');
+    if (!cleanUsername || !/^[a-z0-9._-]{2,40}$/.test(cleanUsername)) {
+      setFormError('Username must be 2–40 characters (letters, numbers, . _ -).');
       return;
     }
-    if (userModalMode === 'create' && !cleanPass) {
-      setFormError('Please enter a password for the new user.');
+    if (cleanUsername === 'admin') {
+      setFormError('Username "admin" is reserved.');
+      return;
+    }
+    if (userModalMode === 'create' && cleanPass.length < 4) {
+      setFormError('Password must be at least 4 characters.');
+      return;
+    }
+    if (userModalMode === 'edit' && cleanPass.length > 0 && cleanPass.length < 4) {
+      setFormError('New password must be at least 4 characters.');
       return;
     }
     if (assignedClassesInput.length === 0 && !resolvedClassTeacher) {
-      setFormError('Assign at least one class for their subject or select a Class Teacher class.');
+      setFormError(
+        'Assign at least one class for their subject or select a Class Teacher class.'
+      );
       return;
     }
 
@@ -256,7 +300,7 @@ export default function TeacherAccessManager({
           id: editingTeacherId,
           name: cleanName,
           username: cleanUsername,
-          password: cleanPass || undefined,
+          ...(cleanPass ? { password: cleanPass } : {}),
           assignedSubject: subjectInput,
           assignedClasses: assignedClassesInput,
           classTeacherOf: resolvedClassTeacher,
@@ -271,10 +315,10 @@ export default function TeacherAccessManager({
 
       if (Array.isArray(payload.teachers)) {
         setTeachers(payload.teachers);
+      } else {
+        await fetchTeachers();
       }
-      if (payload.teacher?.username) {
-        setSelectedUsername(payload.teacher.username);
-      }
+      setSelectedUsername(cleanUsername);
       setUserModalMode(null);
       setIsSaving(false);
       showToast?.(
@@ -378,104 +422,133 @@ export default function TeacherAccessManager({
 
   return (
     <div className="bg-white border border-slate-200/85 rounded-2xl px-4 py-2.5 shadow-[0_1px_2px_rgba(15,23,42,0.04)]">
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5">
-        {/* Left: Compact Section Identity & Active Teacher Summary */}
-        <div className="flex flex-wrap items-center gap-2 min-w-0">
-          <Users className="w-4 h-4 text-blue-600 shrink-0" />
-          <h2 className="text-xs sm:text-sm font-semibold text-slate-900 tracking-tight">
-            Teachers &amp; Class Mapping
-          </h2>
-          <span className="text-xs font-mono text-slate-400">
-            {isLoading ? '...' : teachers.length}
-          </span>
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-2.5 lg:gap-4">
+        {/* Left + Center: Section Identity & Active Teacher Controls (Single-Line Rhythm matching Classes & Roster) */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between lg:justify-start gap-2.5 lg:gap-3.5 min-w-0 flex-1">
+          <div className="flex items-center justify-between gap-2 min-w-0 lg:shrink-0">
+            <div className="flex items-center gap-2.5 min-w-0">
+              <div className="w-7 h-7 rounded-lg bg-blue-50/90 border border-blue-100/80 text-blue-600 flex items-center justify-center shrink-0">
+                <Users className="w-3.5 h-3.5" />
+              </div>
+              <div className="flex items-baseline gap-1.5 min-w-0">
+                <h2 className="text-[13px] font-semibold tracking-[-0.01em] text-slate-900 whitespace-nowrap">
+                  Teachers &amp; Class Mapping
+                </h2>
+                <span className="text-xs text-slate-300 shrink-0" aria-hidden="true">
+                  ·
+                </span>
+                <span className="text-xs font-medium text-slate-500 tabular-nums whitespace-nowrap">
+                  {isLoading ? '...' : teachers.length}
+                  <span className="hidden xl:inline">
+                    {' '}
+                    {teachers.length === 1 ? 'teacher' : 'teachers'}
+                  </span>
+                </span>
+              </div>
+            </div>
+
+            {/* Mobile Quick Create Button */}
+            <div className="flex lg:hidden items-center gap-1.5 shrink-0 ml-auto">
+              <button
+                type="button"
+                onClick={openCreateModal}
+                className="inline-flex items-center gap-1 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-xl shadow-[0_1px_2px_rgba(37,99,235,0.28),inset_0_1px_0_rgba(255,255,255,0.16)] transition-all duration-150 cursor-pointer whitespace-nowrap"
+              >
+                <UserPlus className="w-3.5 h-3.5" />
+                <span>Create User</span>
+              </button>
+            </div>
+          </div>
+
+          <span
+            className="hidden lg:block h-5 w-px bg-slate-200/80 shrink-0"
+            aria-hidden="true"
+          />
+
+          {/* Active Teacher Dropdown + Map Classes + Edit/Delete Group + Quiet Summary */}
           {activeTeacher && (
-            <>
-              <span className="text-slate-200">·</span>
-              <span className="text-xs text-slate-600 font-medium truncate">
-                {activeTeacher.assignedSubject} (
-                {activeTeacher.assignedClasses.length > 0
-                  ? activeTeacher.assignedClasses
-                      .map((sec) => formatClassGradeShortLabel(classes, sec))
-                      .join(', ')
-                  : 'No subject classes'}
-                )
+            <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 min-w-0 flex-1">
+              <CustomSelect
+                id="settings-teacher-select"
+                value={activeTeacher.username}
+                onChange={(val) => setSelectedUsername(val)}
+                options={teacherDropdownOptions}
+                matchTriggerWidth
+                containerClassName="flex items-center justify-between gap-2 bg-slate-50/75 hover:bg-white border border-slate-200/90 hover:border-slate-300 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/15 rounded-xl px-3 py-1.5 shadow-[0_1px_1px_rgba(15,23,42,0.02)] transition-all duration-150 w-full sm:w-[242px] min-w-0"
+                triggerClassName="text-xs font-semibold text-slate-900 flex-1 min-w-0"
+                renderFooter={(closeMenu) => (
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      closeMenu();
+                      openCreateModal();
+                    }}
+                    className="w-full flex items-center gap-2 px-2.5 py-1.5 text-xs font-medium text-blue-600 hover:bg-blue-50/80 rounded-lg transition-colors cursor-pointer text-left"
+                  >
+                    <Plus className="w-3.5 h-3.5 shrink-0" />
+                    <span>Create new teacher</span>
+                  </button>
+                )}
+              />
+
+              <button
+                type="button"
+                data-testid="open-map-teacher-classes-btn"
+                onClick={() => openMapModalForTeacher(activeTeacher)}
+                className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 hover:text-slate-900 bg-white hover:bg-slate-50 border border-slate-200/90 hover:border-slate-300 rounded-xl shadow-[0_1px_2px_rgba(15,23,42,0.03)] transition-all duration-150 cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <Layers className="w-3.5 h-3.5 text-blue-600" />
+                <span>Map Classes</span>
+              </button>
+
+              <div className="inline-flex items-center bg-slate-50/85 border border-slate-200/80 rounded-xl p-0.5 ml-auto sm:ml-0 shrink-0">
+                <button
+                  type="button"
+                  onClick={() => openEditModal(activeTeacher)}
+                  title={`Edit ${activeTeacher.name}`}
+                  aria-label={`Edit ${activeTeacher.name}`}
+                  className="p-1.5 text-slate-500 hover:text-blue-600 hover:bg-white hover:shadow-2xs rounded-lg transition-all duration-150 cursor-pointer shrink-0"
+                >
+                  <Edit2 className="w-3.5 h-3.5" />
+                </button>
+
+                {teachers.length > 1 && (
+                  <>
+                    <span
+                      className="w-px h-3.5 bg-slate-200/80 mx-0.5"
+                      aria-hidden="true"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => setConfirmDeleteTeacher(activeTeacher)}
+                      title={`Delete ${activeTeacher.name}`}
+                      aria-label={`Delete ${activeTeacher.name}`}
+                      className="p-1.5 text-slate-500 hover:text-rose-600 hover:bg-white hover:shadow-2xs rounded-lg transition-all duration-150 cursor-pointer shrink-0"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                    </button>
+                  </>
+                )}
+              </div>
+
+              <span
+                title={activeTeacherSummary}
+                className="hidden xl:inline-block text-xs text-slate-400 truncate min-w-0 max-w-[280px] pl-1"
+              >
+                {activeTeacherSummary}
               </span>
-              <span className="text-slate-200">·</span>
-              <span className="text-xs text-slate-500">
-                {activeTeacher.classTeacherOf
-                  ? `Class Teacher: ${formatClassGradeShortLabel(
-                      classes,
-                      activeTeacher.classTeacherOf
-                    )}`
-                  : 'Not a Class Teacher'}
-              </span>
-            </>
+            </div>
           )}
         </div>
 
-        {/* Right: Teacher Selector + Map Classes + Edit/Delete + Create User */}
-        <div className="flex flex-wrap items-center gap-2">
-          {/* Teacher Selector Dropdown */}
-          <div className="min-w-[200px]">
-            <CustomSelect
-              id="settings-teacher-select"
-              fullWidth
-              value={activeTeacher?.username || ''}
-              onChange={(val) => setSelectedUsername(val)}
-              options={teachers.map((t) => ({
-                value: t.username,
-                label: `${t.name} (@${t.username}) · ${t.assignedSubject}`,
-              }))}
-            />
-          </div>
-
-          {/* Map Teacher with Assigned Classes (Just Their Subject) */}
-          {activeTeacher && (
-            <button
-              type="button"
-              data-testid="open-map-teacher-classes-btn"
-              onClick={() => openMapModalForTeacher(activeTeacher)}
-              className="px-3 py-1.5 text-xs font-semibold text-blue-700 hover:text-blue-800 bg-blue-50/70 hover:bg-blue-100/80 border border-blue-200/80 rounded-lg transition-colors flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-            >
-              <Layers className="w-3.5 h-3.5 text-blue-600" />
-              <span>Map Classes</span>
-            </button>
-          )}
-
-          {/* Edit Selected Teacher */}
-          {activeTeacher && (
-            <button
-              type="button"
-              onClick={() => openEditModal(activeTeacher)}
-              title={`Edit ${activeTeacher.name}`}
-              aria-label={`Edit ${activeTeacher.name}`}
-              className="p-1.5 text-slate-400 hover:text-slate-700 hover:bg-slate-100 rounded-lg transition-colors cursor-pointer"
-            >
-              <Edit2 className="w-3.5 h-3.5" />
-            </button>
-          )}
-
-          {/* Delete Selected Teacher (if more than 1 teacher exists) */}
-          {activeTeacher && teachers.length > 1 && (
-            <button
-              type="button"
-              onClick={() => setConfirmDeleteTeacher(activeTeacher)}
-              title={`Delete ${activeTeacher.name}`}
-              aria-label={`Delete ${activeTeacher.name}`}
-              className="p-1.5 text-slate-400 hover:text-rose-600 hover:bg-rose-50 rounded-lg transition-colors cursor-pointer"
-            >
-              <Trash2 className="w-3.5 h-3.5" />
-            </button>
-          )}
-
-          <div className="hidden sm:block w-px h-4 bg-slate-200 mx-0.5" />
-
-          {/* Create New User Button */}
+        {/* Right: Desktop Primary Action */}
+        <div className="hidden lg:flex items-center gap-2 shrink-0">
           <button
             type="button"
             data-testid="open-create-teacher-btn"
             onClick={openCreateModal}
-            className="px-3 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-2xs transition-colors flex items-center gap-1 cursor-pointer whitespace-nowrap"
+            className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-xl transition-all duration-150 cursor-pointer shadow-[0_1px_2px_rgba(37,99,235,0.28),inset_0_1px_0_rgba(255,255,255,0.16)] active:scale-[0.99] whitespace-nowrap shrink-0"
           >
             <UserPlus className="w-3.5 h-3.5" />
             <span>Create User</span>
@@ -484,43 +557,40 @@ export default function TeacherAccessManager({
       </div>
 
       {/* ========================================================================
-          MODAL 1: CREATE NEW USER / EDIT TEACHER USER
+          MODAL 1: CREATE NEW USER / EDIT TEACHER USER (Minimalist & Clean)
          ======================================================================== */}
       {userModalMode && (
         <div
           onClick={(e) => {
             if (e.target === e.currentTarget) setUserModalMode(null);
           }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4 animate-in fade-in duration-150"
         >
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xl w-full max-w-lg p-5 space-y-4 animate-in zoom-in-95 duration-150 max-h-[90vh] overflow-y-auto">
+          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-[440px] p-5 space-y-4 animate-in zoom-in-95 duration-150">
+            {/* Minimal Header */}
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
-              <div>
-                <h3 className="text-sm font-semibold text-slate-900">
-                  {userModalMode === 'create' ? 'Create New Teacher User' : 'Edit Teacher User'}
-                </h3>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  Teachers can only see and edit marks/remarks for their mapped classes and subject. Class teachers can view all subjects in their class (view-only).
-                </p>
-              </div>
+              <h3 className="text-sm font-semibold text-slate-900 tracking-tight">
+                {userModalMode === 'create' ? 'New Teacher User' : 'Edit Teacher User'}
+              </h3>
               <button
                 type="button"
+                aria-label="Close modal"
                 onClick={() => setUserModalMode(null)}
-                className="p-1 text-slate-400 hover:text-slate-600 rounded-md hover:bg-slate-100 cursor-pointer"
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveUserForm} className="space-y-3.5">
+            <form onSubmit={handleSaveUserForm} className="space-y-3.5 text-xs">
               {/* Row 1: Name + Username */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
                   <label
                     htmlFor="teacher-name-input"
                     className="block text-[11px] font-medium text-slate-600 mb-1"
                   >
-                    Teacher Name
+                    Name
                   </label>
                   <input
                     id="teacher-name-input"
@@ -532,7 +602,7 @@ export default function TeacherAccessManager({
                     }}
                     placeholder="e.g. Anita Sharma"
                     autoFocus
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200/90 rounded-lg text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
+                    className={MODAL_INPUT_CLASS}
                   />
                 </div>
 
@@ -555,19 +625,19 @@ export default function TeacherAccessManager({
                     autoCapitalize="none"
                     autoCorrect="off"
                     spellCheck={false}
-                    className="w-full px-3 py-1.5 text-xs bg-white border border-slate-200/90 rounded-lg text-slate-900 font-mono focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
+                    className={`${MODAL_INPUT_CLASS} font-mono`}
                   />
                 </div>
               </div>
 
               {/* Row 2: Password + Assigned Subject */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
                   <label
                     htmlFor="teacher-password-input"
                     className="block text-[11px] font-medium text-slate-600 mb-1"
                   >
-                    {userModalMode === 'create' ? 'Password' : 'New Password (optional)'}
+                    {userModalMode === 'create' ? 'Password' : 'New Password'}
                   </label>
                   <div className="relative">
                     <input
@@ -579,11 +649,9 @@ export default function TeacherAccessManager({
                         if (formError) setFormError(null);
                       }}
                       placeholder={
-                        userModalMode === 'create'
-                          ? 'Enter password'
-                          : 'Leave blank to keep current'
+                        userModalMode === 'create' ? 'Enter password' : 'Unchanged'
                       }
-                      className="w-full pl-3 pr-8 py-1.5 text-xs bg-white border border-slate-200/90 rounded-lg text-slate-900 focus:outline-none focus:border-blue-500 focus:ring-2 focus:ring-blue-500/15"
+                      className={`${MODAL_INPUT_CLASS} pr-8`}
                     />
                     <button
                       type="button"
@@ -602,11 +670,14 @@ export default function TeacherAccessManager({
 
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Assigned Subject
+                    Subject
                   </label>
                   <CustomSelect
                     id="teacher-subject-select"
                     fullWidth
+                    matchTriggerWidth
+                    containerClassName={MODAL_SELECT_CONTAINER_CLASS}
+                    triggerClassName="text-xs font-medium text-slate-900 flex-1 min-w-0"
                     value={subjectInput}
                     onChange={(val) => setSubjectInput(val)}
                     options={subjectOptions.map((sub) => ({
@@ -617,31 +688,44 @@ export default function TeacherAccessManager({
                 </div>
               </div>
 
-              {/* Row 3: Class Teacher Option (with explicit "Not a Class Teacher" option) */}
+              {/* Row 3: Class Teacher Option */}
               <div>
-                <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                  Class Teacher (View-Only Access to All Subjects of Selected Class)
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] font-medium text-slate-600">
+                    Class Teacher
+                  </label>
+                  <span className="text-[11px] text-slate-400">
+                    View-only all subjects
+                  </span>
+                </div>
                 <CustomSelect
                   id="teacher-classteacher-select"
                   fullWidth
+                  matchTriggerWidth
+                  containerClassName={MODAL_SELECT_CONTAINER_CLASS}
+                  triggerClassName="text-xs font-medium text-slate-900 flex-1 min-w-0"
                   value={classTeacherInput}
                   onChange={(val) => setClassTeacherInput(val)}
                   options={classTeacherSelectOptions}
                 />
               </div>
 
-              {/* Row 4: Assigned Classes Mapped to Subject */}
+              {/* Row 4: Sleek Assigned Classes Tile Grid */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <label className="block text-[11px] font-medium text-slate-600">
-                    Assigned Classes for <span className="font-semibold text-slate-900">{subjectInput}</span> (Can Fill &amp; Edit Marks/Remarks)
-                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <label className="text-[11px] font-medium text-slate-600">
+                      Assigned Classes ({subjectInput})
+                    </label>
+                    <span className="text-[11px] text-slate-400 tabular-nums">
+                      · {assignedClassesInput.length}/{classes.length}
+                    </span>
+                  </div>
                   <div className="flex items-center gap-2 text-[11px]">
                     <button
                       type="button"
                       onClick={() => setAssignedClassesInput(classes.map((c) => c.section))}
-                      className="text-blue-600 hover:underline font-medium cursor-pointer"
+                      className="text-blue-600 hover:text-blue-700 font-medium cursor-pointer"
                     >
                       Select All
                     </button>
@@ -649,14 +733,14 @@ export default function TeacherAccessManager({
                     <button
                       type="button"
                       onClick={() => setAssignedClassesInput([])}
-                      className="text-slate-500 hover:text-slate-800 cursor-pointer"
+                      className="text-slate-400 hover:text-slate-700 cursor-pointer"
                     >
                       Clear
                     </button>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-0.5">
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-[168px] overflow-y-auto pr-0.5">
                   {classes.map((cls) => {
                     const checked = assignedClassesInput.some(
                       (c) => c.toLowerCase() === cls.section.toLowerCase()
@@ -674,22 +758,16 @@ export default function TeacherAccessManager({
                             setAssignedClassesInput
                           )
                         }
-                        className={`flex items-center justify-between px-2.5 py-2 rounded-xl border text-xs font-medium transition-all cursor-pointer ${
+                        className={`h-8 px-2.5 rounded-lg border text-xs flex items-center justify-between gap-1.5 transition-all duration-120 cursor-pointer ${
                           checked
-                            ? 'bg-blue-50/90 border-blue-500 text-blue-900 shadow-2xs'
-                            : 'bg-white border-slate-200/90 text-slate-700 hover:bg-slate-50'
+                            ? 'bg-blue-50/90 border-blue-500/90 text-blue-700 font-semibold shadow-[0_1px_2px_rgba(37,99,235,0.08)]'
+                            : 'bg-slate-50/60 hover:bg-slate-100/75 border-slate-200/80 text-slate-600 hover:text-slate-900 font-medium'
                         }`}
                       >
                         <span className="truncate">{label}</span>
-                        <span
-                          className={`w-4 h-4 rounded flex items-center justify-center border shrink-0 ${
-                            checked
-                              ? 'bg-blue-600 border-blue-600 text-white'
-                              : 'border-slate-300 bg-white'
-                          }`}
-                        >
-                          {checked && <Check className="w-3 h-3 stroke-[2.5]" />}
-                        </span>
+                        {checked && (
+                          <Check className="w-3.5 h-3.5 text-blue-600 shrink-0 stroke-[2.5]" />
+                        )}
                       </button>
                     );
                   })}
@@ -697,16 +775,16 @@ export default function TeacherAccessManager({
               </div>
 
               {formError && (
-                <p className="text-xs text-rose-600 bg-rose-50 border border-rose-200/80 rounded-lg px-2.5 py-1.5">
+                <p className="text-xs text-rose-600 bg-rose-50/90 border border-rose-200/80 rounded-lg px-2.5 py-1.5">
                   {formError}
                 </p>
               )}
 
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <div className="flex items-center justify-end gap-2 pt-2.5 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setUserModalMode(null)}
-                  className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100 cursor-pointer"
+                  className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
                 >
                   Cancel
                 </button>
@@ -714,7 +792,7 @@ export default function TeacherAccessManager({
                   type="submit"
                   data-testid="submit-teacher-user-btn"
                   disabled={isSaving}
-                  className="px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 rounded-lg shadow-2xs cursor-pointer"
+                  className="px-4 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 rounded-lg shadow-xs transition-colors cursor-pointer"
                 >
                   {isSaving
                     ? 'Saving...'
@@ -729,37 +807,33 @@ export default function TeacherAccessManager({
       )}
 
       {/* ========================================================================
-          MODAL 2: MAP TEACHER WITH ASSIGNED CLASSES (JUST THEIR SUBJECT)
+          MODAL 2: MAP TEACHER WITH ASSIGNED CLASSES (Minimalist & Clean)
          ======================================================================== */}
       {isMapModalOpen && (
         <div
           onClick={(e) => {
             if (e.target === e.currentTarget) setIsMapModalOpen(false);
           }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4 animate-in fade-in duration-150"
         >
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xl w-full max-w-lg p-5 space-y-4 animate-in zoom-in-95 duration-150">
+          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-[440px] p-5 space-y-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-2.5 border-b border-slate-100">
-              <div>
-                <h3 className="text-sm font-semibold text-slate-900">
-                  Map Teacher with Assigned Classes
-                </h3>
-                <p className="text-[11px] text-slate-500 mt-0.5">
-                  Assign which classes this teacher teaches for their subject. They will only see and fill marks &amp; remarks for their mapped classes and subject.
-                </p>
-              </div>
+              <h3 className="text-sm font-semibold text-slate-900 tracking-tight">
+                Map Teacher with Assigned Classes
+              </h3>
               <button
                 type="button"
+                aria-label="Close modal"
                 onClick={() => setIsMapModalOpen(false)}
-                className="p-1 text-slate-400 hover:text-slate-600 rounded-md hover:bg-slate-100 cursor-pointer"
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
             </div>
 
-            <form onSubmit={handleSaveClassMapping} className="space-y-3.5">
-              {/* Row 1: Select Teacher + Their Subject */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <form onSubmit={handleSaveClassMapping} className="space-y-3.5 text-xs">
+              {/* Row 1: Select Teacher + Subject */}
+              <div className="grid grid-cols-2 gap-2.5">
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
                     Teacher
@@ -767,6 +841,9 @@ export default function TeacherAccessManager({
                   <CustomSelect
                     id="map-teacher-select"
                     fullWidth
+                    matchTriggerWidth
+                    containerClassName={MODAL_SELECT_CONTAINER_CLASS}
+                    triggerClassName="text-xs font-medium text-slate-900 flex-1 min-w-0"
                     value={mapTargetUsername}
                     onChange={(val) => handleSwitchMapTargetTeacher(val)}
                     options={teachers.map((t) => ({
@@ -778,11 +855,14 @@ export default function TeacherAccessManager({
 
                 <div>
                   <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                    Assigned Subject (Just Their Subject)
+                    Assigned Subject
                   </label>
                   <CustomSelect
                     id="map-subject-select"
                     fullWidth
+                    matchTriggerWidth
+                    containerClassName={MODAL_SELECT_CONTAINER_CLASS}
+                    triggerClassName="text-xs font-medium text-slate-900 flex-1 min-w-0"
                     value={mapSubject}
                     onChange={(val) => setMapSubject(val)}
                     options={subjectOptions.map((sub) => ({
@@ -793,17 +873,22 @@ export default function TeacherAccessManager({
                 </div>
               </div>
 
-              {/* Row 2: Mapped Classes Checkboxes */}
+              {/* Row 2: Mapped Classes Tile Grid */}
               <div className="space-y-1.5">
                 <div className="flex items-center justify-between">
-                  <label className="block text-[11px] font-medium text-slate-600">
-                    Mapped Classes for <span className="font-semibold text-slate-900">{mapSubject}</span>
-                  </label>
+                  <div className="flex items-center gap-1.5">
+                    <label className="text-[11px] font-medium text-slate-600">
+                      Mapped Classes ({mapSubject})
+                    </label>
+                    <span className="text-[11px] text-slate-400 tabular-nums">
+                      · {mapClasses.length}/{classes.length}
+                    </span>
+                  </div>
                   <div className="flex items-center gap-2 text-[11px]">
                     <button
                       type="button"
                       onClick={() => setMapClasses(classes.map((c) => c.section))}
-                      className="text-blue-600 hover:underline font-medium cursor-pointer"
+                      className="text-blue-600 hover:text-blue-700 font-medium cursor-pointer"
                     >
                       Select All
                     </button>
@@ -811,14 +896,14 @@ export default function TeacherAccessManager({
                     <button
                       type="button"
                       onClick={() => setMapClasses([])}
-                      className="text-slate-500 hover:text-slate-800 cursor-pointer"
+                      className="text-slate-400 hover:text-slate-700 cursor-pointer"
                     >
                       Clear
                     </button>
                   </div>
                 </div>
 
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 pt-0.5">
+                <div className="grid grid-cols-3 sm:grid-cols-4 gap-1.5 max-h-[168px] overflow-y-auto pr-0.5">
                   {classes.map((cls) => {
                     const checked = mapClasses.some(
                       (c) => c.toLowerCase() === cls.section.toLowerCase()
@@ -832,36 +917,38 @@ export default function TeacherAccessManager({
                         onClick={() =>
                           toggleClassInList(cls.section, mapClasses, setMapClasses)
                         }
-                        className={`flex items-center justify-between px-2.5 py-2 rounded-xl border text-xs font-medium transition-all cursor-pointer ${
+                        className={`h-8 px-2.5 rounded-lg border text-xs flex items-center justify-between gap-1.5 transition-all duration-120 cursor-pointer ${
                           checked
-                            ? 'bg-blue-50/90 border-blue-500 text-blue-900 shadow-2xs'
-                            : 'bg-white border-slate-200/90 text-slate-700 hover:bg-slate-50'
+                            ? 'bg-blue-50/90 border-blue-500/90 text-blue-700 font-semibold shadow-[0_1px_2px_rgba(37,99,235,0.08)]'
+                            : 'bg-slate-50/60 hover:bg-slate-100/75 border-slate-200/80 text-slate-600 hover:text-slate-900 font-medium'
                         }`}
                       >
                         <span className="truncate">{label}</span>
-                        <span
-                          className={`w-4 h-4 rounded flex items-center justify-center border shrink-0 ${
-                            checked
-                              ? 'bg-blue-600 border-blue-600 text-white'
-                              : 'border-slate-300 bg-white'
-                          }`}
-                        >
-                          {checked && <Check className="w-3 h-3 stroke-[2.5]" />}
-                        </span>
+                        {checked && (
+                          <Check className="w-3.5 h-3.5 text-blue-600 shrink-0 stroke-[2.5]" />
+                        )}
                       </button>
                     );
                   })}
                 </div>
               </div>
 
-              {/* Row 3: Class Teacher Option */}
+              {/* Row 3: Class Teacher Assignment */}
               <div>
-                <label className="block text-[11px] font-medium text-slate-600 mb-1">
-                  Class Teacher Assignment
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-[11px] font-medium text-slate-600">
+                    Class Teacher
+                  </label>
+                  <span className="text-[11px] text-slate-400">
+                    View-only all subjects
+                  </span>
+                </div>
                 <CustomSelect
                   id="map-classteacher-select"
                   fullWidth
+                  matchTriggerWidth
+                  containerClassName={MODAL_SELECT_CONTAINER_CLASS}
+                  triggerClassName="text-xs font-medium text-slate-900 flex-1 min-w-0"
                   value={mapClassTeacher}
                   onChange={(val) => setMapClassTeacher(val)}
                   options={classTeacherSelectOptions}
@@ -869,16 +956,16 @@ export default function TeacherAccessManager({
               </div>
 
               {mapError && (
-                <p className="text-xs text-rose-600 bg-rose-50 border border-rose-200/80 rounded-lg px-2.5 py-1.5">
+                <p className="text-xs text-rose-600 bg-rose-50/90 border border-rose-200/80 rounded-lg px-2.5 py-1.5">
                   {mapError}
                 </p>
               )}
 
-              <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-100">
+              <div className="flex items-center justify-end gap-2 pt-2.5 border-t border-slate-100">
                 <button
                   type="button"
                   onClick={() => setIsMapModalOpen(false)}
-                  className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100 cursor-pointer"
+                  className="px-3 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 rounded-lg hover:bg-slate-100 transition-colors cursor-pointer"
                 >
                   Cancel
                 </button>
@@ -886,7 +973,7 @@ export default function TeacherAccessManager({
                   type="submit"
                   data-testid="save-class-mapping-btn"
                   disabled={isSaving}
-                  className="px-4 py-1.5 text-xs font-semibold text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 rounded-lg shadow-2xs cursor-pointer"
+                  className="px-4 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 disabled:bg-blue-400 rounded-lg shadow-xs transition-colors cursor-pointer"
                 >
                   {isSaving ? 'Saving...' : 'Save Mapping'}
                 </button>
@@ -904,15 +991,16 @@ export default function TeacherAccessManager({
           onClick={(e) => {
             if (e.target === e.currentTarget) setConfirmDeleteTeacher(null);
           }}
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/30 backdrop-blur-xs p-4 animate-in fade-in duration-150"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/35 backdrop-blur-[2px] p-4 animate-in fade-in duration-150"
         >
-          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-xl w-full max-w-sm p-5 space-y-4 animate-in zoom-in-95 duration-150">
+          <div className="bg-white border border-slate-200/90 rounded-2xl shadow-[0_24px_60px_-15px_rgba(15,23,42,0.22)] w-full max-w-sm p-5 space-y-4 animate-in zoom-in-95 duration-150">
             <div className="flex items-center justify-between pb-2 border-b border-slate-100">
               <h3 className="text-sm font-semibold text-slate-900">Remove Teacher User</h3>
               <button
                 type="button"
+                aria-label="Close modal"
                 onClick={() => setConfirmDeleteTeacher(null)}
-                className="p-1 text-slate-400 hover:text-slate-600 rounded-md hover:bg-slate-100 cursor-pointer"
+                className="p-1 text-slate-400 hover:text-slate-600 rounded-lg hover:bg-slate-100 cursor-pointer"
               >
                 <X className="w-4 h-4" />
               </button>
@@ -934,7 +1022,7 @@ export default function TeacherAccessManager({
                 type="button"
                 onClick={handleDeleteTeacherConfirm}
                 disabled={isSaving}
-                className="px-4 py-1.5 text-xs font-semibold text-white bg-rose-600 hover:bg-rose-700 rounded-lg shadow-2xs cursor-pointer"
+                className="px-3.5 py-1.5 text-xs font-medium text-white bg-rose-600 hover:bg-rose-700 rounded-lg shadow-xs cursor-pointer"
               >
                 Remove User
               </button>
