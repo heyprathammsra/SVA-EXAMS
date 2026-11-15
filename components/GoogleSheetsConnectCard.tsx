@@ -92,7 +92,7 @@ export default function GoogleSheetsConnectCard({
             Google Sheets Auto-Sync
           </h2>
           <div className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-500 tabular-nums">
-            <span>Auto-sync every 10s</span>
+            <span>Instant server sync</span>
             <span aria-hidden="true">&middot;</span>
             <span>{displayStudentCount} students</span>
             <span aria-hidden="true">&middot;</span>
@@ -106,7 +106,7 @@ export default function GoogleSheetsConnectCard({
             ) : sheetsSyncStatus === 'error' ? (
               <span className="inline-flex items-center gap-1 text-rose-600 font-medium">
                 <AlertCircle className="w-3 h-3" />
-                <span>Retry in 10s</span>
+                <span>Auto-retry queued</span>
               </span>
             ) : (
               <span className="inline-flex items-center gap-1 text-emerald-700 font-medium">

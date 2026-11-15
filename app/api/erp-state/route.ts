@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import {
   getAuthSessionSecret,
   getStoredTeacherAccountsForBackup,
@@ -13,47 +11,24 @@ import { getRequestAuthSession } from '@/lib/auth-server';
 import { PersistedErpState } from '@/lib/erp-persistence';
 import { computeStateHmac, sanitizeAndValidateErpState } from '@/lib/erp-security';
 import {
+  deleteServerStateFile,
+  hydrateServerStateIfCold,
+  mirrorStateToFirestoreAdminIfAvailable,
+  publishErpEvent,
+  withServerStateLock,
+  writeServerStateFile,
+} from '@/lib/server-erp-store';
+import {
+  enqueueServerSheetSync,
+  getServerSyncStatusSnapshot,
+} from '@/lib/server-sheet-sync';
+import {
   primeCachedCloudSnapshot,
   pullCloudBackupFromGoogleSheet,
   pushCloudBackupToGoogleSheet,
 } from '@/lib/sheets-cloud-store';
 
 export const dynamic = 'force-dynamic';
-
-const DATA_DIR = path.join(process.cwd(), '.data');
-const STATE_FILE = path.join(DATA_DIR, 'erp-state.json');
-
-let stateFileLock: Promise<unknown> = Promise.resolve();
-
-function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
-  const next = stateFileLock.then(fn, fn);
-  stateFileLock = next.then(
-    () => undefined,
-    () => undefined
-  );
-  return next;
-}
-
-async function readLocalStateFile(): Promise<PersistedErpState | null> {
-  try {
-    const raw = await readFile(STATE_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    if (parsed && typeof parsed === 'object' && parsed.initialized) {
-      return parsed as PersistedErpState;
-    }
-    return null;
-  } catch {
-    return null;
-  }
-}
-
-async function writeLocalStateFile(stateToPersist: any): Promise<void> {
-  await mkdir(DATA_DIR, { recursive: true });
-  const nowMs = Date.now();
-  const tmpFile = `${STATE_FILE}.${nowMs}.${Math.random().toString(36).slice(2)}.tmp`;
-  await writeFile(tmpFile, JSON.stringify(stateToPersist), 'utf8');
-  await rename(tmpFile, STATE_FILE);
-}
 
 export async function GET(req: NextRequest) {
   const session = getRequestAuthSession(req);
@@ -62,29 +37,11 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    let localState = await readLocalStateFile();
-
-    // Only block on Google Sheets when local disk state is missing (cold start)
-    if (!localState) {
-      const cloudBackup = await pullCloudBackupFromGoogleSheet({
-        force: true,
-      });
-
-      if (
-        !hasLocalUsersFile() &&
-        shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloudBackup)
-      ) {
-        restoreTeacherAccountsFromBackup(cloudBackup!.teachers);
-      }
-
-      if (cloudBackup?.state && cloudBackup.state.initialized) {
-        localState = cloudBackup.state;
-        await writeLocalStateFile(localState).catch(() => {});
-      }
-    }
+    const localState = await hydrateServerStateIfCold();
 
     const teacherProfile =
       session.role === 'teacher' ? getTeacherProfileByUsername(session.sub) : null;
+    const syncStatus = await getServerSyncStatusSnapshot();
 
     if (!localState) {
       return NextResponse.json({
@@ -92,6 +49,7 @@ export async function GET(req: NextRequest) {
         state: null,
         role: session.role,
         teacherProfile,
+        syncStatus,
       });
     }
 
@@ -100,6 +58,7 @@ export async function GET(req: NextRequest) {
       state: localState,
       role: session.role,
       teacherProfile,
+      syncStatus,
     });
   } catch {
     const teacherProfile =
@@ -140,8 +99,16 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    const result = await withStateLock(async () => {
-      let existingParsed = await readLocalStateFile();
+    const gasUrl = typeof body.gasUrl === 'string' ? body.gasUrl : undefined;
+    const dirtyExams = Array.isArray(body.dirtyExams)
+      ? body.dirtyExams.filter((x: unknown): x is string => typeof x === 'string')
+      : typeof incomingState.selectedExam === 'string'
+      ? [incomingState.selectedExam]
+      : [];
+    const fullSheetSync = Boolean(body.fullSheetSync);
+
+    const result = await withServerStateLock(async () => {
+      let existingParsed = await hydrateServerStateIfCold();
       if (!existingParsed) {
         const cloudBackup = await pullCloudBackupFromGoogleSheet({
           force: true,
@@ -181,7 +148,7 @@ export async function POST(req: NextRequest) {
         integrityHmac: computeStateHmac(sanitizedState, getAuthSessionSecret()),
       };
 
-      await writeLocalStateFile(stateToPersist);
+      await writeServerStateFile(stateToPersist);
 
       const currentTeachers = getStoredTeacherAccountsForBackup();
       primeCachedCloudSnapshot({
@@ -190,20 +157,31 @@ export async function POST(req: NextRequest) {
         nowMs,
       });
 
-      // Mirror state + teacher accounts to Google Sheets cloud store asynchronously in background
-      void pushCloudBackupToGoogleSheet(
-        stateToPersist as PersistedErpState,
-        currentTeachers,
-        undefined,
-        { authoritativeTeachers: false }
-      ).catch(() => {});
+      void mirrorStateToFirestoreAdminIfAvailable(stateToPersist as PersistedErpState).catch(
+        () => {}
+      );
 
       return sanitizedState.updatedAt;
+    });
+
+    publishErpEvent({
+      type: 'erp_update',
+      updatedAt: result,
+      dirtyExams,
+      actor: session.sub,
+    });
+
+    const syncStatus = await enqueueServerSheetSync({
+      examIds: dirtyExams,
+      fullSync: fullSheetSync,
+      cloudBackup: true,
+      gasUrl,
     });
 
     return NextResponse.json({
       success: true,
       updatedAt: result,
+      syncStatus,
     });
   } catch (err: any) {
     return NextResponse.json(
@@ -225,20 +203,23 @@ export async function DELETE(req: NextRequest) {
     );
   }
   try {
-    await unlink(STATE_FILE);
+    await deleteServerStateFile();
   } catch (err: any) {
-    if (err?.code !== 'ENOENT') {
-      return NextResponse.json(
-        { success: false, error: err?.message || 'Failed to clear ERP state' },
-        { status: 500 }
-      );
-    }
+    return NextResponse.json(
+      { success: false, error: err?.message || 'Failed to clear ERP state' },
+      { status: 500 }
+    );
   }
   const currentTeachers = getStoredTeacherAccountsForBackup();
   primeCachedCloudSnapshot({
     state: null,
     teachers: currentTeachers,
     nowMs: Date.now(),
+  });
+  publishErpEvent({
+    type: 'erp_update',
+    updatedAt: Date.now(),
+    actor: session.sub,
   });
   void pushCloudBackupToGoogleSheet(null, currentTeachers, undefined, {
     allowNullState: true,

@@ -3,6 +3,7 @@
   "appId": "1:619496618057:web:44f36c6414c583f6bce798",
   "apiKey": "AIzaSyBBch8hYDI7IKOzyJIDJla5jkpA3B7PdZ0",
   "authDomain": "gen-lang-client-0546472751.firebaseapp.com",
+  "firestoreDatabaseId": "ai-studio-svaexams-a4b854e2-b8b4-432e-917d-f714938fc531",
   "storageBucket": "gen-lang-client-0546472751.firebasestorage.app",
   "messagingSenderId": "619496618057",
   "measurementId": "",

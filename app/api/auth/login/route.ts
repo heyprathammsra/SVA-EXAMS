@@ -11,7 +11,7 @@ import {
   getStoredTeacherAccountsForBackup,
   recordLoginFailure,
   restoreTeacherAccountsFromBackup,
-  shouldRestoreTeachersFromCloud,
+  shouldApplyCloudTeachersOnLogin,
 } from '@/lib/auth';
 import { getRequestClientKey, isHttpsRequest } from '@/lib/auth-server';
 import { pullCloudBackupFromGoogleSheet } from '@/lib/sheets-cloud-store';
@@ -67,8 +67,7 @@ export async function POST(req: NextRequest) {
         if (
           cloud?.teachers &&
           cloud.teachers.length > 0 &&
-          (!authResult.authenticated ||
-            shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloud))
+          shouldApplyCloudTeachersOnLogin(getStoredTeacherAccountsForBackup(), cloud)
         ) {
           restoreTeacherAccountsFromBackup(cloud.teachers);
           authResult = authenticateUserCredentials(username, password);

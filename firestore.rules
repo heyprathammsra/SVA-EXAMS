@@ -1,0 +1,246 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // 1. Global Safety Net (Default Deny)
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // 2. Hardened Global Primitives
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isVerified() {
+      return isSignedIn() && request.auth.token.email_verified == true;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isAdmin() {
+      return isVerified() && (
+        exists(/databases/$(database)/documents/admins/$(request.auth.uid)) ||
+        request.auth.token.email == 'sujal12mishra@gmail.com'
+      );
+    }
+
+    function isOwner(uid) {
+      return isSignedIn() && request.auth.uid == uid;
+    }
+
+    // 3. Validation Blueprints
+    function isValidUserAccount(data) {
+      return data is map &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 200 &&
+        (!('displayName' in data) || (data.displayName is string && data.displayName.size() >= 1 && data.displayName.size() <= 120)) &&
+        data.role in ['admin', 'teacher'] &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidAdminRole(data) {
+      return data is map &&
+        data.uid is string && data.uid.size() >= 1 && data.uid.size() <= 128 &&
+        data.uid.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.email is string && data.email.size() >= 3 && data.email.size() <= 200 &&
+        data.grantedAt is timestamp;
+    }
+
+    function isValidErpConfig(data) {
+      return data is map &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 64 &&
+        data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.selectedClass is string && data.selectedClass.size() >= 1 && data.selectedClass.size() <= 60 &&
+        data.selectedExam is string && data.selectedExam.size() >= 1 && data.selectedExam.size() <= 60 &&
+        data.classes is list && data.classes.size() <= 50 &&
+        (data.classes.size() == 0 || data.classes[0] is map) &&
+        data.examConfigs is map &&
+        data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidStudentRecord(data) {
+      return data is map &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 80 &&
+        data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.rollNo is string && data.rollNo.size() >= 1 && data.rollNo.size() <= 20 &&
+        data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
+        data.section is string && data.section.size() >= 1 && data.section.size() <= 60 &&
+        (!('dob' in data) || (data.dob is string && data.dob.size() <= 40)) &&
+        (!('fatherName' in data) || (data.fatherName is string && data.fatherName.size() <= 120)) &&
+        (!('motherName' in data) || (data.motherName is string && data.motherName.size() <= 120)) &&
+        (!('house' in data) || (data.house is string && data.house.size() <= 60)) &&
+        (!('height' in data) || (data.height is string && data.height.size() <= 20)) &&
+        (!('weight' in data) || (data.weight is string && data.weight.size() <= 20)) &&
+        (!('attendance' in data) || (data.attendance is string && data.attendance.size() <= 30)) &&
+        (!('customRemarks' in data) || (data.customRemarks is string && data.customRemarks.size() <= 500)) &&
+        data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidExamMarkEntry(data) {
+      return data is map &&
+        data.id is string && data.id.size() >= 1 && data.id.size() <= 128 &&
+        data.id.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.studentId is string && data.studentId.size() >= 1 && data.studentId.size() <= 80 &&
+        data.studentId.matches('^[a-zA-Z0-9_\\-]+$') &&
+        data.examId is string && data.examId.size() >= 1 && data.examId.size() <= 60 &&
+        data.section is string && data.section.size() >= 1 && data.section.size() <= 60 &&
+        data.subject is string && data.subject.size() >= 1 && data.subject.size() <= 60 &&
+        data.scoreType in ['numeric', 'AB', 'empty'] &&
+        (!('numericValue' in data) || (data.numericValue is number && data.numericValue >= 0 && data.numericValue <= 1000)) &&
+        (!('breakdown' in data) || data.breakdown is map) &&
+        data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128 &&
+        data.updatedAt is timestamp;
+    }
+
+    function isValidSheetSyncQueueItem(data) {
+      return data is map &&
+        data.examId is string && data.examId.size() >= 1 && data.examId.size() <= 60 &&
+        data.status in ['pending', 'syncing', 'synced', 'error'] &&
+        data.updatedByUid is string && data.updatedByUid.size() >= 1 && data.updatedByUid.size() <= 128 &&
+        data.updatedAt is timestamp;
+    }
+
+    // 4. Collection Rules
+
+    // /users/{userId} - Owner or Admin only (PII isolation)
+    match /users/{userId} {
+      allow get: if isValidId(userId) && (isOwner(userId) || isAdmin());
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow create: if isValidId(userId) && isVerified() &&
+        isValidUserAccount(incoming()) &&
+        incoming().keys().hasAll(['uid', 'email', 'role', 'createdAt', 'updatedAt']) &&
+        incoming().keys().hasOnly(['uid', 'email', 'displayName', 'role', 'createdAt', 'updatedAt']) &&
+        incoming().uid == request.auth.uid &&
+        userId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        (incoming().role == 'teacher' || isAdmin());
+      allow update: if isValidId(userId) && isVerified() &&
+        isValidUserAccount(incoming()) &&
+        incoming().uid == existing().uid &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'role', 'updatedAt'])) ||
+          (isOwner(userId) && incoming().role == existing().role &&
+            incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'updatedAt']))
+        );
+      allow delete: if isValidId(userId) && isAdmin();
+    }
+
+    // /admins/{adminId} - Strictly managed by verified admins
+    match /admins/{adminId} {
+      allow get: if isValidId(adminId) && (isOwner(adminId) || isAdmin());
+      allow list: if isSignedIn() && resource.data.uid == request.auth.uid;
+      allow create: if isValidId(adminId) && isAdmin() &&
+        isValidAdminRole(incoming()) &&
+        incoming().keys().hasAll(['uid', 'email', 'grantedAt']) &&
+        incoming().keys().hasOnly(['uid', 'email', 'grantedAt']) &&
+        incoming().grantedAt == request.time;
+      allow update: if false;
+      allow delete: if isValidId(adminId) && isAdmin();
+    }
+
+    // /erp_meta/{configId} - Classes and exam structure
+    match /erp_meta/{configId} {
+      allow get: if isValidId(configId) && isVerified();
+      allow list: if isSignedIn() && resource.data.updatedByUid == request.auth.uid;
+      allow create: if isValidId(configId) && isAdmin() &&
+        isValidErpConfig(incoming()) &&
+        incoming().keys().hasAll(['id', 'selectedClass', 'selectedExam', 'classes', 'examConfigs', 'updatedByUid', 'updatedAt']) &&
+        incoming().keys().hasOnly(['id', 'selectedClass', 'selectedExam', 'classes', 'examConfigs', 'updatedByUid', 'updatedAt']) &&
+        incoming().id == configId &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(configId) && isAdmin() &&
+        isValidErpConfig(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['selectedClass', 'selectedExam', 'classes', 'examConfigs', 'updatedByUid', 'updatedAt']);
+      allow delete: if isValidId(configId) && isAdmin();
+    }
+
+    // /students/{studentId} - Student roster
+    match /students/{studentId} {
+      allow get: if isValidId(studentId) && isVerified();
+      allow list: if isSignedIn() && resource.data.updatedByUid == request.auth.uid;
+      allow create: if isValidId(studentId) && isVerified() &&
+        isValidStudentRecord(incoming()) &&
+        incoming().keys().hasAll(['id', 'rollNo', 'name', 'section', 'updatedByUid', 'updatedAt']) &&
+        incoming().keys().hasOnly(['id', 'rollNo', 'name', 'section', 'dob', 'fatherName', 'motherName', 'house', 'height', 'weight', 'attendance', 'customRemarks', 'updatedByUid', 'updatedAt']) &&
+        incoming().id == studentId &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(studentId) && isVerified() &&
+        isValidStudentRecord(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        (
+          (isAdmin() && incoming().diff(existing()).affectedKeys().hasOnly(['rollNo', 'name', 'section', 'dob', 'fatherName', 'motherName', 'house', 'height', 'weight', 'attendance', 'customRemarks', 'updatedByUid', 'updatedAt'])) ||
+          (incoming().diff(existing()).affectedKeys().hasOnly(['rollNo', 'name', 'dob', 'fatherName', 'motherName', 'house', 'height', 'weight', 'attendance', 'updatedByUid', 'updatedAt']))
+        );
+      allow delete: if isValidId(studentId) && isAdmin();
+    }
+
+    // /exam_marks/{markId} - Granular instant mark commits
+    match /exam_marks/{markId} {
+      allow get: if isValidId(markId) && isVerified();
+      allow list: if isSignedIn() && resource.data.updatedByUid == request.auth.uid;
+      allow create: if isValidId(markId) && isVerified() &&
+        isValidExamMarkEntry(incoming()) &&
+        incoming().keys().hasAll(['id', 'studentId', 'examId', 'section', 'subject', 'scoreType', 'updatedByUid', 'updatedAt']) &&
+        incoming().keys().hasOnly(['id', 'studentId', 'examId', 'section', 'subject', 'scoreType', 'numericValue', 'breakdown', 'updatedByUid', 'updatedAt']) &&
+        incoming().id == markId &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/students/$(incoming().studentId));
+      allow update: if isValidId(markId) && isVerified() &&
+        isValidExamMarkEntry(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().studentId == existing().studentId &&
+        incoming().examId == existing().examId &&
+        incoming().subject == existing().subject &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        exists(/databases/$(database)/documents/students/$(incoming().studentId)) &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['scoreType', 'numericValue', 'breakdown', 'section', 'updatedByUid', 'updatedAt']);
+      allow delete: if isValidId(markId) && isAdmin();
+    }
+
+    // /sync_queue/{examId} - Server Google Sheets sync tracking
+    match /sync_queue/{examId} {
+      allow get: if isValidId(examId) && isVerified();
+      allow list: if isSignedIn() && resource.data.updatedByUid == request.auth.uid;
+      allow create: if isValidId(examId) && isVerified() &&
+        isValidSheetSyncQueueItem(incoming()) &&
+        incoming().keys().hasAll(['examId', 'status', 'updatedByUid', 'updatedAt']) &&
+        incoming().keys().hasOnly(['examId', 'status', 'updatedByUid', 'updatedAt']) &&
+        incoming().examId == examId &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time;
+      allow update: if isValidId(examId) && isVerified() &&
+        isValidSheetSyncQueueItem(incoming()) &&
+        incoming().examId == existing().examId &&
+        incoming().updatedByUid == request.auth.uid &&
+        incoming().updatedAt == request.time &&
+        incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedByUid', 'updatedAt']);
+      allow delete: if isValidId(examId) && isAdmin();
+    }
+  }
+}

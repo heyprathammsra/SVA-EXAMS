@@ -40,7 +40,7 @@
       }
     ],
     "createdAt": 1700000000000,
-    "updatedAt": 1794747192049,
+    "updatedAt": 1794757042623,
     "passwordHashHex": "4c78b327e40c997d386f4dd864ef8cc15b56ec4e3afd853f9e378b41228c9b52"
   },
   {
@@ -64,7 +64,31 @@
       }
     ],
     "createdAt": 1794741442055,
-    "updatedAt": 1794747162366,
-    "passwordHashHex": "6e07502224858539b262ce6aacc9154ee1f788fec887af8be5e27c2a3dcfae84"
+    "updatedAt": 1794756648894,
+    "passwordHashHex": "4c78b327e40c997d386f4dd864ef8cc15b56ec4e3afd853f9e378b41228c9b52"
+  },
+  {
+    "id": "teacher-demo2-1794756689605",
+    "name": "demo2",
+    "username": "demo2",
+    "assignedSubject": "English",
+    "assignedClasses": [
+      "Sparkle",
+      "Twinkle"
+    ],
+    "classTeacherOf": null,
+    "assignments": [
+      {
+        "section": "Sparkle",
+        "subject": "English"
+      },
+      {
+        "section": "Twinkle",
+        "subject": "English"
+      }
+    ],
+    "createdAt": 1794756689605,
+    "updatedAt": 1794756689605,
+    "passwordHashHex": "4c78b327e40c997d386f4dd864ef8cc15b56ec4e3afd853f9e378b41228c9b52"
   }
 ]

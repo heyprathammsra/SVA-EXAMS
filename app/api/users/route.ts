@@ -1,83 +1,50 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
-import path from 'node:path';
 import {
   deleteTeacherUser,
   getStoredTeacherAccountsForBackup,
   hasLocalUsersFile,
   listTeacherUsers,
-  restoreTeacherAccountsFromBackup,
-  shouldRestoreTeachersFromCloud,
   syncTeacherMappingsOnClassDelete,
   syncTeacherMappingsOnClassRename,
   syncTeacherMappingsOnSubjectRename,
   upsertTeacherUser,
 } from '@/lib/auth';
 import { getRequestAuthSession } from '@/lib/auth-server';
-import { PersistedErpState } from '@/lib/erp-persistence';
 import {
-  getCachedCloudPayload,
-  primeCachedCloudSnapshot,
-  pullCloudBackupFromGoogleSheet,
-  pushCloudBackupToGoogleSheet,
-} from '@/lib/sheets-cloud-store';
+  hydrateServerStateIfCold,
+  publishErpEvent,
+} from '@/lib/server-erp-store';
+import { enqueueServerSheetSync } from '@/lib/server-sheet-sync';
+import { primeCachedCloudSnapshot } from '@/lib/sheets-cloud-store';
 
 export const dynamic = 'force-dynamic';
-
-const DATA_DIR = path.join(process.cwd(), '.data');
-const STATE_FILE = path.join(DATA_DIR, 'erp-state.json');
-
-async function readLocalStateFile(): Promise<PersistedErpState | null> {
-  try {
-    const raw = await readFile(STATE_FILE, 'utf8');
-    const parsed = JSON.parse(raw);
-    return parsed && typeof parsed === 'object' && parsed.initialized
-      ? (parsed as PersistedErpState)
-      : null;
-  } catch {
-    return null;
-  }
-}
-
-async function writeLocalStateFile(state: PersistedErpState): Promise<void> {
-  await mkdir(DATA_DIR, { recursive: true });
-  const tmpFile = `${STATE_FILE}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
-  await writeFile(tmpFile, JSON.stringify(state), 'utf8');
-  await rename(tmpFile, STATE_FILE);
-}
 
 async function hydrateTeachersFromCloudIfCold(): Promise<void> {
   if (hasLocalUsersFile()) {
     return;
   }
-  const localState = await readLocalStateFile();
-  const cloud = await pullCloudBackupFromGoogleSheet({ force: true });
-  if (shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloud)) {
-    restoreTeacherAccountsFromBackup(cloud!.teachers);
-  }
-  if (
-    !localState &&
-    cloud?.state?.initialized
-  ) {
-    await writeLocalStateFile(cloud.state).catch(() => {});
-  }
+  await hydrateServerStateIfCold();
 }
 
-function mirrorTeachersToGoogleSheetInBackground(): void {
+async function syncTeachersToGoogleSheet(): Promise<void> {
   const currentTeachers = getStoredTeacherAccountsForBackup();
   primeCachedCloudSnapshot({ teachers: currentTeachers });
-  void (async () => {
-    try {
-      const localState = await readLocalStateFile();
-      const stateToPush = localState ?? getCachedCloudPayload()?.state ?? null;
-      await pushCloudBackupToGoogleSheet(
-        stateToPush,
-        currentTeachers,
-        undefined,
-        { authoritativeTeachers: true }
-      );
-    } catch {}
-  })();
+  publishErpEvent({ type: 'users_update', updatedAt: Date.now() });
+  const syncPromise = hydrateServerStateIfCold()
+    .catch(() => null)
+    .then(() =>
+      enqueueServerSheetSync({
+        cloudBackup: true,
+        teachersAuthoritative: true,
+        awaitResult: true,
+      })
+    )
+    .catch(() => null);
+
+  await Promise.race([
+    syncPromise,
+    new Promise<void>((resolve) => setTimeout(resolve, 4500)),
+  ]);
 }
 
 function requireAdmin(req: NextRequest) {
@@ -144,7 +111,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: res.error }, { status: 400 });
     }
 
-    mirrorTeachersToGoogleSheetInBackground();
+    await syncTeachersToGoogleSheet();
 
     return NextResponse.json({
       success: true,
@@ -177,7 +144,7 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: res.error }, { status: 400 });
     }
 
-    mirrorTeachersToGoogleSheetInBackground();
+    await syncTeachersToGoogleSheet();
 
     return NextResponse.json({
       success: true,
@@ -204,14 +171,14 @@ export async function PATCH(req: NextRequest) {
       const oldSection = typeof body.oldSection === 'string' ? body.oldSection : '';
       const newSection = typeof body.newSection === 'string' ? body.newSection : '';
       const teachers = syncTeacherMappingsOnClassRename(oldSection, newSection);
-      mirrorTeachersToGoogleSheetInBackground();
+      await syncTeachersToGoogleSheet();
       return NextResponse.json({ success: true, teachers });
     }
 
     if (body.action === 'deleteClass') {
       const section = typeof body.section === 'string' ? body.section : '';
       const teachers = syncTeacherMappingsOnClassDelete(section);
-      mirrorTeachersToGoogleSheetInBackground();
+      await syncTeachersToGoogleSheet();
       return NextResponse.json({ success: true, teachers });
     }
 
@@ -219,7 +186,7 @@ export async function PATCH(req: NextRequest) {
       const oldSubject = typeof body.oldSubject === 'string' ? body.oldSubject : '';
       const newSubject = typeof body.newSubject === 'string' ? body.newSubject : '';
       const teachers = syncTeacherMappingsOnSubjectRename(oldSubject, newSubject);
-      mirrorTeachersToGoogleSheetInBackground();
+      await syncTeachersToGoogleSheet();
       return NextResponse.json({ success: true, teachers });
     }
 

@@ -208,7 +208,7 @@ function saveStoredTeacherAccounts(accounts: StoredTeacherAccount[]): void {
     const dataDir = path.join(process.cwd(), '.data');
     fs.mkdirSync(dataDir, { recursive: true });
     const usersFile = getUsersFilePath();
-    const tmpFile = `${usersFile}.${Date.now()}.tmp`;
+    const tmpFile = `${usersFile}.${Date.now()}.${Math.random().toString(36).slice(2)}.tmp`;
     fs.writeFileSync(tmpFile, JSON.stringify(accounts, null, 2), { encoding: 'utf8', mode: 0o600 });
     fs.renameSync(tmpFile, usersFile);
   } catch {
@@ -320,6 +320,21 @@ export function shouldRestoreTeachersFromCloud(
     return true;
   }
   return false;
+}
+
+export function shouldApplyCloudTeachersOnLogin(
+  localTeachers: StoredTeacherAccount[],
+  cloudPayload: { updatedAt?: number; teachers?: StoredTeacherAccount[] } | null | undefined,
+  localUsersFileExists: boolean = hasLocalUsersFile()
+): boolean {
+  const cloudTeachers = cloudPayload?.teachers;
+  if (!Array.isArray(cloudTeachers) || cloudTeachers.length === 0) {
+    return false;
+  }
+  if (!localUsersFileExists) {
+    return true;
+  }
+  return shouldRestoreTeachersFromCloud(localTeachers, cloudPayload);
 }
 
 export function listTeacherUsers(env: NodeJS.ProcessEnv = process.env): TeacherProfile[] {
@@ -564,12 +579,22 @@ export function authenticateUserCredentials(
   }
 
   const teacherAccounts = loadStoredTeacherAccounts(env);
-  const matchedTeacher = teacherAccounts.find((u) => u.username === rawUsername);
+  const cleanLookupUsername = rawUsername.startsWith('@') ? rawUsername.slice(1) : rawUsername;
+  const matchedTeacher =
+    teacherAccounts.find((u) => u.username === rawUsername) ||
+    (cleanLookupUsername !== rawUsername
+      ? teacherAccounts.find((u) => u.username === cleanLookupUsername)
+      : undefined);
 
   if (matchedTeacher) {
-    const hashMatches = verifyPasswordAgainstHashHex(password, matchedTeacher.passwordHashHex);
+    const trimmedPassword = password.trim();
+    const hashMatches =
+      verifyPasswordAgainstHashHex(password, matchedTeacher.passwordHashHex) ||
+      (trimmedPassword.length > 0 &&
+        trimmedPassword !== password &&
+        verifyPasswordAgainstHashHex(trimmedPassword, matchedTeacher.passwordHashHex));
     const prathamEnvFallback =
-      rawUsername === DEFAULT_TEACHER_USERNAME && isDefaultPrathamPass;
+      cleanLookupUsername === DEFAULT_TEACHER_USERNAME && isDefaultPrathamPass;
     if (hashMatches || prathamEnvFallback) {
       return {
         authenticated: true,
@@ -578,7 +603,7 @@ export function authenticateUserCredentials(
         teacherProfile: stripPasswordHash(matchedTeacher),
       };
     }
-  } else if (rawUsername === DEFAULT_TEACHER_USERNAME && isDefaultPrathamPass) {
+  } else if (cleanLookupUsername === DEFAULT_TEACHER_USERNAME && isDefaultPrathamPass) {
     return {
       authenticated: true,
       username: DEFAULT_TEACHER_USERNAME,

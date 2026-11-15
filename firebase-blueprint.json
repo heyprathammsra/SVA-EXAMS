@@ -1,0 +1,288 @@
+{
+  "entities": {
+    "UserAccount": {
+      "title": "UserAccount",
+      "description": "Authenticated school staff user profile linking Firebase UID to role metadata.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "description": "Firebase Auth UID",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "description": "Verified staff email address",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "displayName": {
+          "type": "string",
+          "description": "Staff display name",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "role": {
+          "type": "string",
+          "enum": ["admin", "teacher"],
+          "description": "Authorization tier"
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of user creation"
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update"
+        }
+      },
+      "required": ["uid", "email", "role", "createdAt", "updatedAt"]
+    },
+    "AdminRole": {
+      "title": "AdminRole",
+      "description": "Trusted administrator marker document keyed by Firebase Auth UID.",
+      "type": "object",
+      "properties": {
+        "uid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "email": {
+          "type": "string",
+          "format": "email",
+          "minLength": 3,
+          "maxLength": 200
+        },
+        "grantedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["uid", "email", "grantedAt"]
+    },
+    "ErpConfig": {
+      "title": "ErpConfig",
+      "description": "School ERP global classes and exam configurations.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "selectedClass": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "selectedExam": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "classes": {
+          "type": "array",
+          "description": "Configured class sections"
+        },
+        "examConfigs": {
+          "type": "object",
+          "description": "Configured exam definitions"
+        },
+        "updatedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "selectedClass", "selectedExam", "classes", "examConfigs", "updatedByUid", "updatedAt"]
+    },
+    "StudentRecord": {
+      "title": "StudentRecord",
+      "description": "Individual student academic particulars and remarks.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "rollNo": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "section": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "dob": {
+          "type": "string",
+          "maxLength": 40
+        },
+        "fatherName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "motherName": {
+          "type": "string",
+          "maxLength": 120
+        },
+        "house": {
+          "type": "string",
+          "maxLength": 60
+        },
+        "height": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "weight": {
+          "type": "string",
+          "maxLength": 20
+        },
+        "attendance": {
+          "type": "string",
+          "maxLength": 30
+        },
+        "customRemarks": {
+          "type": "string",
+          "maxLength": 500
+        },
+        "updatedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "rollNo", "name", "section", "updatedByUid", "updatedAt"]
+    },
+    "ExamMarkEntry": {
+      "title": "ExamMarkEntry",
+      "description": "Granular per-student, per-exam, per-subject mark entry persisted immediately on commit.",
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "studentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80,
+          "pattern": "^[a-zA-Z0-9_\\-]+$"
+        },
+        "examId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "section": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "scoreType": {
+          "type": "string",
+          "enum": ["numeric", "AB", "empty"]
+        },
+        "numericValue": {
+          "type": "number"
+        },
+        "breakdown": {
+          "type": "object"
+        },
+        "updatedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["id", "studentId", "examId", "section", "subject", "scoreType", "updatedByUid", "updatedAt"]
+    },
+    "SheetSyncQueueItem": {
+      "title": "SheetSyncQueueItem",
+      "description": "Server-managed Google Sheets sync queue entry per exam.",
+      "type": "object",
+      "properties": {
+        "examId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 60
+        },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "syncing", "synced", "error"]
+        },
+        "updatedByUid": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": ["examId", "status", "updatedByUid", "updatedAt"]
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/UserAccount" },
+      "description": "User account records scoped strictly to owner or admin."
+    },
+    "/admins/{adminId}": {
+      "schema": { "$ref": "#/entities/AdminRole" },
+      "description": "Trusted administrator lookup documents."
+    },
+    "/erp_meta/{configId}": {
+      "schema": { "$ref": "#/entities/ErpConfig" },
+      "description": "School ERP global classes and exam configurations."
+    },
+    "/students/{studentId}": {
+      "schema": { "$ref": "#/entities/StudentRecord" },
+      "description": "Student roster records."
+    },
+    "/exam_marks/{markId}": {
+      "schema": { "$ref": "#/entities/ExamMarkEntry" },
+      "description": "Granular instant exam mark documents keyed by student, exam, and subject."
+    },
+    "/sync_queue/{examId}": {
+      "schema": { "$ref": "#/entities/SheetSyncQueueItem" },
+      "description": "Persistent server Google Sheets sync queue per exam."
+    }
+  }
+}

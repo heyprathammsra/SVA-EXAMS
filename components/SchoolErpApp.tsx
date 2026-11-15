@@ -105,8 +105,11 @@ import {
 } from '@/lib/fast-pdf';
 import {
   GasSyncService,
+  getStoredGasUrl,
   LOCKED_SPREADSHEET_ID,
 } from '@/lib/gas-sync';
+import { MarkDeltaItem } from '@/lib/marks-delta';
+import { testFirestoreConnection } from '@/lib/firestore-erp';
 import {
   SVA_STORAGE_KEYS,
   ExamMarksStore,
@@ -654,6 +657,8 @@ export default function SchoolErpPage({
   const stateUpdatedAtRef = useRef<number>(initialPreparedState.updatedAt || 0);
   const serverSaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingBackendSavesRef = useRef<Set<Promise<void>>>(new Set());
+  const pendingDeltasCountRef = useRef<number>(0);
+  const skipNextFullBackendPostRef = useRef<boolean>(false);
   const toastTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const lastSyncedSnapshotRef = useRef<{
     selectedClass: string;
@@ -1479,19 +1484,35 @@ export default function SchoolErpPage({
     }
   }, []);
 
-  const persistToBackend = useCallback((state: PersistedErpState, immediate = false) => {
+  useEffect(() => {
+    void testFirestoreConnection();
+  }, []);
+
+  const persistToBackend = useCallback((state: PersistedErpState, immediate = true) => {
     if (serverSaveTimerRef.current) {
       clearTimeout(serverSaveTimerRef.current);
       serverSaveTimerRef.current = null;
     }
     const send = (): Promise<void> => {
+      const fullSheetSync = needsFullSheetSyncRef.current;
+      const queuedExams = Array.from(pendingSheetExamsRef.current);
+      const dirtyExams = Array.from(
+        new Set([...queuedExams, ...(state.selectedExam ? [state.selectedExam] : [])])
+      );
+      const payload = JSON.stringify({
+        state,
+        gasUrl: getStoredGasUrl(),
+        dirtyExams,
+        fullSheetSync,
+      });
       const reqPromise = fetch('/api/erp-state', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           ...getAdminAuthHeaders(),
         },
-        body: JSON.stringify({ state }),
+        body: payload,
+        keepalive: payload.length < 60000,
       })
         .then(async (res) => {
           if (res.ok) {
@@ -1503,6 +1524,17 @@ export default function SchoolErpPage({
                   localStorage.setItem(SVA_STORAGE_KEYS.UPDATED_AT, String(data.updatedAt));
                 } catch {}
               }
+            }
+            if (data?.syncStatus?.status === 'synced') {
+              setSheetsSyncStatus('synced');
+              if (data.syncStatus.lastSyncedAt) {
+                setLastSyncTime(data.syncStatus.lastSyncedAt);
+              }
+            } else if (data?.syncStatus?.status === 'syncing') {
+              setSheetsSyncStatus('syncing');
+            }
+            if (fullSheetSync) {
+              needsFullSheetSyncRef.current = false;
             }
           }
           return undefined;
@@ -1522,10 +1554,86 @@ export default function SchoolErpPage({
       serverSaveTimerRef.current = setTimeout(() => {
         serverSaveTimerRef.current = null;
         void send();
-      }, 120);
+      }, 40);
       return Promise.resolve();
     }
   }, []);
+
+  const sendInstantMarkDeltas = useCallback(
+    (deltas: MarkDeltaItem[], nextStudentsSnapshot?: StudentReportRow[]) => {
+      if (!deltas || deltas.length === 0) return;
+      skipNextFullBackendPostRef.current = true;
+      setSheetsSyncStatus('syncing');
+
+      const CHUNK_SIZE = 40;
+      const chunks: MarkDeltaItem[][] = [];
+      for (let i = 0; i < deltas.length; i += CHUNK_SIZE) {
+        chunks.push(deltas.slice(i, i + CHUNK_SIZE));
+      }
+
+      const gasUrl = getStoredGasUrl();
+      for (const chunk of chunks) {
+        const payload = JSON.stringify({ deltas: chunk, gasUrl });
+        pendingDeltasCountRef.current += 1;
+        const reqPromise = fetch('/api/marks', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...getAdminAuthHeaders(),
+          },
+          body: payload,
+          keepalive: payload.length < 60000,
+        })
+          .then(async (res) => {
+            if (res.status === 409) {
+              const snapshot: PersistedErpState = {
+                version: 1,
+                initialized: true,
+                updatedAt: stateUpdatedAtRef.current || Date.now(),
+                selectedClass: selectedClassRef.current,
+                selectedExam: selectedExamRef.current,
+                classes: classesRef.current,
+                examConfigs: examConfigsRef.current,
+                students: nextStudentsSnapshot || studentsRef.current,
+                examMarksStore: examMarksStoreRef.current,
+                examBreakdownsStore: examBreakdownsStoreRef.current,
+              };
+              await persistToBackend(snapshot, true);
+              return;
+            }
+            if (res.ok) {
+              const data = await res.json().catch(() => null);
+              if (
+                typeof data?.updatedAt === 'number' &&
+                data.updatedAt > stateUpdatedAtRef.current
+              ) {
+                stateUpdatedAtRef.current = data.updatedAt;
+                if (typeof window !== 'undefined') {
+                  try {
+                    localStorage.setItem(SVA_STORAGE_KEYS.UPDATED_AT, String(data.updatedAt));
+                  } catch {}
+                }
+              }
+              if (data?.syncStatus?.status === 'synced') {
+                setSheetsSyncStatus('synced');
+                if (data.syncStatus.lastSyncedAt) {
+                  setLastSyncTime(data.syncStatus.lastSyncedAt);
+                }
+              }
+            }
+          })
+          .catch((err) => {
+            console.warn('Instant mark delta save warning:', err);
+          })
+          .finally(() => {
+            pendingDeltasCountRef.current = Math.max(0, pendingDeltasCountRef.current - 1);
+            pendingBackendSavesRef.current.delete(reqPromise);
+          });
+        pendingBackendSavesRef.current.add(reqPromise);
+      }
+    },
+    [persistToBackend]
+  );
 
   const flushPendingBackendSaves = useCallback(async () => {
     if (serverSaveTimerRef.current) {
@@ -1789,78 +1897,50 @@ export default function SchoolErpPage({
     };
   }, [defaultErpState, writeStateToLocalStorage, persistToBackend, userRole, showToast]);
 
-  // Flush queued exam/structure pushes to Google Sheets (used by 10-second auto-sync & after URL updates)
+  // Flush any queued server-side Google Sheet pushes
   const flushPendingGoogleSheetSync = useCallback(async (): Promise<boolean> => {
     if (isSheetSyncRunningRef.current) return true;
     const fullNeeded = needsFullSheetSyncRef.current;
     const queuedExams = Array.from(pendingSheetExamsRef.current);
-    if (!fullNeeded && queuedExams.length === 0) return true;
 
     isSheetSyncRunningRef.current = true;
-    setSheetsSyncStatus('syncing');
     try {
-      let ok = false;
-      if (fullNeeded || queuedExams.length > 1) {
+      const res = await fetch('/api/sync-status', {
+        method: fullNeeded || queuedExams.length > 0 ? 'POST' : 'GET',
+        headers: {
+          'Content-Type': 'application/json',
+          ...getAdminAuthHeaders(),
+        },
+        ...(fullNeeded || queuedExams.length > 0
+          ? {
+              body: JSON.stringify({
+                gasUrl: getStoredGasUrl(),
+                examIds: queuedExams,
+                fullSync: fullNeeded,
+                awaitResult: true,
+              }),
+            }
+          : {}),
+      });
+      if (!res.ok) return true;
+      const snap = await res.json().catch(() => null);
+      if (snap?.status === 'synced') {
         needsFullSheetSyncRef.current = false;
         pendingSheetExamsRef.current.clear();
-        const res = await GasSyncService.pushAllExams({
-          students: studentsRef.current,
-          selectedExam: selectedExamRef.current,
-          selectedClass: selectedClassRef.current,
-          examConfigs: examConfigsRef.current,
-          examMarksStore: examMarksStoreRef.current,
-          examBreakdownsStore: examBreakdownsStoreRef.current,
-          classes: classesRef.current,
-          examIdsToPush: fullNeeded ? undefined : queuedExams,
-          skipCloudBackup: true,
-        });
-        ok = Boolean(res.success);
-        if (!ok) {
-          if (fullNeeded) {
-            needsFullSheetSyncRef.current = true;
-          } else {
-            queuedExams.forEach((exId) => pendingSheetExamsRef.current.add(exId));
-          }
-        }
-      } else {
-        const targetExam = queuedExams[0];
-        pendingSheetExamsRef.current.delete(targetExam);
-        const studentsForExam =
-          targetExam === selectedExamRef.current
-            ? studentsRef.current
-            : studentsRef.current.map((st) => ({
-                ...st,
-                marks: (examMarksStoreRef.current[targetExam] || {})[st.id] || {},
-                breakdowns: (examBreakdownsStoreRef.current[targetExam] || {})[st.id] || {},
-              }));
-        const res = await GasSyncService.pushData(
-          studentsForExam,
-          targetExam,
-          undefined,
-          examConfigsRef.current[targetExam],
-          classesRef.current
-        );
-        ok = Boolean(res.success);
-        if (!ok) {
-          pendingSheetExamsRef.current.add(targetExam);
-        }
-      }
-
-      if (ok) {
         setSheetsSyncStatus('synced');
-        setLastSyncTime(
-          new Date().toLocaleTimeString([], {
-            hour: '2-digit',
-            minute: '2-digit',
-            second: '2-digit',
-          })
-        );
-      } else {
-        setSheetsSyncStatus('error');
+        if (snap.lastSyncedAt) setLastSyncTime(snap.lastSyncedAt);
+        return true;
       }
-      return ok;
+      if (snap?.status === 'syncing') {
+        setSheetsSyncStatus('syncing');
+        return false;
+      }
+      if (snap?.status === 'error') {
+        setSheetsSyncStatus('error');
+        return false;
+      }
+      return true;
     } catch {
-      setSheetsSyncStatus('error');
       return false;
     } finally {
       isSheetSyncRunningRef.current = false;
@@ -2000,7 +2080,13 @@ export default function SchoolErpPage({
         if (!isMounted) return;
 
         // 2. Pull authoritative ERP state + user permissions unless local changes are in-flight
-        if (serverSaveTimerRef.current || pendingBackendSavesRef.current.size > 0) return;
+        if (
+          serverSaveTimerRef.current ||
+          pendingBackendSavesRef.current.size > 0 ||
+          pendingDeltasCountRef.current > 0
+        ) {
+          return;
+        }
 
         const res = await fetch('/api/erp-state?fresh=1', {
           cache: 'no-store',
@@ -2010,7 +2096,8 @@ export default function SchoolErpPage({
           !res.ok ||
           !isMounted ||
           serverSaveTimerRef.current ||
-          pendingBackendSavesRef.current.size > 0
+          pendingBackendSavesRef.current.size > 0 ||
+          pendingDeltasCountRef.current > 0
         ) {
           return;
         }
@@ -2128,7 +2215,18 @@ export default function SchoolErpPage({
           );
         }
 
-        if (
+        if (payload?.syncStatus) {
+          if (payload.syncStatus.status === 'synced') {
+            setSheetsSyncStatus('synced');
+            if (payload.syncStatus.lastSyncedAt) {
+              setLastSyncTime(payload.syncStatus.lastSyncedAt);
+            }
+          } else if (payload.syncStatus.status === 'syncing') {
+            setSheetsSyncStatus('syncing');
+          } else if (payload.syncStatus.status === 'error') {
+            setSheetsSyncStatus('error');
+          }
+        } else if (
           sheetOk &&
           !needsFullSheetSyncRef.current &&
           pendingSheetExamsRef.current.size === 0
@@ -2154,6 +2252,37 @@ export default function SchoolErpPage({
       }
     };
 
+    // Real-time SSE stream so multi-user updates & server Sheet sync status appear immediately
+    let eventSource: EventSource | null = null;
+    if (typeof window !== 'undefined' && typeof EventSource !== 'undefined') {
+      try {
+        eventSource = new EventSource('/api/events');
+        eventSource.onmessage = (msg) => {
+          if (!isMounted || !msg.data) return;
+          try {
+            const ev = JSON.parse(msg.data);
+            if (ev?.type === 'sheet_sync') {
+              if (ev.status === 'synced') {
+                setSheetsSyncStatus('synced');
+                if (ev.lastSyncedAt) setLastSyncTime(ev.lastSyncedAt);
+              } else if (ev.status === 'syncing') {
+                setSheetsSyncStatus('syncing');
+              } else if (ev.status === 'error') {
+                setSheetsSyncStatus('error');
+              }
+            } else if (
+              (ev?.type === 'erp_update' &&
+                typeof ev.updatedAt === 'number' &&
+                ev.updatedAt > stateUpdatedAtRef.current) ||
+              ev?.type === 'users_update'
+            ) {
+              void syncFromServer();
+            }
+          } catch {}
+        };
+      } catch {}
+    }
+
     const intervalId = setInterval(() => {
       if (typeof document === 'undefined' || document.visibilityState === 'visible') {
         void syncFromServer();
@@ -2168,6 +2297,9 @@ export default function SchoolErpPage({
     return () => {
       isMounted = false;
       syncFromServerRef.current = null;
+      if (eventSource) {
+        eventSource.close();
+      }
       clearInterval(intervalId);
       window.removeEventListener('focus', syncFromServer);
       document.removeEventListener('visibilitychange', handleVisibility);
@@ -2247,8 +2379,12 @@ export default function SchoolErpPage({
     };
 
     writeStateToLocalStorage(nextState);
-    // Admin structural/data changes persist immediately so signing out or switching tabs right away never drops an update
-    persistToBackend(nextState, userRole === 'admin' && dataChanged);
+    if (skipNextFullBackendPostRef.current) {
+      skipNextFullBackendPostRef.current = false;
+    } else {
+      // Persist immediately (0ms) so structural, bulk, or undo/redo edits never drop on tab close
+      persistToBackend(nextState, true);
+    }
   }, [
     isStorageReady,
     userRole,
@@ -2282,7 +2418,11 @@ export default function SchoolErpPage({
         examMarksStore: examMarksStoreRef.current,
         examBreakdownsStore: examBreakdownsStoreRef.current,
       };
-      const payload = JSON.stringify({ state: snapshot });
+      const payload = JSON.stringify({
+        state: snapshot,
+        gasUrl: getStoredGasUrl(),
+        dirtyExams: [selectedExamRef.current],
+      });
       fetch('/api/erp-state', {
         method: 'POST',
         headers: {
@@ -2322,57 +2462,21 @@ export default function SchoolErpPage({
     });
   }, [setExamMarksStore, setExamBreakdownsStore]);
 
-  // Debounced push to Google Sheet via Google Apps Script Web App (auto-retried every 10s if needed)
+  // Server-owned Google Sheets push is already triggered automatically on every /api/marks and /api/erp-state save.
+  // Keep triggerAutoSync as a lightweight UI indicator update without holding fragile browser-only timers.
   const triggerAutoSync = useCallback(
     (
-      studentsToSync: StudentReportRow[],
+      _studentsToSync: StudentReportRow[],
       overrideExamId?: string,
-      overrideExamCfg?: ExamConfig
+      _overrideExamCfg?: ExamConfig
     ) => {
       const queuedExam = overrideExamId || selectedExamRef.current;
-      pendingSheetExamsRef.current.add(queuedExam);
-
-      if (autoSyncTimerRef.current) {
-        clearTimeout(autoSyncTimerRef.current);
+      if (overrideExamId && overrideExamId !== selectedExamRef.current) {
+        pendingSheetExamsRef.current.add(queuedExam);
       }
-
-      autoSyncTimerRef.current = setTimeout(async () => {
-        if (isSheetSyncRunningRef.current) return;
-        isSheetSyncRunningRef.current = true;
-        try {
-          setSheetsSyncStatus('syncing');
-          const targetExam = overrideExamId || selectedExamRef.current;
-          const targetCfg = overrideExamCfg || examConfigsRef.current[targetExam];
-          const res = await GasSyncService.pushData(
-            studentsToSync,
-            targetExam,
-            undefined,
-            targetCfg,
-            classesRef.current
-          );
-          if (res.success) {
-            pendingSheetExamsRef.current.delete(targetExam);
-            setSheetsSyncStatus('synced');
-            setLastSyncTime(
-              new Date().toLocaleTimeString([], {
-                hour: '2-digit',
-                minute: '2-digit',
-                second: '2-digit',
-              })
-            );
-          } else {
-            pendingSheetExamsRef.current.add(targetExam);
-            setSheetsSyncStatus('error');
-          }
-        } catch {
-          pendingSheetExamsRef.current.add(queuedExam);
-          setSheetsSyncStatus('error');
-        } finally {
-          isSheetSyncRunningRef.current = false;
-        }
-      }, 1200);
+      setSheetsSyncStatus('syncing');
     },
-    [setSheetsSyncStatus, setLastSyncTime]
+    [setSheetsSyncStatus]
   );
 
   const handleUndo = useCallback(() => {
@@ -2545,10 +2649,23 @@ export default function SchoolErpPage({
 
     setStudents(updatedStudents);
     syncStoresForExam(selectedExam, updatedStudents);
+    sendInstantMarkDeltas(
+      [
+        {
+          kind: 'internal_breakdown',
+          studentId,
+          examId: selectedExam,
+          subject: subjectName,
+          breakdown: updatedBd,
+          total: newTotal,
+        },
+      ],
+      updatedStudents
+    );
     triggerAutoSync(updatedStudents);
     showToast(`Updated ${subjectName} internal marks for ${targetStudent.name} (Total: ${newTotal ?? 0}/${subConfig?.maxMarks ?? 100})`);
     setInternalModalData(null);
-  }, [students, baseExamConfig, selectedExam, userRole, teacherProfile, pushUndoSnapshot, syncStoresForExam, triggerAutoSync, showToast, setInternalModalData]);
+  }, [students, baseExamConfig, selectedExam, userRole, teacherProfile, pushUndoSnapshot, syncStoresForExam, sendInstantMarkDeltas, triggerAutoSync, showToast, setInternalModalData]);
 
   // Clean up timers on unmount
   useEffect(() => {
@@ -2826,6 +2943,7 @@ export default function SchoolErpPage({
     const targetIds = processedStudents.slice(minRow, maxRow + 1).map((s) => s.id);
 
     let clearedCount = 0;
+    const deltas: MarkDeltaItem[] = [];
 
     const updated = students.map((st) => {
       if (!targetIds.includes(st.id)) return st;
@@ -2846,11 +2964,13 @@ export default function SchoolErpPage({
             st.section
           );
         const nextBd = { ...currentBd };
+        let rowCleared = false;
         for (let c = minCol; c <= maxCol; c++) {
           const colField = activeGridColumnKeys[c];
           if (!colField) continue;
           delete nextBd[colField];
           clearedCount++;
+          rowCleared = true;
         }
         const newTotal = computeSubjectTotalFromBreakdown(
           selectedSubject,
@@ -2866,6 +2986,16 @@ export default function SchoolErpPage({
           delete nextBreakdowns[selectedSubject];
         } else {
           nextBreakdowns[selectedSubject] = nextBd;
+        }
+        if (rowCleared) {
+          deltas.push({
+            kind: 'internal_breakdown',
+            studentId: st.id,
+            examId: selectedExam,
+            subject: selectedSubject,
+            breakdown: hasAnyBd || newTotal !== null ? nextBd : {},
+            total: newTotal,
+          });
         }
         return {
           ...st,
@@ -2886,6 +3016,13 @@ export default function SchoolErpPage({
           }
           newMarks[subName] = null;
           delete newBreakdowns[subName];
+          deltas.push({
+            kind: 'subject_mark',
+            studentId: st.id,
+            examId: selectedExam,
+            subject: subName,
+            value: null,
+          });
           clearedCount++;
         }
         return {
@@ -2898,6 +3035,9 @@ export default function SchoolErpPage({
 
     setStudents(updated);
     syncStoresForExam(selectedExam, updated);
+    if (deltas.length > 0) {
+      sendInstantMarkDeltas(deltas, updated);
+    }
     triggerAutoSync(updated);
 
     if (clearedCount > 0) {
@@ -3565,6 +3705,7 @@ export default function SchoolErpPage({
       pushUndoSnapshot(students);
     }
     const subConfig = activeSubjects.find((s) => s.name === subjectName);
+    let emittedDelta: MarkDeltaItem | null = null;
 
     const updatedStudents = students.map((s) => {
       if (s.id !== studentId) return s;
@@ -3591,6 +3732,14 @@ export default function SchoolErpPage({
       } else {
         delete nextBreakdowns[subjectName];
       }
+      emittedDelta = {
+        kind: 'subject_mark',
+        studentId,
+        examId: selectedExam,
+        subject: subjectName,
+        value: newMark,
+        breakdown: nextBd,
+      };
       return {
         ...s,
         marks: {
@@ -3601,8 +3750,11 @@ export default function SchoolErpPage({
       };
     });
 
+    if (!emittedDelta) return;
+
     setStudents(updatedStudents);
     syncStoresForExam(selectedExam, updatedStudents);
+    sendInstantMarkDeltas([emittedDelta], updatedStudents);
 
     // Automatically synchronize marks to connected Google Sheet
     triggerAutoSync(updatedStudents);
@@ -3631,6 +3783,7 @@ export default function SchoolErpPage({
       const subConfig = activeSubjects.find(
         (s) => s.name.toLowerCase() === subjectName.toLowerCase()
       );
+      let emittedDelta: MarkDeltaItem | null = null;
 
       const updatedStudents = students.map((s) => {
         if (s.id !== studentId) return s;
@@ -3742,6 +3895,14 @@ export default function SchoolErpPage({
         } else {
           nextBreakdowns[subjectName] = nextBd;
         }
+        emittedDelta = {
+          kind: 'internal_breakdown',
+          studentId,
+          examId: selectedExam,
+          subject: subjectName,
+          breakdown: hasAnyBd || newTotal !== null ? nextBd : {},
+          total: newTotal,
+        };
         return {
           ...s,
           marks: {
@@ -3752,11 +3913,14 @@ export default function SchoolErpPage({
         };
       });
 
+      if (!emittedDelta) return;
+
       setStudents(updatedStudents);
       syncStoresForExam(selectedExam, updatedStudents);
+      sendInstantMarkDeltas([emittedDelta], updatedStudents);
       triggerAutoSync(updatedStudents);
     },
-    [students, activeSubjects, baseExamConfig, selectedExam, userRole, teacherProfile, showToast, triggerAutoSync, pushUndoSnapshot, setStudents, syncStoresForExam]
+    [students, activeSubjects, baseExamConfig, selectedExam, userRole, teacherProfile, showToast, sendInstantMarkDeltas, triggerAutoSync, pushUndoSnapshot, setStudents, syncStoresForExam]
   );
 
   // Ensure focused spreadsheet/remark cell stays clear of sticky top navbar and sticky left columns
@@ -4304,6 +4468,7 @@ export default function SchoolErpPage({
     const updated = [...students];
     let pastedCellCount = 0;
     let blockedCellCount = 0;
+    const deltas: MarkDeltaItem[] = [];
 
     rows.forEach((rowStr, rOffset) => {
       const targetRowIdx = targetStartRow + rOffset;
@@ -4333,6 +4498,7 @@ export default function SchoolErpPage({
             st.section
           );
         const nextBd = { ...currentBd };
+        let rowPasted = false;
 
         cells.forEach((cellVal, cOffset) => {
           const targetColIdx = targetStartColIdx + cOffset;
@@ -4359,6 +4525,7 @@ export default function SchoolErpPage({
             delete nextBd[colField];
           }
           pastedCellCount++;
+          rowPasted = true;
         });
 
         const newTotal = computeSubjectTotalFromBreakdown(
@@ -4379,6 +4546,16 @@ export default function SchoolErpPage({
             [selectedSubject]: nextBd,
           },
         };
+        if (rowPasted) {
+          deltas.push({
+            kind: 'internal_breakdown',
+            studentId: st.id,
+            examId: selectedExam,
+            subject: selectedSubject,
+            breakdown: nextBd,
+            total: newTotal,
+          });
+        }
       } else {
         const nextMarks = { ...st.marks };
         const nextBreakdowns = { ...(st.breakdowns || {}) };
@@ -4425,6 +4602,14 @@ export default function SchoolErpPage({
           } else {
             delete nextBreakdowns[subName];
           }
+          deltas.push({
+            kind: 'subject_mark',
+            studentId: st.id,
+            examId: selectedExam,
+            subject: subName,
+            value: newMark,
+            breakdown: nextBd,
+          });
           pastedCellCount++;
           rowEdited = true;
         });
@@ -4449,6 +4634,9 @@ export default function SchoolErpPage({
     pushUndoSnapshot(students);
     setStudents(updated);
     syncStoresForExam(selectedExam, updated);
+    if (deltas.length > 0) {
+      sendInstantMarkDeltas(deltas, updated);
+    }
     triggerAutoSync(updated);
 
     showToast(
@@ -4571,6 +4759,33 @@ export default function SchoolErpPage({
       s.id === studentId ? { ...s, ...safePatch } : s
     );
     setStudents(updated);
+    const deltaPatchKeys = new Set([
+      'rollNo',
+      'name',
+      'dob',
+      'fatherName',
+      'motherName',
+      'house',
+      'height',
+      'weight',
+      'attendance',
+    ]);
+    const patchEntries = Object.entries(safePatch).filter(([, v]) => v !== undefined);
+    if (
+      patchEntries.length > 0 &&
+      patchEntries.every(([k]) => deltaPatchKeys.has(k))
+    ) {
+      sendInstantMarkDeltas(
+        [
+          {
+            kind: 'student_patch',
+            studentId,
+            patch: safePatch,
+          },
+        ],
+        updated
+      );
+    }
     triggerAutoSync(updated);
   };
 
@@ -4603,6 +4818,32 @@ export default function SchoolErpPage({
       allowedPatches[s.id] ? { ...s, ...allowedPatches[s.id] } : s
     );
     setStudents(updated);
+    const deltaPatchKeys = new Set([
+      'rollNo',
+      'name',
+      'dob',
+      'fatherName',
+      'motherName',
+      'house',
+      'height',
+      'weight',
+      'attendance',
+    ]);
+    const patchEntriesList = Object.entries(allowedPatches);
+    const canSendAllAsDeltas = patchEntriesList.every(([, p]) => {
+      const keys = Object.entries(p).filter(([, v]) => v !== undefined);
+      return keys.length > 0 && keys.every(([k]) => deltaPatchKeys.has(k));
+    });
+    if (canSendAllAsDeltas) {
+      sendInstantMarkDeltas(
+        patchEntriesList.map(([stuId, p]) => ({
+          kind: 'student_patch' as const,
+          studentId: stuId,
+          patch: p,
+        })),
+        updated
+      );
+    }
     triggerAutoSync(updated);
   };
 
@@ -4777,6 +5018,16 @@ export default function SchoolErpPage({
       s.id === studentId ? updateStudentClassRemark(s, remarks) : s
     );
     setStudents(updated);
+    sendInstantMarkDeltas(
+      [
+        {
+          kind: 'student_remark',
+          studentId,
+          remark: remarks,
+        },
+      ],
+      updated
+    );
     triggerAutoSync(updated);
   };
 
@@ -6374,6 +6625,7 @@ export default function SchoolErpPage({
                                                 const updatedRoster = [...students];
                                                 let pastedCellCount = 0;
                                                 let blockedCellCount = 0;
+                                                const deltas: MarkDeltaItem[] = [];
                                                 rowsData.forEach((rowStr, rOff) => {
                                                   const targetStu =
                                                     paginatedStudents[rowIdx + rOff];
@@ -6391,6 +6643,7 @@ export default function SchoolErpPage({
                                                   };
                                                   const cells = rowStr.split('\t');
                                                   let rowModified = false;
+                                                  const touchedMultiSubjects = new Set<string>();
                                                   cells.forEach((cellVal, cOff) => {
                                                     const colDef = editableCols[flatColIdx + cOff];
                                                     if (!colDef) return;
@@ -6462,6 +6715,7 @@ export default function SchoolErpPage({
                                                         nextStu.breakdowns[colDef.subjectName] =
                                                           nextBd;
                                                       }
+                                                      touchedMultiSubjects.add(colDef.subjectName);
                                                     } else {
                                                       nextStu.marks[colDef.subjectName] = parsedVal;
                                                       const subCfg = getEffectiveExamConfigForClass(
@@ -6485,9 +6739,27 @@ export default function SchoolErpPage({
                                                           colDef.subjectName
                                                         ];
                                                       }
+                                                      deltas.push({
+                                                        kind: 'subject_mark',
+                                                        studentId: nextStu.id,
+                                                        examId: selectedExam,
+                                                        subject: colDef.subjectName,
+                                                        value: parsedVal,
+                                                        breakdown: syncedBd,
+                                                      });
                                                     }
                                                     rowModified = true;
                                                     pastedCellCount++;
+                                                  });
+                                                  touchedMultiSubjects.forEach((subName) => {
+                                                    deltas.push({
+                                                      kind: 'internal_breakdown',
+                                                      studentId: nextStu.id,
+                                                      examId: selectedExam,
+                                                      subject: subName,
+                                                      breakdown: nextStu.breakdowns[subName] || {},
+                                                      total: nextStu.marks[subName] ?? null,
+                                                    });
                                                   });
                                                   if (rowModified) {
                                                     updatedRoster[stIdx] = nextStu;
@@ -6502,6 +6774,9 @@ export default function SchoolErpPage({
                                                 pushUndoSnapshot(students);
                                                 setStudents(updatedRoster);
                                                 syncStoresForExam(selectedExam, updatedRoster);
+                                                if (deltas.length > 0) {
+                                                  sendInstantMarkDeltas(deltas, updatedRoster);
+                                                }
                                                 triggerAutoSync(updatedRoster);
                                                 showToast(
                                                   blockedCellCount > 0
@@ -7646,6 +7921,16 @@ export default function SchoolErpPage({
                                         s.id === student.id ? updateStudentClassRemark(s, val) : s
                                       );
                                       setStudents(updated);
+                                      sendInstantMarkDeltas(
+                                        [
+                                          {
+                                            kind: 'student_remark',
+                                            studentId: student.id,
+                                            remark: val,
+                                          },
+                                        ],
+                                        updated
+                                      );
                                       triggerAutoSync(updated);
                                     }}
                                     onKeyDown={(e) => {
@@ -7834,6 +8119,17 @@ export default function SchoolErpPage({
                                           : s
                                       );
                                       setStudents(updated);
+                                      sendInstantMarkDeltas(
+                                        [
+                                          {
+                                            kind: 'student_remark',
+                                            studentId: student.id,
+                                            subject: selectedRemarkScope,
+                                            remark: val,
+                                          },
+                                        ],
+                                        updated
+                                      );
                                       triggerAutoSync(updated);
                                     }}
                                     onKeyDown={(e) => {
@@ -7983,6 +8279,16 @@ export default function SchoolErpPage({
                                       s.id === student.id ? updateStudentClassRemark(s, val) : s
                                     );
                                     setStudents(updated);
+                                    sendInstantMarkDeltas(
+                                      [
+                                        {
+                                          kind: 'student_remark',
+                                          studentId: student.id,
+                                          remark: val,
+                                        },
+                                      ],
+                                      updated
+                                    );
                                     triggerAutoSync(updated);
                                   }}
                                   onKeyDown={(e) => {
@@ -8063,6 +8369,17 @@ export default function SchoolErpPage({
                                               : s
                                           );
                                           setStudents(updated);
+                                          sendInstantMarkDeltas(
+                                            [
+                                              {
+                                                kind: 'student_remark',
+                                                studentId: student.id,
+                                                subject: sub.name,
+                                                remark: val,
+                                              },
+                                            ],
+                                            updated
+                                          );
                                           triggerAutoSync(updated);
                                         }}
                                         onKeyDown={(e) => {

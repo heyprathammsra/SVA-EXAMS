@@ -16,6 +16,7 @@ import {
   getTeacherProfileByUsername,
   recordLoginFailure,
   resetAllLoginRateLimits,
+  shouldApplyCloudTeachersOnLogin,
   shouldRestoreTeachersFromCloud,
   syncTeacherMappingsOnClassDelete,
   syncTeacherMappingsOnClassRename,
@@ -684,6 +685,69 @@ test('sanitizeAndValidateErpState deletes breakdown when teacher clears a mark t
   // Unmapped English mark and breakdown remain intact
   assert.equal(sanitized.students[0].marks.English, 18);
   assert.equal(sanitized.students[0].breakdowns?.English?.writtenExam, 14);
+});
+
+test('newly created user authenticates immediately with exact, @username, or whitespace-padded password without clobbering on stale cloud', () => {
+  const usersFile = path.join(process.cwd(), '.data', 'erp-users.json');
+  const hadBackup = fs.existsSync(usersFile);
+  const backupContent = hadBackup ? fs.readFileSync(usersFile, 'utf8') : null;
+
+  try {
+    const created = upsertTeacherUser({
+      name: 'Fresh Teacher',
+      username: 'freshteacher_unit',
+      password: '  NewPass@42  ',
+      assignedSubject: 'English',
+      assignedClasses: ['Sparkle'],
+      classTeacherOf: null,
+    });
+    assert.equal(created.ok, true);
+    if (!created.ok) return;
+
+    // Exact password works
+    const authExact = authenticateUserCredentials('freshteacher_unit', 'NewPass@42', {});
+    assert.equal(authExact.authenticated, true);
+    assert.equal(authExact.role, 'teacher');
+    assert.equal(authExact.username, 'freshteacher_unit');
+
+    // Leading @ on username and whitespace around pasted password still work
+    const authWithAt = authenticateUserCredentials('@FreshTeacher_Unit', ' NewPass@42 ', {});
+    assert.equal(authWithAt.authenticated, true);
+    assert.equal(authWithAt.username, 'freshteacher_unit');
+
+    // Wrong password fails cleanly
+    const authWrong = authenticateUserCredentials('freshteacher_unit', 'WrongPass', {});
+    assert.equal(authWrong.authenticated, false);
+
+    // Stale cloud backup from before this user existed must NEVER overwrite local store when local file exists
+    const staleCloud = {
+      updatedAt: created.teacher.updatedAt + 5000,
+      teachers: [
+        {
+          id: 'teacher-pratham',
+          name: 'Pratham',
+          username: 'pratham',
+          passwordHashHex: 'hash1',
+          assignedSubject: 'Science',
+          assignedClasses: ['Sparkle'],
+          classTeacherOf: null,
+          assignments: [{ section: 'Sparkle', subject: 'Science' }],
+          createdAt: 1000,
+          updatedAt: created.teacher.updatedAt - 10000,
+        },
+      ],
+    };
+    const localStored = JSON.parse(fs.readFileSync(usersFile, 'utf8'));
+    assert.equal(shouldApplyCloudTeachersOnLogin(localStored, staleCloud, true), false);
+    // Cold container without local users file SHOULD apply cloud backup
+    assert.equal(shouldApplyCloudTeachersOnLogin(localStored, staleCloud, false), true);
+  } finally {
+    if (hadBackup && backupContent !== null) {
+      fs.writeFileSync(usersFile, backupContent, 'utf8');
+    } else if (fs.existsSync(usersFile)) {
+      fs.unlinkSync(usersFile);
+    }
+  }
 });
 
 

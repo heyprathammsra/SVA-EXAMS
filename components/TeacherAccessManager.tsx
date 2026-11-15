@@ -599,7 +599,7 @@ export default function TeacherAccessManager({
               </button>
             </div>
 
-            <form onSubmit={handleSaveUserForm} className="space-y-3.5 text-xs">
+            <form onSubmit={handleSaveUserForm} autoComplete="off" className="space-y-3.5 text-xs">
               {/* Row 1: Name + Username */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
@@ -611,6 +611,7 @@ export default function TeacherAccessManager({
                   </label>
                   <input
                     id="teacher-name-input"
+                    name="sva_teacher_display_name"
                     type="text"
                     value={nameInput}
                     onChange={(e) => {
@@ -618,6 +619,7 @@ export default function TeacherAccessManager({
                       if (formError) setFormError(null);
                     }}
                     placeholder="e.g. Anita Sharma"
+                    autoComplete="off"
                     autoFocus
                     className={MODAL_INPUT_CLASS}
                   />
@@ -632,6 +634,7 @@ export default function TeacherAccessManager({
                   </label>
                   <input
                     id="teacher-username-input"
+                    name="sva_teacher_handle"
                     type="text"
                     value={usernameInput}
                     onChange={(e) => {
@@ -639,6 +642,7 @@ export default function TeacherAccessManager({
                       if (formError) setFormError(null);
                     }}
                     placeholder="e.g. anita"
+                    autoComplete="off"
                     autoCapitalize="none"
                     autoCorrect="off"
                     spellCheck={false}
@@ -659,6 +663,7 @@ export default function TeacherAccessManager({
                   <div className="relative">
                     <input
                       id="teacher-password-input"
+                      name="sva_teacher_new_passcode"
                       type={showPassword ? 'text' : 'password'}
                       value={passwordInput}
                       onChange={(e) => {
@@ -668,6 +673,10 @@ export default function TeacherAccessManager({
                       placeholder={
                         userModalMode === 'create' ? 'Enter password' : 'Unchanged'
                       }
+                      autoComplete="new-password"
+                      data-lpignore="true"
+                      data-1p-ignore="true"
+                      data-bwignore="true"
                       className={`${MODAL_INPUT_CLASS} pr-8`}
                     />
                     <button
