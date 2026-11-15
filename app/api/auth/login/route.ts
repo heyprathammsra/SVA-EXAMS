@@ -53,39 +53,35 @@ export async function POST(req: NextRequest) {
 
     let authResult = authenticateUserCredentials(username, password);
     if (username.toLowerCase() !== 'admin') {
-      // Always pull authoritative cloud state on teacher login so Admin changes made just seconds ago
-      // or on another server instance take effect immediately.
-      const cloud = await pullCloudBackupFromGoogleSheet({
-        force: true,
-      });
-      if (
-        cloud?.teachers &&
-        cloud.teachers.length > 0 &&
-        (!authResult.authenticated ||
-          shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloud))
-      ) {
-        restoreTeacherAccountsFromBackup(cloud.teachers);
-        authResult = authenticateUserCredentials(username, password);
-      }
+      let hasLocalState = false;
+      try {
+        const raw = await readFile(STATE_FILE, 'utf8');
+        const parsed = JSON.parse(raw);
+        hasLocalState = Boolean(parsed?.initialized);
+      } catch {}
 
-      // Warm local ERP state cache if cloud state is newer than local disk
-      if (cloud?.state?.initialized) {
-        try {
-          let localUpdatedAt = 0;
+      if (!authResult.authenticated || !hasLocalState) {
+        const cloud = await pullCloudBackupFromGoogleSheet({
+          force: true,
+        });
+        if (
+          cloud?.teachers &&
+          cloud.teachers.length > 0 &&
+          (!authResult.authenticated ||
+            shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloud))
+        ) {
+          restoreTeacherAccountsFromBackup(cloud.teachers);
+          authResult = authenticateUserCredentials(username, password);
+        }
+
+        if (!hasLocalState && cloud?.state?.initialized) {
           try {
-            const raw = await readFile(STATE_FILE, 'utf8');
-            const parsed = JSON.parse(raw);
-            if (parsed?.initialized && typeof parsed.updatedAt === 'number') {
-              localUpdatedAt = parsed.updatedAt;
-            }
-          } catch {}
-          if ((cloud.state.updatedAt || 0) > localUpdatedAt) {
             await mkdir(DATA_DIR, { recursive: true });
             const tmp = `${STATE_FILE}.${Date.now()}.tmp`;
             await writeFile(tmp, JSON.stringify(cloud.state), 'utf8');
             await rename(tmp, STATE_FILE);
-          }
-        } catch {}
+          } catch {}
+        }
       }
     }
     if (!authResult.authenticated || !authResult.role || !authResult.username) {

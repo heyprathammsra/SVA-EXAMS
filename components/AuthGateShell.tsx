@@ -1,10 +1,14 @@
 'use client';
 
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import AdminLoginScreen from '@/components/AdminLoginScreen';
 import SchoolErpApp from '@/components/SchoolErpApp';
 import { TeacherProfile } from '@/lib/teacher-permissions';
-import { clearStoredAdminToken } from '@/lib/auth-client';
+import {
+  clearStoredAdminToken,
+  getAdminAuthHeaders,
+  setStoredAdminSession,
+} from '@/lib/auth-client';
 
 export default function AuthGateShell() {
   const [session, setSession] = useState<{
@@ -18,6 +22,47 @@ export default function AuthGateShell() {
     username: '',
     teacherProfile: null,
   });
+  useEffect(() => {
+    let cancelled = false;
+    async function restoreSession() {
+      try {
+        const res = await fetch('/api/auth/session', {
+          method: 'GET',
+          headers: getAdminAuthHeaders(),
+          credentials: 'same-origin',
+          cache: 'no-store',
+        });
+        const data = await res.json().catch(() => null);
+        if (
+          !cancelled &&
+          res.ok &&
+          data?.authenticated &&
+          (data.role === 'admin' || data.role === 'teacher')
+        ) {
+          if (typeof data.token === 'string' && data.token) {
+            setStoredAdminSession(
+              data.token,
+              data.role,
+              data.username || data.role,
+              data.teacherProfile || null
+            );
+          }
+          setSession({
+            authenticated: true,
+            role: data.role,
+            username: data.username || data.role,
+            teacherProfile: data.teacherProfile || null,
+          });
+        }
+      } catch {
+        // Ignore network errors and stay on login screen
+      }
+    }
+    void restoreSession();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const handleAuthenticated = useCallback(
     (

@@ -5,6 +5,7 @@ import {
   getAuthSessionSecret,
   getStoredTeacherAccountsForBackup,
   getTeacherProfileByUsername,
+  hasLocalUsersFile,
   restoreTeacherAccountsFromBackup,
   shouldRestoreTeachersFromCloud,
 } from '@/lib/auth';
@@ -12,6 +13,7 @@ import { getRequestAuthSession } from '@/lib/auth-server';
 import { PersistedErpState } from '@/lib/erp-persistence';
 import { computeStateHmac, sanitizeAndValidateErpState } from '@/lib/erp-security';
 import {
+  primeCachedCloudSnapshot,
   pullCloudBackupFromGoogleSheet,
   pushCloudBackupToGoogleSheet,
 } from '@/lib/sheets-cloud-store';
@@ -20,6 +22,17 @@ export const dynamic = 'force-dynamic';
 
 const DATA_DIR = path.join(process.cwd(), '.data');
 const STATE_FILE = path.join(DATA_DIR, 'erp-state.json');
+
+let stateFileLock: Promise<unknown> = Promise.resolve();
+
+function withStateLock<T>(fn: () => Promise<T>): Promise<T> {
+  const next = stateFileLock.then(fn, fn);
+  stateFileLock = next.then(
+    () => undefined,
+    () => undefined
+  );
+  return next;
+}
 
 async function readLocalStateFile(): Promise<PersistedErpState | null> {
   try {
@@ -49,27 +62,25 @@ export async function GET(req: NextRequest) {
   }
 
   try {
-    const { searchParams } = new URL(req.url);
-    const freshParam = searchParams.get('fresh') === '1';
-
     let localState = await readLocalStateFile();
 
-    // Force-pull from Google Sheets when local disk is empty, or when caller requests a fresh session hydrate
-    const cloudBackup = await pullCloudBackupFromGoogleSheet({
-      force: freshParam || !localState,
-    });
+    // Only block on Google Sheets when local disk state is missing (cold start)
+    if (!localState) {
+      const cloudBackup = await pullCloudBackupFromGoogleSheet({
+        force: true,
+      });
 
-    if (shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloudBackup)) {
-      restoreTeacherAccountsFromBackup(cloudBackup!.teachers);
-    }
+      if (
+        !hasLocalUsersFile() &&
+        shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloudBackup)
+      ) {
+        restoreTeacherAccountsFromBackup(cloudBackup!.teachers);
+      }
 
-    if (
-      cloudBackup?.state &&
-      cloudBackup.state.initialized &&
-      (cloudBackup.state.updatedAt || 0) > (localState?.updatedAt || 0)
-    ) {
-      localState = cloudBackup.state;
-      await writeLocalStateFile(localState).catch(() => {});
+      if (cloudBackup?.state && cloudBackup.state.initialized) {
+        localState = cloudBackup.state;
+        await writeLocalStateFile(localState).catch(() => {});
+      }
     }
 
     const teacherProfile =
@@ -129,52 +140,70 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    let existingParsed = await readLocalStateFile();
-    const cloudBackup = await pullCloudBackupFromGoogleSheet({
-      force: !existingParsed,
-    }).catch(() => null);
-    if (shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloudBackup)) {
-      restoreTeacherAccountsFromBackup(cloudBackup!.teachers);
-    }
-    if (
-      cloudBackup?.state?.initialized &&
-      (cloudBackup.state.updatedAt || 0) > (existingParsed?.updatedAt || 0)
-    ) {
-      existingParsed = cloudBackup.state;
-    }
+    const result = await withStateLock(async () => {
+      let existingParsed = await readLocalStateFile();
+      if (!existingParsed) {
+        const cloudBackup = await pullCloudBackupFromGoogleSheet({
+          force: true,
+        }).catch(() => null);
+        if (
+          !hasLocalUsersFile() &&
+          shouldRestoreTeachersFromCloud(getStoredTeacherAccountsForBackup(), cloudBackup)
+        ) {
+          restoreTeacherAccountsFromBackup(cloudBackup!.teachers);
+        }
+        if (cloudBackup?.state?.initialized) {
+          existingParsed = cloudBackup.state;
+        }
+      }
 
-    const teacherProfile =
-      session.role === 'teacher' ? getTeacherProfileByUsername(session.sub) : null;
+      const teacherProfile =
+        session.role === 'teacher' ? getTeacherProfileByUsername(session.sub) : null;
 
-    const nowMs = Date.now();
-    const sanitizedState = sanitizeAndValidateErpState(
-      incomingState as PersistedErpState,
-      existingParsed,
-      session.role,
-      nowMs,
-      teacherProfile
-    );
+      const nowMs = Math.max(
+        Date.now(),
+        (existingParsed?.updatedAt || 0) + 1,
+        typeof incomingState.updatedAt === 'number' ? incomingState.updatedAt : 0
+      );
 
-    const stateToPersist = {
-      ...sanitizedState,
-      lastModifiedBy: session.sub,
-      lastModifiedRole: session.role,
-      integrityHmac: computeStateHmac(sanitizedState, getAuthSessionSecret()),
-    };
+      const sanitizedState = sanitizeAndValidateErpState(
+        incomingState as PersistedErpState,
+        existingParsed,
+        session.role,
+        nowMs,
+        teacherProfile
+      );
 
-    await writeLocalStateFile(stateToPersist);
+      const stateToPersist = {
+        ...sanitizedState,
+        lastModifiedBy: session.sub,
+        lastModifiedRole: session.role,
+        integrityHmac: computeStateHmac(sanitizedState, getAuthSessionSecret()),
+      };
 
-    // Mirror state + teacher accounts to Google Sheets cloud store synchronously so immediate logout sees latest state
-    await pushCloudBackupToGoogleSheet(
-      stateToPersist as PersistedErpState,
-      getStoredTeacherAccountsForBackup(),
-      undefined,
-      { authoritativeTeachers: false }
-    ).catch(() => {});
+      await writeLocalStateFile(stateToPersist);
+
+      const currentTeachers = getStoredTeacherAccountsForBackup();
+      primeCachedCloudSnapshot({
+        state: stateToPersist as PersistedErpState,
+        teachers: currentTeachers,
+        nowMs,
+      });
+
+      // Mirror state + teacher accounts to Google Sheets cloud store asynchronously in background
+      void pushCloudBackupToGoogleSheet(
+        stateToPersist as PersistedErpState,
+        currentTeachers,
+        undefined,
+        { authoritativeTeachers: false }
+      ).catch(() => {});
+
+      return sanitizedState.updatedAt;
+    });
 
     return NextResponse.json({
       success: true,
-      updatedAt: sanitizedState.updatedAt,
+      updatedAt: result,
     });
   } catch (err: any) {
     return NextResponse.json(

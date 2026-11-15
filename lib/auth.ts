@@ -286,6 +286,14 @@ function getTeachersRosterDigest(accounts: StoredTeacherAccount[]): string {
  * Detects both newer profile edits/additions (`cloudMaxUpdated > localMaxUpdated`) AND
  * teacher deletions where `cloud.updatedAt > localMaxUpdated` and the teacher list differs.
  */
+export function hasLocalUsersFile(): boolean {
+  try {
+    return fs.existsSync(getUsersFilePath());
+  } catch {
+    return false;
+  }
+}
+
 export function shouldRestoreTeachersFromCloud(
   localTeachers: StoredTeacherAccount[],
   cloudPayload: { updatedAt?: number; teachers?: StoredTeacherAccount[] } | null | undefined
@@ -294,6 +302,9 @@ export function shouldRestoreTeachersFromCloud(
   if (!Array.isArray(cloudTeachers) || cloudTeachers.length === 0) {
     return false;
   }
+  if (!Array.isArray(localTeachers) || localTeachers.length === 0) {
+    return true;
+  }
   const localMaxUpdated = Math.max(0, ...localTeachers.map((t) => t.updatedAt || 0));
   const cloudMaxUpdated = Math.max(0, ...cloudTeachers.map((t) => t.updatedAt || 0));
   if (cloudMaxUpdated > localMaxUpdated) {
@@ -301,7 +312,9 @@ export function shouldRestoreTeachersFromCloud(
   }
   const cloudUpdatedAt = typeof cloudPayload?.updatedAt === 'number' ? cloudPayload.updatedAt : 0;
   if (
+    cloudMaxUpdated === localMaxUpdated &&
     cloudUpdatedAt > localMaxUpdated &&
+    cloudTeachers.length < localTeachers.length &&
     getTeachersRosterDigest(cloudTeachers) !== getTeachersRosterDigest(localTeachers)
   ) {
     return true;
@@ -321,6 +334,11 @@ export function getTeacherProfileByUsername(
   const clean = username.trim().toLowerCase();
   const found = loadStoredTeacherAccounts(env).find((u) => u.username === clean);
   return found ? stripPasswordHash(found) : null;
+}
+
+function getMonotonicTeacherNow(accounts: StoredTeacherAccount[]): number {
+  const maxExisting = accounts.reduce((max, acc) => Math.max(max, acc.updatedAt || 0), 0);
+  return Math.max(Date.now(), maxExisting + 1);
 }
 
 export function upsertTeacherUser(
@@ -369,7 +387,7 @@ export function upsertTeacherUser(
     return { ok: false, error: `Username "${cleanUsername}" is already taken.` };
   }
 
-  const now = Date.now();
+  const now = getMonotonicTeacherNow(accounts);
   const normalized = normalizeTeacherProfile({
     id: existingIdx >= 0 ? accounts[existingIdx].id : input.id || `teacher-${cleanUsername}-${now}`,
     name: cleanName,
@@ -439,9 +457,10 @@ export function deleteTeacherUser(
     return { ok: false, error: 'Teacher identifier is required.' };
   }
   const accounts = loadStoredTeacherAccounts(env);
-  const filtered = accounts.filter(
-    (u) => u.id.toLowerCase() !== key && u.username.toLowerCase() !== key
-  );
+  const now = getMonotonicTeacherNow(accounts);
+  const filtered = accounts
+    .filter((u) => u.id.toLowerCase() !== key && u.username.toLowerCase() !== key)
+    .map((u, idx) => (idx === 0 ? { ...u, updatedAt: now } : u));
   if (filtered.length === accounts.length) {
     return { ok: false, error: 'Teacher user not found.' };
   }
@@ -458,12 +477,13 @@ export function syncTeacherMappingsOnClassRename(
   env: NodeJS.ProcessEnv = process.env
 ): TeacherProfile[] {
   const accounts = loadStoredTeacherAccounts(env);
+  const now = getMonotonicTeacherNow(accounts);
   let anyChanged = false;
   const nextAccounts = accounts.map((acc) => {
     const synced = renameSectionInTeacherProfile(acc, oldSection, newSection);
     if (synced !== acc) {
       anyChanged = true;
-      return { ...synced, passwordHashHex: acc.passwordHashHex };
+      return { ...synced, passwordHashHex: acc.passwordHashHex, updatedAt: now };
     }
     return acc;
   });
@@ -478,12 +498,13 @@ export function syncTeacherMappingsOnClassDelete(
   env: NodeJS.ProcessEnv = process.env
 ): TeacherProfile[] {
   const accounts = loadStoredTeacherAccounts(env);
+  const now = getMonotonicTeacherNow(accounts);
   let anyChanged = false;
   const nextAccounts = accounts.map((acc) => {
     const synced = removeSectionFromTeacherProfile(acc, sectionToRemove);
     if (synced !== acc) {
       anyChanged = true;
-      return { ...synced, passwordHashHex: acc.passwordHashHex };
+      return { ...synced, passwordHashHex: acc.passwordHashHex, updatedAt: now };
     }
     return acc;
   });
@@ -499,12 +520,13 @@ export function syncTeacherMappingsOnSubjectRename(
   env: NodeJS.ProcessEnv = process.env
 ): TeacherProfile[] {
   const accounts = loadStoredTeacherAccounts(env);
+  const now = getMonotonicTeacherNow(accounts);
   let anyChanged = false;
   const nextAccounts = accounts.map((acc) => {
     const synced = renameSubjectInTeacherProfile(acc, oldSubject, newSubject);
     if (synced !== acc) {
       anyChanged = true;
-      return { ...synced, passwordHashHex: acc.passwordHashHex };
+      return { ...synced, passwordHashHex: acc.passwordHashHex, updatedAt: now };
     }
     return acc;
   });

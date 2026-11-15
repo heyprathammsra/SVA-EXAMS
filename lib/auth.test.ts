@@ -545,6 +545,18 @@ test('shouldRestoreTeachersFromCloud detects newer edits and deletions across co
     }),
     true
   );
+
+  // Newer local teacher edit (localMaxUpdated = 3500 > cloudMaxUpdated = 2000) is NEVER clobbered even if cloudPayload.updatedAt was bumped to 5000 by a state push
+  assert.equal(
+    shouldRestoreTeachersFromCloud(
+      [{ ...baseTeacher, assignedSubject: 'Computer Science', updatedAt: 3500 }],
+      {
+        updatedAt: 5000,
+        teachers: [baseTeacher],
+      }
+    ),
+    false
+  );
 });
 
 

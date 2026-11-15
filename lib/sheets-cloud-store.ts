@@ -223,11 +223,7 @@ export function mergeCloudBackupForPush(params: {
   if (!authoritativeTeachers && existingCloud?.teachers && existingCloud.teachers.length > 0) {
     const incomingMax = Math.max(0, ...mergedTeachers.map((t) => t.updatedAt || 0));
     const existingMax = Math.max(0, ...existingCloud.teachers.map((t) => t.updatedAt || 0));
-    const cloudIsNewer =
-      existingMax > incomingMax ||
-      ((existingCloud.updatedAt || 0) > incomingMax &&
-        getTeachersSnapshotSignature(existingCloud.teachers) !==
-          getTeachersSnapshotSignature(mergedTeachers));
+    const cloudIsNewer = existingMax > incomingMax;
 
     if (mergedTeachers.length === 0 || cloudIsNewer) {
       mergedTeachers = existingCloud.teachers;
@@ -257,6 +253,31 @@ let cloudPushQueue: Promise<unknown> = Promise.resolve();
 
 export function getCachedCloudPayload(): CloudBackupPayload | null {
   return cachedCloudPayload;
+}
+
+export function primeCachedCloudSnapshot(params: {
+  state?: PersistedErpState | null;
+  teachers?: StoredTeacherAccount[];
+  nowMs?: number;
+}): void {
+  const nowMs = params.nowMs ?? Date.now();
+  const nextState =
+    params.state !== undefined ? params.state : cachedCloudPayload?.state ?? null;
+  const nextTeachers =
+    params.teachers !== undefined ? params.teachers : cachedCloudPayload?.teachers ?? [];
+  const updatedAt = Math.max(
+    nowMs,
+    cachedCloudPayload?.updatedAt || 0,
+    nextState?.updatedAt || 0,
+    ...nextTeachers.map((t) => t.updatedAt || 0)
+  );
+  cachedCloudPayload = {
+    v: 1,
+    updatedAt,
+    state: nextState,
+    teachers: nextTeachers,
+  };
+  lastCloudPullMs = nowMs;
 }
 
 /**

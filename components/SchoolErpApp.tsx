@@ -632,6 +632,39 @@ export default function SchoolErpPage({
     );
   }, [dynamicClassSections, visibleClassSections, allConfiguredSubjectNames, userRole, teacherProfile]);
 
+  const getTeacherVisibleSubjectsForExamAndSection = useCallback(
+    (examId: string, section: string): string[] => {
+      const rawCfg = examConfigs[examId];
+      if (!rawCfg) return [];
+      const eff = getEffectiveExamConfigForClass(rawCfg, section, classes);
+      const subs =
+        isPtExam(rawCfg.code || examId) && !hasCsInPtExam(section)
+          ? eff.subjects.filter((s) => {
+              const lower = s.name.trim().toLowerCase();
+              return lower !== 'computer science' && lower !== 'cs';
+            })
+          : eff.subjects;
+      return getVisibleSubjectsForClass(
+        subs.map((s) => s.name),
+        section,
+        userRole,
+        teacherProfile
+      );
+    },
+    [examConfigs, classes, userRole, teacherProfile]
+  );
+
+  const visibleExamConfigs = useMemo(() => {
+    const allExams = Object.values(examConfigs);
+    if (userRole === 'admin') return allExams;
+    const filtered = allExams.filter((ex) =>
+      visibleClassSections.some(
+        (sec) => getTeacherVisibleSubjectsForExamAndSection(ex.id, sec).length > 0
+      )
+    );
+    return filtered.length > 0 ? filtered : allExams;
+  }, [examConfigs, userRole, visibleClassSections, getTeacherVisibleSubjectsForExamAndSection]);
+
   const getClassNumberForSection = useCallback(
     (sec: string): string => getGradeForSection(classes, sec),
     [classes]
@@ -681,8 +714,15 @@ export default function SchoolErpPage({
 
   // Effective exam config for currently selected class filter
   const currentExamConfig: ExamConfig = useMemo(() => {
+    if (
+      (!selectedClass || selectedClass === 'all') &&
+      isPtExam(baseExamConfig.code || selectedExam) &&
+      classes.some((c) => hasCsInPtExam(c.section, c.grade))
+    ) {
+      return getEffectiveExamConfigForClass(baseExamConfig, 'Diamond', classes);
+    }
     return getEffectiveExamConfigForClass(baseExamConfig, selectedClass, classes);
-  }, [baseExamConfig, selectedClass, classes]);
+  }, [baseExamConfig, selectedClass, classes, selectedExam]);
 
   // Dynamic subjects based on active exam config & teacher permissions for the selected class
   const activeSubjects: SubjectConfig[] = useMemo(() => {
@@ -1333,7 +1373,20 @@ export default function SchoolErpPage({
         },
         body: JSON.stringify({ state }),
       })
-        .then(() => undefined)
+        .then(async (res) => {
+          if (res.ok) {
+            const data = await res.json().catch(() => null);
+            if (typeof data?.updatedAt === 'number' && data.updatedAt > stateUpdatedAtRef.current) {
+              stateUpdatedAtRef.current = data.updatedAt;
+              if (typeof window !== 'undefined') {
+                try {
+                  localStorage.setItem(SVA_STORAGE_KEYS.UPDATED_AT, String(data.updatedAt));
+                } catch {}
+              }
+            }
+          }
+          return undefined;
+        })
         .catch((err) => {
           console.warn('Backend ERP state sync warning:', err);
         })
@@ -1607,7 +1660,7 @@ export default function SchoolErpPage({
     return () => {
       cancelled = true;
     };
-  }, [defaultErpState, writeStateToLocalStorage, persistToBackend, userRole]);
+  }, [defaultErpState, writeStateToLocalStorage, persistToBackend, userRole, showToast]);
 
   // Flush queued exam/structure pushes to Google Sheets (used by 10-second auto-sync & after URL updates)
   const flushPendingGoogleSheetSync = useCallback(async (): Promise<boolean> => {
@@ -1992,7 +2045,6 @@ export default function SchoolErpPage({
     };
   }, [
     isStorageReady,
-    activeTab,
     userRole,
     defaultErpState.classes,
     defaultErpState.examConfigs,
@@ -2271,7 +2323,25 @@ export default function SchoolErpPage({
     selectedExamRef.current = newExam;
     setSelectedExam(newExam);
     setExportExam(newExam);
-    if (isPtExam(newExam) && !hasCsInPtExam(selectedClass)) {
+
+    let effectiveClassAfterExamChange = selectedClass;
+    if (
+      userRole === 'teacher' &&
+      selectedClass !== 'all' &&
+      getTeacherVisibleSubjectsForExamAndSection(newExam, selectedClass).length === 0
+    ) {
+      const fallbackSec = visibleClassSections.find(
+        (sec) => getTeacherVisibleSubjectsForExamAndSection(newExam, sec).length > 0
+      );
+      if (fallbackSec) {
+        effectiveClassAfterExamChange = fallbackSec;
+        selectedClassRef.current = fallbackSec;
+        setSelectedClass(fallbackSec);
+        setExportClass(fallbackSec);
+      }
+    }
+
+    if (isPtExam(newExam) && !hasCsInPtExam(effectiveClassAfterExamChange)) {
       if (selectedSubject.toLowerCase() === 'computer science' || selectedSubject.toLowerCase() === 'cs') {
         setSelectedSubject('all');
       }
@@ -4810,6 +4880,19 @@ export default function SchoolErpPage({
                       setSelectedClass(val);
                       setExportClass(val);
                       setCurrentPage(1);
+                      if (
+                        userRole === 'teacher' &&
+                        val !== 'all' &&
+                        getTeacherVisibleSubjectsForExamAndSection(selectedExam, val).length === 0
+                      ) {
+                        const fallbackExam = visibleExamConfigs.find(
+                          (ex) => getTeacherVisibleSubjectsForExamAndSection(ex.id, val).length > 0
+                        );
+                        if (fallbackExam && fallbackExam.id !== selectedExam) {
+                          handleExamChange(fallbackExam.id);
+                          return;
+                        }
+                      }
                       if (isPtExam(selectedExam) && !hasCsInPtExam(val)) {
                         if (
                           selectedSubject.toLowerCase() === 'computer science' ||
@@ -4840,7 +4923,7 @@ export default function SchoolErpPage({
                     prefixLabel="Exam:"
                     value={selectedExam}
                     onChange={(val) => handleExamChange(val)}
-                    options={Object.values(examConfigs).map((ex) => ({
+                    options={visibleExamConfigs.map((ex) => ({
                       value: ex.id,
                       label: ex.code || ex.id,
                     }))}
@@ -5542,6 +5625,11 @@ export default function SchoolErpPage({
                                     className="font-medium text-slate-900 hover:text-blue-600 transition-colors text-left flex items-center gap-1 truncate flex-1"
                                   >
                                     <span className="truncate">{student.name}</span>
+                                    {selectedClass === 'all' && (
+                                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 shrink-0">
+                                        {student.section}
+                                      </span>
+                                    )}
                                     <ChevronRight className="w-3 h-3 text-slate-400 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0" />
                                   </button>
                                   {userRole === 'admin' && (
@@ -5998,10 +6086,12 @@ export default function SchoolErpPage({
                             >
                               <div className="text-center font-bold text-slate-800">TOTAL</div>
                               <div className="text-[10px] font-normal text-slate-400 text-center mt-0.5">
-                                {(processedStudents[0]
-                                  ? computedResultsMap.get(processedStudents[0].id)?.totalMax
-                                  : computedResults[0]?.totalMax) ??
-                                  displayedSubjects.reduce((sum, s) => sum + (s.maxMarks || 0), 0)}
+                                {selectedClass === 'all' && isPtExam(selectedExam)
+                                  ? '120 / 140'
+                                  : (processedStudents[0]
+                                      ? computedResultsMap.get(processedStudents[0].id)?.totalMax
+                                      : computedResults[0]?.totalMax) ??
+                                    displayedSubjects.reduce((sum, s) => sum + (s.maxMarks || 0), 0)}
                               </div>
                             </th>
 
@@ -6101,6 +6191,11 @@ export default function SchoolErpPage({
                                     className="font-medium text-slate-900 hover:text-blue-600 transition-colors text-left flex items-center gap-1 truncate flex-1"
                                   >
                                     <span className="truncate">{student.name}</span>
+                                    {selectedClass === 'all' && (
+                                      <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 shrink-0">
+                                        {student.section}
+                                      </span>
+                                    )}
                                     <ChevronRight className="w-3 h-3 text-slate-400 opacity-0 group-hover/name:opacity-100 transition-opacity shrink-0" />
                                   </button>
                                   {userRole === 'admin' && (
@@ -6121,24 +6216,33 @@ export default function SchoolErpPage({
 
                               {/* Subject Marks Editable Cells */}
                               {displayedSubjects.map((sub, subIdx) => {
-                                const isLocked = !canUserEditSubjectInClass(
-                                  student.section,
-                                  sub.name,
-                                  userRole,
-                                  teacherProfile
-                                );
-                                const markVal = student.marks[sub.name];
+                                const isCsNotInClassPt =
+                                  isPtExam(selectedExam) &&
+                                  (sub.name.toLowerCase() === 'computer science' ||
+                                    sub.name.toLowerCase() === 'cs') &&
+                                  !hasCsInPtExam(student.section, student.class);
+                                const isLocked =
+                                  isCsNotInClassPt ||
+                                  !canUserEditSubjectInClass(
+                                    student.section,
+                                    sub.name,
+                                    userRole,
+                                    teacherProfile
+                                  );
+                                const markVal = isCsNotInClassPt ? null : student.marks[sub.name];
                                 const isFocused =
                                   focusedCell?.rowIdx === rowIdx &&
                                   focusedCell?.colKey === sub.name;
-                                const displayVal =
-                                  markVal === null || markVal === undefined
-                                    ? ''
-                                    : markVal === 'AB'
-                                    ? 'AB'
-                                    : markVal;
+                                const displayVal = isCsNotInClassPt
+                                  ? '-'
+                                  : markVal === null || markVal === undefined
+                                  ? ''
+                                  : markVal === 'AB'
+                                  ? 'AB'
+                                  : markVal;
 
                                 const isFailed =
+                                  !isCsNotInClassPt &&
                                   markVal !== null &&
                                   markVal !== undefined &&
                                   (markVal === 'AB' || Number(markVal) < sub.passMarks);
@@ -6335,7 +6439,9 @@ export default function SchoolErpPage({
                                   <td className={`w-[70px] min-w-[70px] h-10 p-0 text-center font-mono tabular-nums font-semibold border-b border-l border-slate-200 transition-colors select-none cursor-default ${
                                     isRowActive ? 'bg-blue-50/90 text-blue-950 font-bold' : 'text-slate-900 group-hover/row:bg-slate-100/70'
                                   }`}>
-                                    {result?.totalObtained ?? 0}
+                                    {selectedClass === 'all' && isPtExam(selectedExam)
+                                      ? `${result?.totalObtained ?? 0}/${result?.totalMax ?? 120}`
+                                      : result?.totalObtained ?? 0}
                                   </td>
 
                                   {/* Percentage */}
@@ -6715,6 +6821,19 @@ export default function SchoolErpPage({
                       setSelectedClass(val);
                       setExportClass(val);
                       setCurrentPage(1);
+                      if (
+                        userRole === 'teacher' &&
+                        val !== 'all' &&
+                        getTeacherVisibleSubjectsForExamAndSection(selectedExam, val).length === 0
+                      ) {
+                        const fallbackExam = visibleExamConfigs.find(
+                          (ex) => getTeacherVisibleSubjectsForExamAndSection(ex.id, val).length > 0
+                        );
+                        if (fallbackExam && fallbackExam.id !== selectedExam) {
+                          handleExamChange(fallbackExam.id);
+                          return;
+                        }
+                      }
                       if (isPtExam(selectedExam) && !hasCsInPtExam(val)) {
                         if (
                           selectedRemarkScope.toLowerCase() === 'computer science' ||
@@ -6745,7 +6864,7 @@ export default function SchoolErpPage({
                     prefixLabel="Exam:"
                     value={selectedExam}
                     onChange={(val) => handleExamChange(val)}
-                    options={Object.values(examConfigs).map((ex) => ({
+                    options={visibleExamConfigs.map((ex) => ({
                       value: ex.id,
                       label: ex.code || ex.id,
                     }))}
@@ -6936,10 +7055,17 @@ export default function SchoolErpPage({
                                   className="font-medium text-slate-900 hover:text-blue-600 transition-colors text-left flex items-center gap-1 truncate w-full cursor-pointer"
                                 >
                                   <span className="truncate">{student.name}</span>
+                                  {selectedClass === 'all' && (
+                                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 shrink-0">
+                                      {student.section}
+                                    </span>
+                                  )}
                                 </button>
                               </td>
                               <td className="w-[75px] min-w-[75px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 bg-slate-50/60 select-none cursor-default">
-                                {result?.totalObtained ?? 0}
+                                {selectedClass === 'all' && isPtExam(selectedExam)
+                                  ? `${result?.totalObtained ?? 0}/${result?.totalMax ?? 120}`
+                                  : result?.totalObtained ?? 0}
                               </td>
                               <td className="w-[75px] min-w-[75px] h-10 p-0 text-center font-mono tabular-nums text-xs font-semibold border-b border-l border-slate-200 bg-slate-50/60 select-none cursor-default">
                                 {result ? `${result.percentage.toFixed(2)}%` : '0.00%'}
@@ -7099,6 +7225,11 @@ export default function SchoolErpPage({
                                   className="font-medium text-slate-900 hover:text-blue-600 transition-colors text-left flex items-center gap-1 truncate w-full cursor-pointer"
                                 >
                                   <span className="truncate">{student.name}</span>
+                                  {selectedClass === 'all' && (
+                                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 shrink-0">
+                                      {student.section}
+                                    </span>
+                                  )}
                                 </button>
                               </td>
                               <td className="w-[80px] min-w-[80px] h-10 p-0 text-center font-mono tabular-nums text-xs font-bold border-b border-l border-slate-200 bg-slate-50/60 select-none cursor-default">
@@ -7274,6 +7405,11 @@ export default function SchoolErpPage({
                                   className="font-medium text-slate-900 hover:text-blue-600 transition-colors text-left flex items-center gap-1 truncate w-full cursor-pointer"
                                 >
                                   <span className="truncate">{student.name}</span>
+                                  {selectedClass === 'all' && (
+                                    <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-slate-100 text-slate-500 shrink-0">
+                                      {student.section}
+                                    </span>
+                                  )}
                                 </button>
                               </td>
                               {/* Class Teacher Remark Cell */}
@@ -7467,9 +7603,9 @@ export default function SchoolErpPage({
 
               {/* Actions & Zoom Controls */}
               {canViewFullReportCards && (
-                <div className="flex items-center flex-wrap gap-2">
+                <div className="flex items-center flex-wrap lg:flex-nowrap gap-1.5 shrink-0">
                   {/* Zoom Buttons */}
-                  <div className="hidden md:flex items-center bg-slate-100/90 p-0.5 rounded-lg border border-slate-200/60 text-xs">
+                  <div className="hidden md:flex items-center bg-slate-100/90 p-0.5 rounded-lg border border-slate-200/60 text-xs shrink-0">
                     <button
                       onClick={() => setReportZoom('80%')}
                       className={`px-2 py-1 rounded-md text-[11px] font-medium transition-colors ${
@@ -7498,7 +7634,7 @@ export default function SchoolErpPage({
 
                   <button
                     onClick={() => window.print()}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <Printer className="w-3.5 h-3.5 text-slate-500" />
                     <span>Print</span>
@@ -7506,10 +7642,10 @@ export default function SchoolErpPage({
                   <button
                     onClick={handleDownloadPDF}
                     disabled={isExporting}
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <Download className="w-3.5 h-3.5 text-slate-500" />
-                    <span>Single Student PDF</span>
+                    <span>Single PDF</span>
                   </button>
                   <button
                     onClick={() => {
@@ -7539,7 +7675,7 @@ export default function SchoolErpPage({
                     }}
                     disabled={isExporting}
                     title="Download all student report cards in ONE multi-page PDF document for current class division"
-                    className="inline-flex items-center gap-1.5 px-3.5 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors disabled:opacity-50 cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-white bg-blue-600 hover:bg-blue-700 rounded-lg shadow-xs transition-colors disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <Printer className="w-3.5 h-3.5" />
                     <span>Class PDF</span>
@@ -7561,17 +7697,17 @@ export default function SchoolErpPage({
                       }}
                       disabled={isExporting}
                       title={`Download report cards for all ${computedResults.length} students across all classes in 1 combined multi-page PDF`}
-                      className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
+                      className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
                     >
                       <Printer className="w-3.5 h-3.5 text-slate-500" />
-                      <span>{isExporting ? 'Compiling School PDF...' : 'School PDF'}</span>
+                      <span>{isExporting ? 'Compiling...' : 'School PDF'}</span>
                     </button>
                   )}
                   <button
                     onClick={() => handleDownloadClassZip(false)}
                     disabled={isExporting}
                     title="Download report cards as individual PDFs in a ZIP archive"
-                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors disabled:opacity-50 cursor-pointer"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-white border border-slate-200 rounded-lg hover:bg-slate-50 shadow-2xs transition-colors disabled:opacity-50 cursor-pointer whitespace-nowrap shrink-0"
                   >
                     <Archive className="w-3.5 h-3.5 text-slate-500" />
                     <span>Download ZIP</span>
@@ -7598,7 +7734,7 @@ export default function SchoolErpPage({
                       prefixLabel="Exam:"
                       value={selectedExam}
                       onChange={(val) => handleExamChange(val)}
-                      options={Object.values(examConfigs).map((ex) => ({
+                      options={visibleExamConfigs.map((ex) => ({
                         value: ex.id,
                         label: ex.code || ex.id,
                       }))}
@@ -7622,6 +7758,18 @@ export default function SchoolErpPage({
                         }
                         setSelectedClass(val);
                         setExportClass(val);
+                        if (
+                          userRole === 'teacher' &&
+                          val !== 'all' &&
+                          getTeacherVisibleSubjectsForExamAndSection(selectedExam, val).length === 0
+                        ) {
+                          const fallbackExam = visibleExamConfigs.find(
+                            (ex) => getTeacherVisibleSubjectsForExamAndSection(ex.id, val).length > 0
+                          );
+                          if (fallbackExam && fallbackExam.id !== selectedExam) {
+                            handleExamChange(fallbackExam.id);
+                          }
+                        }
                       }}
                       options={[
                         ...(userRole === 'admin'
@@ -7825,7 +7973,7 @@ export default function SchoolErpPage({
                       : '';
 
                   return (
-                    <div className="w-full overflow-x-auto pb-2 -mx-1 px-1">
+                    <div className="w-full overflow-x-auto pb-2">
                       <div
                         style={{
                           transform:
@@ -7839,19 +7987,19 @@ export default function SchoolErpPage({
                           fontFamily: "'Aptos', 'Calibri', 'Segoe UI', sans-serif",
                         }}
                         id="report-card-print-area"
-                        className="printable-report-card w-full min-w-[740px] sm:min-w-0 max-w-[794px] mx-auto flex flex-col gap-6 font-aptos text-black"
+                        className="printable-report-card w-full max-w-[794px] mx-auto flex flex-col gap-6 font-aptos text-black"
                       >
                       {/* =========================================================
                           PAGE 1: EXACT PT REPORT CARD (MATCHING SAMPLE PDF)
                          ========================================================= */}
                       <div
                         data-testid="pt-report-card-page-1"
-                        className="a4-report-card-sheet w-full bg-white border border-slate-300 shadow-xl px-12 pt-8 pb-14 text-black font-aptos"
+                        className="a4-report-card-sheet w-full bg-white border border-slate-300 shadow-xl px-4 sm:px-12 pt-6 sm:pt-8 pb-10 sm:pb-14 text-black font-aptos"
                         style={{ minHeight: '1040px' }}
                       >
                         {/* Header with Crest on Left and School Identity Centered */}
                         <div className="relative pb-2.5 border-b-[1.5px] border-black text-center">
-                          <div className="absolute left-4 top-0.5">
+                          <div className="hidden sm:block absolute left-4 top-0.5">
                             <Image
                               src={SCHOOL_LOGO_SRC}
                               alt="Saraswati Vidya Academy Crest"
@@ -7861,10 +8009,10 @@ export default function SchoolErpPage({
                               priority
                             />
                           </div>
-                          <div className="pl-10">
+                          <div className="sm:pl-10">
                             <h2
                               data-testid="pt-school-name-heading"
-                              className="font-rockwell-eb text-[33.5px] leading-[1.12] tracking-normal text-[#27457B] whitespace-nowrap"
+                              className="font-rockwell-eb text-xl sm:text-[33.5px] leading-[1.12] tracking-normal text-[#27457B] sm:whitespace-nowrap"
                               style={{
                                 fontFamily: "'Rockwell Extra Bold', 'Rockwell', Georgia, serif",
                                 fontWeight: 800,
@@ -8321,7 +8469,7 @@ export default function SchoolErpPage({
                     );
 
                   return (
-                    <div className="w-full overflow-x-auto pb-2 -mx-1 px-1">
+                    <div className="w-full overflow-x-auto pb-2">
                       <div
                         style={{
                           transform:
@@ -8335,14 +8483,14 @@ export default function SchoolErpPage({
                           fontFamily: "'Aptos', 'Carlito', 'Calibri', 'Segoe UI', sans-serif",
                         }}
                         id="report-card-print-area"
-                        className="printable-report-card w-full min-w-[740px] sm:min-w-0 max-w-[794px] mx-auto flex flex-col gap-6 font-aptos text-black"
+                        className="printable-report-card w-full max-w-[794px] mx-auto flex flex-col gap-6 font-aptos text-black"
                       >
                       {/* =========================================================
                           PAGE 1: OFFICIAL SVA REPORT CARD (SUMMATIVE ASSESSMENT)
                          ========================================================= */}
                       <div
                         data-testid="sa-report-card-page-1"
-                        className="a4-report-card-sheet w-full bg-white border border-slate-300 shadow-xl px-12 pt-8 pb-14 text-black font-aptos"
+                        className="a4-report-card-sheet w-full bg-white border border-slate-300 shadow-xl px-4 sm:px-12 pt-6 sm:pt-8 pb-10 sm:pb-14 text-black font-aptos"
                         style={{ minHeight: '1040px' }}
                       >
                         {/* Header with Crest on Left and School Identity Centered */}
@@ -8892,7 +9040,7 @@ export default function SchoolErpPage({
                         handleExamChange(val);
                       }
                     }}
-                    options={Object.values(examConfigs).map((ex) => ({
+                    options={visibleExamConfigs.map((ex) => ({
                       value: ex.id,
                       label: ex.code || ex.id,
                     }))}
@@ -8917,6 +9065,18 @@ export default function SchoolErpPage({
                       }
                       setExportClass(val);
                       setSelectedClass(val);
+                      if (
+                        userRole === 'teacher' &&
+                        val !== 'all' &&
+                        getTeacherVisibleSubjectsForExamAndSection(selectedExam, val).length === 0
+                      ) {
+                        const fallbackExam = visibleExamConfigs.find(
+                          (ex) => getTeacherVisibleSubjectsForExamAndSection(ex.id, val).length > 0
+                        );
+                        if (fallbackExam && fallbackExam.id !== selectedExam) {
+                          handleExamChange(fallbackExam.id);
+                        }
+                      }
                     }}
                     options={[
                       ...(userRole === 'admin' ? [{ value: 'all', label: 'All Classes' }] : []),
@@ -10197,7 +10357,7 @@ export default function SchoolErpPage({
               selectedStudentId,
               options,
             });
-            const clearedUpdatedAt = Date.now();
+            const clearedUpdatedAt = Math.max(Date.now(), (stateUpdatedAtRef.current || 0) + 1);
             const clearedState: PersistedErpState = {
               version: 1,
               initialized: true,

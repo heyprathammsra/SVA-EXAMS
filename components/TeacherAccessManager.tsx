@@ -476,7 +476,7 @@ export default function TeacherAccessManager({
                 onChange={(val) => setSelectedUsername(val)}
                 options={teacherDropdownOptions}
                 matchTriggerWidth
-                containerClassName="flex items-center justify-between gap-2 bg-slate-50/75 hover:bg-white border border-slate-200/90 hover:border-slate-300 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/15 rounded-xl px-3 py-1.5 shadow-[0_1px_1px_rgba(15,23,42,0.02)] transition-all duration-150 w-full sm:w-[242px] min-w-0"
+                containerClassName="flex items-center justify-between gap-2 bg-slate-50/75 hover:bg-white border border-slate-200/90 hover:border-slate-300 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/15 rounded-xl px-3 py-1.5 shadow-[0_1px_1px_rgba(15,23,42,0.02)] transition-all duration-150 w-full sm:w-[295px] xl:w-[325px] min-w-0"
                 triggerClassName="text-xs font-semibold text-slate-900 flex-1 min-w-0"
                 renderFooter={(closeMenu) => (
                   <button

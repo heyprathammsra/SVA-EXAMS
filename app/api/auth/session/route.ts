@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getTeacherProfileByUsername } from '@/lib/auth';
+import { createSessionToken, getTeacherProfileByUsername } from '@/lib/auth';
 import { getRequestAuthSession } from '@/lib/auth-server';
 
 export const dynamic = 'force-dynamic';
@@ -9,11 +9,16 @@ export async function GET(req: NextRequest) {
   if (!session) {
     return NextResponse.json({ authenticated: false });
   }
+  const token = createSessionToken({
+    username: session.sub,
+    role: session.role,
+  });
   return NextResponse.json({
     authenticated: true,
     username: session.sub,
     role: session.role,
     teacherProfile:
       session.role === 'teacher' ? getTeacherProfileByUsername(session.sub) : null,
+    token,
   });
 }

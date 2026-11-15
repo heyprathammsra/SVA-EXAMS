@@ -7,6 +7,7 @@ import {
   ComputedStudentResult,
   computeStudentResult,
   getEffectiveExamConfigForClass,
+  hasCsInPtExam,
 } from '@/lib/report-card-types';
 import {
   formatReferenceClassHeader,
@@ -44,13 +45,15 @@ export default function ReferenceSheetPreviewCard({
   allowedSubjectNames,
   allowConsolidated = true,
 }: ReferenceSheetPreviewCardProps) {
-  const effectiveConfig = useMemo(
-    () =>
-      classScope && classScope !== 'all'
-        ? getEffectiveExamConfigForClass(examConfig, classScope)
-        : examConfig,
-    [examConfig, classScope]
-  );
+  const effectiveConfig = useMemo(() => {
+    if (classScope && classScope !== 'all') {
+      return getEffectiveExamConfigForClass(examConfig, classScope);
+    }
+    if (students.some((s) => hasCsInPtExam(s.section, s.class))) {
+      return getEffectiveExamConfigForClass(examConfig, 'Diamond');
+    }
+    return examConfig;
+  }, [examConfig, classScope, students]);
 
   const allReferenceSubjects = useMemo(() => {
     const ordered = orderSubjectsLikeReferenceSheet(effectiveConfig.subjects);
@@ -127,22 +130,25 @@ export default function ReferenceSheetPreviewCard({
   const studentResultsMap = useMemo(() => {
     const map = new Map<string, ComputedStudentResult>();
     filteredStudents.forEach((student) => {
+      const studentCfg =
+        !classScope || classScope === 'all'
+          ? getEffectiveExamConfigForClass(examConfig, student.section)
+          : effectiveConfig;
       const res = computeStudentResult(
         student,
-        effectiveConfig.subjects,
-        effectiveConfig.totalFormula,
-        effectiveConfig.customFormula,
-        effectiveConfig.resultCriteria
+        studentCfg.subjects,
+        studentCfg.totalFormula,
+        studentCfg.customFormula,
+        studentCfg.resultCriteria
       );
       map.set(student.id, res);
     });
     return map;
   }, [
     filteredStudents,
-    effectiveConfig.subjects,
-    effectiveConfig.totalFormula,
-    effectiveConfig.customFormula,
-    effectiveConfig.resultCriteria,
+    classScope,
+    examConfig,
+    effectiveConfig,
   ]);
 
   const consolidatedStructure = useMemo(() => {
