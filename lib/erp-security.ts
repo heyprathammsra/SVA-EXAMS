@@ -8,7 +8,11 @@ import {
   StudentReportRow,
   SubjectBreakdown,
 } from './report-card-types';
-import { canUserEditSubjectInClass, TeacherProfile } from './teacher-permissions';
+import {
+  canUserEditSubjectInClass,
+  isClassTeacherForSection,
+  TeacherProfile,
+} from './teacher-permissions';
 
 function sanitizeText(value: unknown, maxLen = 300): string {
   if (typeof value !== 'string') return '';
@@ -90,6 +94,8 @@ export function sanitizeAndValidateErpState(
 ): PersistedErpState {
   const isTeacher = role === 'teacher';
   const enforceTeacherScope = isTeacher && Boolean(teacherProfile) && Boolean(existingServerState);
+  const canTeacherManageRosterInSection = (sec: string): boolean =>
+    enforceTeacherScope && isClassTeacherForSection(sec, 'teacher', teacherProfile);
 
   // Teachers cannot alter exam configurations or class definitions if server state exists
   const authoritativeExamConfigs: Record<string, ExamConfig> =
@@ -247,12 +253,31 @@ export function sanitizeAndValidateErpState(
         if (!cleanExamBreakdownsStore[examId][cleanStuId]) {
           cleanExamBreakdownsStore[examId][cleanStuId] = {};
         }
+        // Remove any existing breakdown that the user is authorized to edit if it was omitted or its mark was cleared
+        for (const existingSub of Object.keys(cleanExamBreakdownsStore[examId][cleanStuId])) {
+          if (
+            enforceTeacherScope &&
+            !canUserEditSubjectInClass(section, existingSub, 'teacher', teacherProfile)
+          ) {
+            continue;
+          }
+          if (
+            !(existingSub in subjectBds) ||
+            cleanExamMarksStore[examId]?.[cleanStuId]?.[existingSub] === null
+          ) {
+            delete cleanExamBreakdownsStore[examId][cleanStuId][existingSub];
+          }
+        }
         for (const [subName, bd] of Object.entries(subjectBds)) {
           const cleanSub = sanitizeText(subName, 60);
           if (
             enforceTeacherScope &&
             !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
           ) {
+            continue;
+          }
+          if (cleanExamMarksStore[examId]?.[cleanStuId]?.[cleanSub] === null) {
+            delete cleanExamBreakdownsStore[examId][cleanStuId][cleanSub];
             continue;
           }
           const maxMarks = resolveSubjectMaxMarks(
@@ -280,6 +305,9 @@ export function sanitizeAndValidateErpState(
     if (!st || typeof st !== 'object' || typeof st.id !== 'string') continue;
     const cleanStuId = sanitizeText(st.id, 80);
     const existingStu = existingStudentsById.get(st.id);
+    if (enforceTeacherScope && !existingStu && !canTeacherManageRosterInSection(st.section || '')) {
+      continue;
+    }
     const section =
       isTeacher && existingStu ? existingStu.section : sanitizeText(st.section, 60);
 
@@ -311,6 +339,22 @@ export function sanitizeAndValidateErpState(
     if (!cleanExamBreakdownsStore[incomingExamId][cleanStuId]) {
       cleanExamBreakdownsStore[incomingExamId][cleanStuId] = {};
     }
+    const incomingStuBds =
+      st.breakdowns && typeof st.breakdowns === 'object' ? st.breakdowns : {};
+    for (const existingSub of Object.keys(cleanExamBreakdownsStore[incomingExamId][cleanStuId])) {
+      if (
+        enforceTeacherScope &&
+        !canUserEditSubjectInClass(section, existingSub, 'teacher', teacherProfile)
+      ) {
+        continue;
+      }
+      if (
+        !(existingSub in incomingStuBds) ||
+        cleanExamMarksStore[incomingExamId]?.[cleanStuId]?.[existingSub] === null
+      ) {
+        delete cleanExamBreakdownsStore[incomingExamId][cleanStuId][existingSub];
+      }
+    }
     if (st.breakdowns && typeof st.breakdowns === 'object') {
       for (const [subjectName, bd] of Object.entries(st.breakdowns)) {
         const cleanSub = sanitizeText(subjectName, 60);
@@ -318,6 +362,10 @@ export function sanitizeAndValidateErpState(
           enforceTeacherScope &&
           !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
         ) {
+          continue;
+        }
+        if (cleanExamMarksStore[incomingExamId]?.[cleanStuId]?.[cleanSub] === null) {
+          delete cleanExamBreakdownsStore[incomingExamId][cleanStuId][cleanSub];
           continue;
         }
         const maxMarks = resolveSubjectMaxMarks(
@@ -338,16 +386,25 @@ export function sanitizeAndValidateErpState(
 
   // 4. Construct sanitizedStudents whose .marks and .breakdowns correspond to serverExamId
   const sanitizedStudents: StudentReportRow[] = sourceStudents
-    .filter((st) => st && typeof st === 'object' && typeof st.id === 'string')
+    .filter((st) => {
+      if (!st || typeof st !== 'object' || typeof st.id !== 'string') return false;
+      const existingStu = existingStudentsById.get(st.id);
+      if (enforceTeacherScope && !existingStu && !canTeacherManageRosterInSection(st.section || '')) {
+        return false;
+      }
+      return true;
+    })
     .map((st) => {
       const cleanStuId = sanitizeText(st.id, 80);
       const existingStu = existingStudentsById.get(st.id);
+      const lockIdentityToExisting =
+        isTeacher && Boolean(existingStu) && !canTeacherManageRosterInSection(existingStu!.section);
       const section =
         isTeacher && existingStu ? existingStu.section : sanitizeText(st.section, 60);
       const name =
-        isTeacher && existingStu ? existingStu.name : sanitizeText(st.name, 120);
+        lockIdentityToExisting ? existingStu!.name : sanitizeText(st.name, 120);
       const rollNo =
-        isTeacher && existingStu ? existingStu.rollNo : sanitizeText(st.rollNo, 20);
+        lockIdentityToExisting ? existingStu!.rollNo : sanitizeText(st.rollNo, 20);
 
       let cleanMarks: Record<string, number | 'AB' | null>;
       let cleanBreakdowns: Record<string, SubjectBreakdown>;
@@ -374,6 +431,19 @@ export function sanitizeAndValidateErpState(
           enforceTeacherScope && existingStu?.breakdowns
             ? { ...existingStu.breakdowns }
             : {};
+        const incomingStuBds =
+          st.breakdowns && typeof st.breakdowns === 'object' ? st.breakdowns : {};
+        for (const existingSub of Object.keys(cleanBreakdowns)) {
+          if (
+            enforceTeacherScope &&
+            !canUserEditSubjectInClass(section, existingSub, 'teacher', teacherProfile)
+          ) {
+            continue;
+          }
+          if (!(existingSub in incomingStuBds) || cleanMarks[existingSub] === null) {
+            delete cleanBreakdowns[existingSub];
+          }
+        }
         if (st.breakdowns && typeof st.breakdowns === 'object') {
           for (const [subjectName, bd] of Object.entries(st.breakdowns)) {
             const cleanSub = sanitizeText(subjectName, 60);
@@ -381,6 +451,10 @@ export function sanitizeAndValidateErpState(
               enforceTeacherScope &&
               !canUserEditSubjectInClass(section, cleanSub, 'teacher', teacherProfile)
             ) {
+              continue;
+            }
+            if (cleanMarks[cleanSub] === null) {
+              delete cleanBreakdowns[cleanSub];
               continue;
             }
             const maxMarks = resolveSubjectMaxMarks(
@@ -395,6 +469,16 @@ export function sanitizeAndValidateErpState(
             } else {
               delete cleanBreakdowns[cleanSub];
             }
+          }
+        }
+      }
+
+      // Guarantee that any subject whose mark is null has no zombie breakdown on student row or active store
+      for (const [subKey, markVal] of Object.entries(cleanMarks)) {
+        if (markVal === null) {
+          delete cleanBreakdowns[subKey];
+          if (cleanExamBreakdownsStore[serverExamId]?.[cleanStuId]) {
+            delete cleanExamBreakdownsStore[serverExamId][cleanStuId][subKey];
           }
         }
       }
@@ -442,48 +526,41 @@ export function sanitizeAndValidateErpState(
         name,
         section,
         class: isTeacher && existingStu ? existingStu.class : sanitizeText(st.class, 20),
-        dob:
-          isTeacher && existingStu
-            ? existingStu.dob
-            : st.dob
-            ? sanitizeText(st.dob, 40)
-            : undefined,
-        fatherName:
-          isTeacher && existingStu
-            ? existingStu.fatherName
-            : st.fatherName
-            ? sanitizeText(st.fatherName, 120)
-            : undefined,
-        motherName:
-          isTeacher && existingStu
-            ? existingStu.motherName
-            : st.motherName
-            ? sanitizeText(st.motherName, 120)
-            : undefined,
-        house:
-          isTeacher && existingStu
-            ? existingStu.house
-            : st.house
-            ? sanitizeText(st.house, 60)
-            : undefined,
-        height:
-          isTeacher && existingStu
-            ? existingStu.height
-            : st.height
-            ? sanitizeText(st.height, 20)
-            : undefined,
-        weight:
-          isTeacher && existingStu
-            ? existingStu.weight
-            : st.weight
-            ? sanitizeText(st.weight, 20)
-            : undefined,
-        attendance:
-          isTeacher && existingStu
-            ? existingStu.attendance
-            : st.attendance
-            ? sanitizeText(st.attendance, 30)
-            : undefined,
+        dob: lockIdentityToExisting
+          ? existingStu!.dob
+          : st.dob
+          ? sanitizeText(st.dob, 40)
+          : undefined,
+        fatherName: lockIdentityToExisting
+          ? existingStu!.fatherName
+          : st.fatherName
+          ? sanitizeText(st.fatherName, 120)
+          : undefined,
+        motherName: lockIdentityToExisting
+          ? existingStu!.motherName
+          : st.motherName
+          ? sanitizeText(st.motherName, 120)
+          : undefined,
+        house: lockIdentityToExisting
+          ? existingStu!.house
+          : st.house
+          ? sanitizeText(st.house, 60)
+          : undefined,
+        height: lockIdentityToExisting
+          ? existingStu!.height
+          : st.height
+          ? sanitizeText(st.height, 20)
+          : undefined,
+        weight: lockIdentityToExisting
+          ? existingStu!.weight
+          : st.weight
+          ? sanitizeText(st.weight, 20)
+          : undefined,
+        attendance: lockIdentityToExisting
+          ? existingStu!.attendance
+          : st.attendance
+          ? sanitizeText(st.attendance, 30)
+          : undefined,
         customRemarks: resolvedCustomRemarks,
         ...(resolvedRemarksProp !== undefined ? { remarks: resolvedRemarksProp } : {}),
         marks: cleanMarks,
@@ -493,10 +570,14 @@ export function sanitizeAndValidateErpState(
     });
 
   // If a teacher request omitted existing students (e.g. attempted roster wipe), restore missing students
+  // except within the Class Teacher's own authorized section
   if (isTeacher && existingServerState?.students) {
     const presentIds = new Set(sanitizedStudents.map((s) => s.id));
     for (const existingStu of existingServerState.students) {
       if (!presentIds.has(existingStu.id)) {
+        if (canTeacherManageRosterInSection(existingStu.section)) {
+          continue;
+        }
         const restoredMarks = {
           ...(existingStu.marks || {}),
           ...(cleanExamMarksStore[serverExamId]?.[existingStu.id] || {}),

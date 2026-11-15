@@ -559,4 +559,132 @@ test('shouldRestoreTeachersFromCloud detects newer edits and deletions across co
   );
 });
 
+test('sanitizeAndValidateErpState deletes breakdown when teacher clears a mark to null', () => {
+  const existingState: PersistedErpState = {
+    version: 1,
+    initialized: true,
+    updatedAt: 2000,
+    selectedClass: 'Sparkle',
+    selectedExam: 'PT-3',
+    classes: [{ id: 'c1', section: 'Sparkle', grade: '6' }],
+    examConfigs: {
+      'PT-3': {
+        id: 'PT-3',
+        name: 'PT-3',
+        code: 'PT-3',
+        totalFormula: 'SUM',
+        subjects: [
+          { name: 'Maths', maxMarks: 20, passMarks: 7 },
+          { name: 'English', maxMarks: 20, passMarks: 7 },
+        ],
+      },
+    },
+    students: [
+      {
+        id: 's-1',
+        rollNo: '01',
+        name: 'Ajinkya Balu Gurav',
+        class: '6',
+        section: 'Sparkle',
+        marks: { Maths: 16, English: 18 },
+        breakdowns: {
+          Maths: {
+            internalMarks: 4,
+            penPaper: 1,
+            multipleAssessment: 1,
+            subjectEnrichment: 1,
+            portfolio: 1,
+            writtenExam: 12,
+          },
+          English: {
+            internalMarks: 4,
+            penPaper: 1,
+            multipleAssessment: 1,
+            subjectEnrichment: 1,
+            portfolio: 1,
+            writtenExam: 14,
+          },
+        },
+      },
+    ],
+    examMarksStore: {
+      'PT-3': { 's-1': { Maths: 16, English: 18 } },
+    },
+    examBreakdownsStore: {
+      'PT-3': {
+        's-1': {
+          Maths: {
+            internalMarks: 4,
+            penPaper: 1,
+            multipleAssessment: 1,
+            subjectEnrichment: 1,
+            portfolio: 1,
+            writtenExam: 12,
+          },
+          English: {
+            internalMarks: 4,
+            penPaper: 1,
+            multipleAssessment: 1,
+            subjectEnrichment: 1,
+            portfolio: 1,
+            writtenExam: 14,
+          },
+        },
+      },
+    },
+  };
+
+  const mathsTeacher = {
+    username: 'demo',
+    name: 'Demo Teacher',
+    assignedSubject: 'Maths',
+    assignedClasses: ['Sparkle'],
+    classTeacherOf: 'Sparkle',
+    assignments: [{ section: 'Sparkle', subject: 'Maths' }],
+    createdAt: 1000,
+    updatedAt: 1000,
+  };
+
+  // Teacher clears Maths mark to null and deletes Maths from breakdowns
+  const incomingClear: PersistedErpState = {
+    ...existingState,
+    students: [
+      {
+        ...existingState.students[0],
+        marks: { Maths: null, English: 18 },
+        breakdowns: {
+          English: existingState.students[0].breakdowns!.English,
+        },
+      },
+    ],
+    examMarksStore: {
+      'PT-3': { 's-1': { Maths: null, English: 18 } },
+    },
+    examBreakdownsStore: {
+      'PT-3': {
+        's-1': {
+          English: existingState.students[0].breakdowns!.English,
+        },
+      },
+    },
+  };
+
+  const sanitized = sanitizeAndValidateErpState(
+    incomingClear,
+    existingState,
+    'teacher',
+    3000,
+    mathsTeacher
+  );
+
+  assert.equal(sanitized.students[0].marks.Maths, null);
+  assert.equal(sanitized.examMarksStore['PT-3']['s-1'].Maths, null);
+  assert.equal(sanitized.students[0].breakdowns?.Maths, undefined);
+  assert.equal(sanitized.examBreakdownsStore['PT-3']['s-1']?.Maths, undefined);
+  // Unmapped English mark and breakdown remain intact
+  assert.equal(sanitized.students[0].marks.English, 18);
+  assert.equal(sanitized.students[0].breakdowns?.English?.writtenExam, 14);
+});
+
+
 

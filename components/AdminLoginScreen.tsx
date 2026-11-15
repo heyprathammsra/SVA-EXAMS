@@ -4,6 +4,7 @@ import React, { useState } from 'react';
 import Image from 'next/image';
 import { motion } from 'motion/react';
 import { AlertCircle, Eye, EyeOff } from 'lucide-react';
+import { PersistedErpState } from '@/lib/erp-persistence';
 import { setStoredAdminSession } from '@/lib/auth-client';
 import { TeacherProfile } from '@/lib/teacher-permissions';
 
@@ -11,7 +12,8 @@ interface AdminLoginScreenProps {
   onAuthenticated: (
     role: 'admin' | 'teacher',
     username: string,
-    teacherProfile: TeacherProfile | null
+    teacherProfile: TeacherProfile | null,
+    initialErpState?: PersistedErpState | null
   ) => void;
 }
 
@@ -61,6 +63,8 @@ export default function AdminLoginScreen({ onAuthenticated }: AdminLoginScreenPr
           : cleanUsername.toLowerCase();
       const resolvedTeacherProfile: TeacherProfile | null =
         resolvedRole === 'teacher' && payload.teacherProfile ? payload.teacherProfile : null;
+      const resolvedErpState: PersistedErpState | null =
+        payload.erpState && payload.erpState.initialized ? payload.erpState : null;
 
       if (typeof payload.token === 'string' && payload.token.length > 0) {
         setStoredAdminSession(
@@ -71,7 +75,7 @@ export default function AdminLoginScreen({ onAuthenticated }: AdminLoginScreenPr
         );
       }
 
-      onAuthenticated(resolvedRole, resolvedUsername, resolvedTeacherProfile);
+      onAuthenticated(resolvedRole, resolvedUsername, resolvedTeacherProfile, resolvedErpState);
     } catch {
       setError('Unable to sign in right now. Please try again.');
       setIsSubmitting(false);

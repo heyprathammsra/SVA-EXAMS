@@ -372,13 +372,18 @@ export async function pushCloudBackupToGoogleSheet(
     }
   };
 
-  const task = cloudPushQueue.then(runPush, runPush);
+  activeCloudPushCount += 1;
+  const task = cloudPushQueue.then(runPush, runPush).finally(() => {
+    activeCloudPushCount = Math.max(0, activeCloudPushCount - 1);
+  });
   cloudPushQueue = task.then(
     () => undefined,
     () => undefined
   );
   return task;
 }
+
+let activeCloudPushCount = 0;
 
 /**
  * Pulls the latest ERP state & teacher accounts from `ERP_System_State` in Google Sheets.
@@ -388,6 +393,9 @@ export async function pullCloudBackupFromGoogleSheet(
   options: { force?: boolean; gasUrl?: string } = {}
 ): Promise<CloudBackupPayload | null> {
   const nowMs = Date.now();
+  if (activeCloudPushCount > 0 && cachedCloudPayload) {
+    return cachedCloudPayload;
+  }
   if (!options.force && cachedCloudPayload && nowMs - lastCloudPullMs < 4000) {
     return cachedCloudPayload;
   }
@@ -423,7 +431,6 @@ export async function pullCloudBackupFromGoogleSheet(
     if (decoded) {
       if (
         !cachedCloudPayload ||
-        options.force ||
         decoded.updatedAt >= (cachedCloudPayload.updatedAt || 0)
       ) {
         cachedCloudPayload = decoded;

@@ -85,6 +85,8 @@ interface StudentInfoSheetProps {
   }) => void;
   onDeleteStudent: (studentId: string) => void;
   showToast: (msg: string) => void;
+  hideBackButton?: boolean;
+  lockClassSwitch?: boolean;
 }
 
 const COL_WIDTH_CLASSES: Record<(typeof SHEET_COLUMNS)[number]['key'], string> = {
@@ -140,6 +142,8 @@ export default function StudentInfoSheet({
   onAddStudent,
   onDeleteStudent,
   showToast,
+  hideBackButton = false,
+  lockClassSwitch = false,
 }: StudentInfoSheetProps) {
   const [search, setSearch] = useState('');
   const [drafts, setDrafts] = useState<Record<string, string>>({});
@@ -792,17 +796,21 @@ export default function StudentInfoSheet({
       {/* Minimal Top Command Row */}
       <div className="w-full min-w-0 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div className="flex flex-wrap items-center gap-2.5 min-w-0">
-          <button
-            type="button"
-            onClick={onClose}
-            aria-label="Back to Classes"
-            className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 bg-white border border-slate-200/90 hover:bg-slate-50 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
-          >
-            <ArrowLeft className="w-3.5 h-3.5" />
-            <span>Classes</span>
-          </button>
+          {!hideBackButton && (
+            <>
+              <button
+                type="button"
+                onClick={onClose}
+                aria-label="Back to Classes"
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-600 hover:text-slate-900 bg-white border border-slate-200/90 hover:bg-slate-50 rounded-lg transition-colors cursor-pointer whitespace-nowrap shrink-0"
+              >
+                <ArrowLeft className="w-3.5 h-3.5" />
+                <span>Classes</span>
+              </button>
 
-          <span className="h-4 w-px bg-slate-200 hidden sm:block" aria-hidden="true" />
+              <span className="h-4 w-px bg-slate-200 hidden sm:block" aria-hidden="true" />
+            </>
+          )}
 
           <div className="flex items-baseline gap-2 min-w-0">
             <h2 className="text-lg sm:text-xl font-bold tracking-tight text-slate-900 truncate">
@@ -813,19 +821,21 @@ export default function StudentInfoSheet({
             </span>
           </div>
 
-          <CustomSelect
-            id="sheet-class-switch"
-            value={classDef.section}
-            onChange={(nextSec) => {
-              setDrafts({});
-              setSelectedRange(null);
-              setFocusedCell(null);
-              onSwitchClass(nextSec);
-            }}
-            containerClassName="flex items-center gap-1.5 bg-white border border-slate-200/90 rounded-lg px-2.5 py-1.5 hover:border-slate-300 transition-colors"
-            triggerClassName="text-xs font-medium text-slate-700"
-            options={classSwitchOptions}
-          />
+          {!lockClassSwitch && (
+            <CustomSelect
+              id="sheet-class-switch"
+              value={classDef.section}
+              onChange={(nextSec) => {
+                setDrafts({});
+                setSelectedRange(null);
+                setFocusedCell(null);
+                onSwitchClass(nextSec);
+              }}
+              containerClassName="flex items-center gap-1.5 bg-white border border-slate-200/90 rounded-lg px-2.5 py-1.5 hover:border-slate-300 transition-colors"
+              triggerClassName="text-xs font-medium text-slate-700"
+              options={classSwitchOptions}
+            />
+          )}
         </div>
 
         <div className="flex flex-wrap items-center gap-2 shrink-0">

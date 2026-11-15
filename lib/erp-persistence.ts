@@ -533,7 +533,9 @@ export function switchExamState(params: {
         m[sub.name] = sub.maxMarks;
       }
 
-      if (!bds[sub.name] && sub.components && sub.components.length > 1) {
+      if (m[sub.name] === null || m[sub.name] === undefined) {
+        delete bds[sub.name];
+      } else if (!bds[sub.name] && sub.components && sub.components.length > 1) {
         const synced = syncBreakdownWithTotal(
           m[sub.name] ?? null,
           sub.name,

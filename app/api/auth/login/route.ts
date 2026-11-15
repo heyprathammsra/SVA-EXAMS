@@ -106,6 +106,15 @@ export async function POST(req: NextRequest) {
 
     clearLoginFailures(clientKey);
 
+    let initialErpState: any = null;
+    try {
+      const raw = await readFile(STATE_FILE, 'utf8');
+      const parsed = JSON.parse(raw);
+      if (parsed && typeof parsed === 'object' && parsed.initialized) {
+        initialErpState = parsed;
+      }
+    } catch {}
+
     const token = createSessionToken({
       username: authResult.username,
       role: authResult.role,
@@ -115,6 +124,7 @@ export async function POST(req: NextRequest) {
       username: authResult.username,
       role: authResult.role,
       teacherProfile: authResult.teacherProfile || null,
+      erpState: initialErpState,
       token,
     });
     const https = isHttpsRequest(req);

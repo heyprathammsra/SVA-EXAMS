@@ -40,7 +40,31 @@
       }
     ],
     "createdAt": 1700000000000,
-    "updatedAt": 1794668354227,
+    "updatedAt": 1794747192049,
     "passwordHashHex": "4c78b327e40c997d386f4dd864ef8cc15b56ec4e3afd853f9e378b41228c9b52"
+  },
+  {
+    "id": "teacher-demo-1794741442055",
+    "name": "demo",
+    "username": "demo",
+    "assignedSubject": "Maths",
+    "assignedClasses": [
+      "Sparkle",
+      "Twinkle"
+    ],
+    "classTeacherOf": null,
+    "assignments": [
+      {
+        "section": "Sparkle",
+        "subject": "Maths"
+      },
+      {
+        "section": "Twinkle",
+        "subject": "Maths"
+      }
+    ],
+    "createdAt": 1794741442055,
+    "updatedAt": 1794747162366,
+    "passwordHashHex": "6e07502224858539b262ce6aacc9154ee1f788fec887af8be5e27c2a3dcfae84"
   }
 ]

@@ -168,7 +168,7 @@ export default function TeacherAccessManager({
     () =>
       teachers.map((t) => ({
         value: t.username,
-        label: `${t.name} (@${t.username}) · ${t.assignedSubject}`,
+        label: `${t.name} (@${t.username})`,
         meta: `${t.assignedClasses.length} ${
           t.assignedClasses.length === 1 ? 'class' : 'classes'
         }`,
@@ -177,6 +177,16 @@ export default function TeacherAccessManager({
   );
 
   const activeTeacherSummary = useMemo(() => {
+    if (!activeTeacher) return '';
+    return activeTeacher.classTeacherOf
+      ? `${activeTeacher.assignedSubject} · CT: ${formatClassGradeShortLabel(
+          classes,
+          activeTeacher.classTeacherOf
+        )}`
+      : activeTeacher.assignedSubject;
+  }, [activeTeacher, classes]);
+
+  const activeTeacherSummaryTitle = useMemo(() => {
     if (!activeTeacher) return '';
     const count = activeTeacher.assignedClasses.length;
     const classSummary =
@@ -188,7 +198,7 @@ export default function TeacherAccessManager({
             .join(', ')
         : `${count} classes`;
     const ctSummary = activeTeacher.classTeacherOf
-      ? `CT: ${formatClassGradeShortLabel(classes, activeTeacher.classTeacherOf)}`
+      ? `Class Teacher of ${formatClassGradeShortLabel(classes, activeTeacher.classTeacherOf)}`
       : 'Not a Class Teacher';
     return `${activeTeacher.assignedSubject} (${classSummary}) · ${ctSummary}`;
   }, [activeTeacher, classes]);
@@ -476,7 +486,7 @@ export default function TeacherAccessManager({
                 onChange={(val) => setSelectedUsername(val)}
                 options={teacherDropdownOptions}
                 matchTriggerWidth
-                containerClassName="flex items-center justify-between gap-2 bg-slate-50/75 hover:bg-white border border-slate-200/90 hover:border-slate-300 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/15 rounded-xl px-3 py-1.5 shadow-[0_1px_1px_rgba(15,23,42,0.02)] transition-all duration-150 w-full sm:w-[295px] xl:w-[325px] min-w-0"
+                containerClassName="flex items-center justify-between gap-2 bg-slate-50/75 hover:bg-white border border-slate-200/90 hover:border-slate-300 focus-within:border-blue-500 focus-within:ring-2 focus-within:ring-blue-500/15 rounded-xl px-3 py-1.5 shadow-[0_1px_1px_rgba(15,23,42,0.02)] transition-all duration-150 w-full sm:w-[225px] xl:w-[240px] min-w-0"
                 triggerClassName="text-xs font-semibold text-slate-900 flex-1 min-w-0"
                 renderFooter={(closeMenu) => (
                   <button
@@ -535,8 +545,8 @@ export default function TeacherAccessManager({
               </div>
 
               <span
-                title={activeTeacherSummary}
-                className="w-full sm:w-auto xl:inline-block text-[11px] sm:text-xs text-slate-500 sm:text-slate-400 truncate min-w-0 sm:max-w-[280px] pt-0.5 sm:pt-0 sm:pl-1 sm:hidden xl:inline"
+                title={activeTeacherSummaryTitle}
+                className="w-full sm:hidden xl:inline-block xl:flex-1 text-[11px] xl:text-xs text-slate-500 xl:text-slate-400 truncate min-w-0 pt-0.5 xl:pt-0 xl:pl-1"
               >
                 {activeTeacherSummary}
               </span>

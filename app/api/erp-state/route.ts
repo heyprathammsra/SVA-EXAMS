@@ -234,5 +234,14 @@ export async function DELETE(req: NextRequest) {
       );
     }
   }
+  const currentTeachers = getStoredTeacherAccountsForBackup();
+  primeCachedCloudSnapshot({
+    state: null,
+    teachers: currentTeachers,
+    nowMs: Date.now(),
+  });
+  void pushCloudBackupToGoogleSheet(null, currentTeachers, undefined, {
+    allowNullState: true,
+  }).catch(() => {});
   return NextResponse.json({ success: true });
 }

@@ -3,6 +3,7 @@
 import React, { useCallback, useEffect, useState } from 'react';
 import AdminLoginScreen from '@/components/AdminLoginScreen';
 import SchoolErpApp from '@/components/SchoolErpApp';
+import { PersistedErpState } from '@/lib/erp-persistence';
 import { TeacherProfile } from '@/lib/teacher-permissions';
 import {
   clearStoredAdminToken,
@@ -16,11 +17,13 @@ export default function AuthGateShell() {
     role: 'admin' | 'teacher';
     username: string;
     teacherProfile: TeacherProfile | null;
+    initialErpState: PersistedErpState | null;
   }>({
     authenticated: false,
     role: 'admin',
     username: '',
     teacherProfile: null,
+    initialErpState: null,
   });
   useEffect(() => {
     let cancelled = false;
@@ -52,6 +55,8 @@ export default function AuthGateShell() {
             role: data.role,
             username: data.username || data.role,
             teacherProfile: data.teacherProfile || null,
+            initialErpState:
+              data.erpState && data.erpState.initialized ? data.erpState : null,
           });
         }
       } catch {
@@ -68,13 +73,15 @@ export default function AuthGateShell() {
     (
       role: 'admin' | 'teacher',
       username: string,
-      teacherProfile: TeacherProfile | null
+      teacherProfile: TeacherProfile | null,
+      initialErpState: PersistedErpState | null = null
     ) => {
       setSession({
         authenticated: true,
         role,
         username,
         teacherProfile,
+        initialErpState,
       });
     },
     []
@@ -91,6 +98,7 @@ export default function AuthGateShell() {
       role: 'admin',
       username: '',
       teacherProfile: null,
+      initialErpState: null,
     });
   }, []);
 
@@ -104,6 +112,7 @@ export default function AuthGateShell() {
       userRole={session.role}
       username={session.username}
       initialTeacherProfile={session.teacherProfile}
+      initialErpState={session.initialErpState}
       onLogout={handleLogout}
     />
   );

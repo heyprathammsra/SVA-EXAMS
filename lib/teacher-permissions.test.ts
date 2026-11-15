@@ -18,6 +18,8 @@ import {
   resolveInitialTeacherExam,
   resolveInitialTeacherSection,
 } from './teacher-permissions';
+import { sanitizeAndValidateErpState } from './erp-security';
+import { PersistedErpState } from './erp-persistence';
 
 const ALL_CLASSES = ['Sparkle', 'Twinkle', 'Topaz', 'Jade', 'Garnet', 'Emerald', 'Ruby', 'Diamond'];
 const ALL_SUBJECTS = [
@@ -412,6 +414,143 @@ describe('teacher-permissions & class-subject mapping', () => {
         })
       ),
       true
+    );
+  });
+
+  it('allows a Class Teacher to update, add, and delete student roster fields strictly in their classTeacherOf class', () => {
+    const classTeacher = normalizeTeacherProfile({
+      name: 'Demo Teacher',
+      username: 'demo',
+      assignedSubject: 'Maths',
+      assignedClasses: ['Sparkle', 'Twinkle'],
+      classTeacherOf: 'Sparkle',
+    });
+
+    const baseState: PersistedErpState = {
+      version: 1,
+      initialized: true,
+      updatedAt: 1000,
+      selectedClass: 'Sparkle',
+      selectedExam: 'PT-1',
+      classes: [
+        { id: 'c1', grade: 'Class 6', section: 'Sparkle' },
+        { id: 'c2', grade: 'Class 6', section: 'Twinkle' },
+      ],
+      examConfigs: {
+        'PT-1': {
+          id: 'PT-1',
+          name: 'Periodic Test 1',
+          code: 'PT-1',
+          totalFormula: 'SUM',
+          subjects: [{ name: 'Maths', maxMarks: 20, passMarks: 7 }],
+        },
+      },
+      students: [
+        {
+          id: 's-sparkle-1',
+          rollNo: '01',
+          name: 'Aarav',
+          section: 'Sparkle',
+          class: '6',
+          fatherName: 'Raj',
+          attendance: '28/30',
+          marks: { Maths: 15 },
+        },
+        {
+          id: 's-sparkle-2',
+          rollNo: '02',
+          name: 'Riya',
+          section: 'Sparkle',
+          class: '6',
+          marks: { Maths: 16 },
+        },
+        {
+          id: 's-twinkle-1',
+          rollNo: '01',
+          name: 'Kabir',
+          section: 'Twinkle',
+          class: '6',
+          fatherName: 'Original Father',
+          attendance: '29/30',
+          marks: { Maths: 18 },
+        },
+      ],
+      examMarksStore: {},
+      examBreakdownsStore: {},
+    };
+
+    const incomingState: PersistedErpState = {
+      ...baseState,
+      students: [
+        {
+          ...baseState.students[0],
+          name: 'Aarav Updated',
+          fatherName: 'Rajesh',
+          height: '140',
+          weight: '34',
+          house: 'Shivneri',
+          attendance: '30/31',
+        },
+        // s-sparkle-2 deleted by Class Teacher (allowed)
+        // s-twinkle-1 deleted by Class Teacher (MUST be restored!) and modified if kept
+        // New student in Sparkle (allowed)
+        {
+          id: 's-sparkle-new',
+          rollNo: '03',
+          name: 'Meera',
+          section: 'Sparkle',
+          class: '6',
+          attendance: '31/31',
+          marks: {},
+        },
+        // Attempted unauthorized new student in Twinkle (MUST be dropped!)
+        {
+          id: 's-twinkle-evil',
+          rollNo: '99',
+          name: 'Hacker',
+          section: 'Twinkle',
+          class: '6',
+          marks: {},
+        },
+      ],
+    };
+
+    const sanitized = sanitizeAndValidateErpState(
+      incomingState,
+      baseState,
+      'teacher',
+      2000,
+      classTeacher
+    );
+
+    const s1 = sanitized.students.find((s) => s.id === 's-sparkle-1');
+    assert.ok(s1);
+    assert.equal(s1.name, 'Aarav Updated');
+    assert.equal(s1.fatherName, 'Rajesh');
+    assert.equal(s1.height, '140');
+    assert.equal(s1.weight, '34');
+    assert.equal(s1.house, 'Shivneri');
+    assert.equal(s1.attendance, '30/31');
+
+    // Deletion in Sparkle succeeds
+    assert.equal(
+      sanitized.students.some((s) => s.id === 's-sparkle-2'),
+      false
+    );
+    // Addition in Sparkle succeeds
+    assert.equal(
+      sanitized.students.some((s) => s.id === 's-sparkle-new'),
+      true
+    );
+    // Deletion in Twinkle is blocked & restored
+    assert.equal(
+      sanitized.students.some((s) => s.id === 's-twinkle-1'),
+      true
+    );
+    // Unauthorized addition in Twinkle is blocked
+    assert.equal(
+      sanitized.students.some((s) => s.id === 's-twinkle-evil'),
+      false
     );
   });
 });
