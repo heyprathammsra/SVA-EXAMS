@@ -390,7 +390,7 @@ let activeCloudPushCount = 0;
  * Uses a short 4-second cooldown cache unless `force: true` is specified.
  */
 export async function pullCloudBackupFromGoogleSheet(
-  options: { force?: boolean; gasUrl?: string } = {}
+  options: { force?: boolean; gasUrl?: string; timeoutMs?: number } = {}
 ): Promise<CloudBackupPayload | null> {
   const nowMs = Date.now();
   if (activeCloudPushCount > 0 && cachedCloudPayload) {
@@ -415,7 +415,7 @@ export async function pullCloudBackupFromGoogleSheet(
       headers: { Accept: 'application/json' },
       redirect: 'follow',
       cache: 'no-store',
-      signal: AbortSignal.timeout(6000),
+      signal: AbortSignal.timeout(options.timeoutMs ?? 6000),
     });
     if (!res.ok) return cachedCloudPayload;
 

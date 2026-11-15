@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import {
   ADMIN_SESSION_COOKIE_NAME,
@@ -9,6 +9,7 @@ import {
   clearLoginFailures,
   createSessionToken,
   getStoredTeacherAccountsForBackup,
+  hasLocalUsersFile,
   recordLoginFailure,
   restoreTeacherAccountsFromBackup,
   shouldApplyCloudTeachersOnLogin,
@@ -24,22 +25,6 @@ const STATE_FILE = path.join(DATA_DIR, 'erp-state.json');
 export async function POST(req: NextRequest) {
   try {
     const clientKey = getRequestClientKey(req);
-    const rateCheck = checkLoginRateLimit(clientKey);
-    if (!rateCheck.allowed) {
-      return NextResponse.json(
-        {
-          authenticated: false,
-          error: `Too many failed sign-in attempts. Please wait ${Math.ceil(
-            rateCheck.retryAfterSeconds / 60
-          )} minute(s) before trying again.`,
-        },
-        {
-          status: 429,
-          headers: { 'Retry-After': String(rateCheck.retryAfterSeconds) },
-        }
-      );
-    }
-
     const body = await req.json().catch(() => null);
     const username = typeof body?.username === 'string' ? body.username.trim() : '';
     const password = typeof body?.password === 'string' ? body.password : '';
@@ -51,40 +36,42 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    const rateLimitKey = `${clientKey}::${username.toLowerCase().replace(/^@+/, '') || 'unknown'}`;
+    const rateCheck = checkLoginRateLimit(rateLimitKey);
+    if (!rateCheck.allowed) {
+      return NextResponse.json(
+        {
+          authenticated: false,
+          error: `Too many failed sign-in attempts for this user. Please wait ${Math.ceil(
+            rateCheck.retryAfterSeconds / 60
+          )} minute(s) before trying again.`,
+        },
+        {
+          status: 429,
+          headers: { 'Retry-After': String(rateCheck.retryAfterSeconds) },
+        }
+      );
+    }
+
     let authResult = authenticateUserCredentials(username, password);
-    if (username.toLowerCase() !== 'admin') {
-      let hasLocalState = false;
-      try {
-        const raw = await readFile(STATE_FILE, 'utf8');
-        const parsed = JSON.parse(raw);
-        hasLocalState = Boolean(parsed?.initialized);
-      } catch {}
-
-      if (!authResult.authenticated || !hasLocalState) {
-        const cloud = await pullCloudBackupFromGoogleSheet({
-          force: true,
-        });
-        if (
-          cloud?.teachers &&
-          cloud.teachers.length > 0 &&
-          shouldApplyCloudTeachersOnLogin(getStoredTeacherAccountsForBackup(), cloud)
-        ) {
-          restoreTeacherAccountsFromBackup(cloud.teachers);
-          authResult = authenticateUserCredentials(username, password);
-        }
-
-        if (!hasLocalState && cloud?.state?.initialized) {
-          try {
-            await mkdir(DATA_DIR, { recursive: true });
-            const tmp = `${STATE_FILE}.${Date.now()}.tmp`;
-            await writeFile(tmp, JSON.stringify(cloud.state), 'utf8');
-            await rename(tmp, STATE_FILE);
-          } catch {}
-        }
+    if (!authResult.authenticated && username.toLowerCase() !== 'admin') {
+      const localUsersExist = hasLocalUsersFile();
+      const cloud = await pullCloudBackupFromGoogleSheet({
+        force: !localUsersExist,
+        timeoutMs: 3500,
+      });
+      if (
+        cloud?.teachers &&
+        cloud.teachers.length > 0 &&
+        shouldApplyCloudTeachersOnLogin(getStoredTeacherAccountsForBackup(), cloud)
+      ) {
+        restoreTeacherAccountsFromBackup(cloud.teachers);
+        authResult = authenticateUserCredentials(username, password);
       }
     }
+
     if (!authResult.authenticated || !authResult.role || !authResult.username) {
-      const failure = recordLoginFailure(clientKey);
+      const failure = recordLoginFailure(rateLimitKey);
       if (failure.locked) {
         return NextResponse.json(
           {
@@ -103,7 +90,7 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    clearLoginFailures(clientKey);
+    clearLoginFailures(rateLimitKey);
 
     let initialErpState: any = null;
     try {

@@ -26,25 +26,19 @@ async function hydrateTeachersFromCloudIfCold(): Promise<void> {
   await hydrateServerStateIfCold();
 }
 
-async function syncTeachersToGoogleSheet(): Promise<void> {
+function syncTeachersToGoogleSheet(): void {
   const currentTeachers = getStoredTeacherAccountsForBackup();
   primeCachedCloudSnapshot({ teachers: currentTeachers });
   publishErpEvent({ type: 'users_update', updatedAt: Date.now() });
-  const syncPromise = hydrateServerStateIfCold()
+  void hydrateServerStateIfCold()
     .catch(() => null)
     .then(() =>
       enqueueServerSheetSync({
         cloudBackup: true,
         teachersAuthoritative: true,
-        awaitResult: true,
       })
     )
     .catch(() => null);
-
-  await Promise.race([
-    syncPromise,
-    new Promise<void>((resolve) => setTimeout(resolve, 4500)),
-  ]);
 }
 
 function requireAdmin(req: NextRequest) {
@@ -111,7 +105,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: res.error }, { status: 400 });
     }
 
-    await syncTeachersToGoogleSheet();
+    syncTeachersToGoogleSheet();
 
     return NextResponse.json({
       success: true,
@@ -144,7 +138,7 @@ export async function DELETE(req: NextRequest) {
       return NextResponse.json({ error: res.error }, { status: 400 });
     }
 
-    await syncTeachersToGoogleSheet();
+    syncTeachersToGoogleSheet();
 
     return NextResponse.json({
       success: true,
@@ -171,14 +165,14 @@ export async function PATCH(req: NextRequest) {
       const oldSection = typeof body.oldSection === 'string' ? body.oldSection : '';
       const newSection = typeof body.newSection === 'string' ? body.newSection : '';
       const teachers = syncTeacherMappingsOnClassRename(oldSection, newSection);
-      await syncTeachersToGoogleSheet();
+      syncTeachersToGoogleSheet();
       return NextResponse.json({ success: true, teachers });
     }
 
     if (body.action === 'deleteClass') {
       const section = typeof body.section === 'string' ? body.section : '';
       const teachers = syncTeacherMappingsOnClassDelete(section);
-      await syncTeachersToGoogleSheet();
+      syncTeachersToGoogleSheet();
       return NextResponse.json({ success: true, teachers });
     }
 
@@ -186,7 +180,7 @@ export async function PATCH(req: NextRequest) {
       const oldSubject = typeof body.oldSubject === 'string' ? body.oldSubject : '';
       const newSubject = typeof body.newSubject === 'string' ? body.newSubject : '';
       const teachers = syncTeacherMappingsOnSubjectRename(oldSubject, newSubject);
-      await syncTeachersToGoogleSheet();
+      syncTeachersToGoogleSheet();
       return NextResponse.json({ success: true, teachers });
     }
 

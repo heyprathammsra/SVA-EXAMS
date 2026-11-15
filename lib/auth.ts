@@ -95,12 +95,39 @@ export function getAuthSessionSecret(env: NodeJS.ProcessEnv = process.env): stri
   }
 }
 
+const derivedStaticKeyCache = new Map<string, Buffer>();
+
 export function derivePasswordKey(password: string): Buffer {
   return scryptSync(password, SCRYPT_SALT, 32);
 }
 
+function getCachedStaticPasswordKey(expected: string): Buffer {
+  let cached = derivedStaticKeyCache.get(expected);
+  if (!cached) {
+    cached = derivePasswordKey(expected);
+    if (derivedStaticKeyCache.size > 8) {
+      derivedStaticKeyCache.clear();
+    }
+    derivedStaticKeyCache.set(expected, cached);
+  }
+  return cached;
+}
+
 export function hashPasswordHex(password: string): string {
   return derivePasswordKey(password).toString('hex');
+}
+
+function timingSafeCompareKeyToHex(candidateBuf: Buffer, expectedHashHex: string): boolean {
+  if (expectedHashHex.length !== 64) {
+    return false;
+  }
+  try {
+    const expectedBuf = Buffer.from(expectedHashHex, 'hex');
+    if (candidateBuf.length !== expectedBuf.length) return false;
+    return timingSafeEqual(candidateBuf, expectedBuf);
+  } catch {
+    return false;
+  }
 }
 
 export function verifyPasswordAgainstHashHex(candidate: string, expectedHashHex: string): boolean {
@@ -110,14 +137,7 @@ export function verifyPasswordAgainstHashHex(candidate: string, expectedHashHex:
   if (candidate.length === 0 || candidate.length > 256 || expectedHashHex.length !== 64) {
     return false;
   }
-  try {
-    const candidateBuf = derivePasswordKey(candidate);
-    const expectedBuf = Buffer.from(expectedHashHex, 'hex');
-    if (candidateBuf.length !== expectedBuf.length) return false;
-    return timingSafeEqual(candidateBuf, expectedBuf);
-  } catch {
-    return false;
-  }
+  return timingSafeCompareKeyToHex(derivePasswordKey(candidate), expectedHashHex);
 }
 
 export function verifyPasswordConstantTime(candidate: string, expected: string): boolean {
@@ -127,7 +147,7 @@ export function verifyPasswordConstantTime(candidate: string, expected: string):
   if (candidate.length === 0 || expected.length === 0 || candidate.length > 256) {
     return false;
   }
-  return timingSafeEqual(derivePasswordKey(candidate), derivePasswordKey(expected));
+  return timingSafeEqual(derivePasswordKey(candidate), getCachedStaticPasswordKey(expected));
 }
 
 export function verifyAdminPassword(
@@ -183,9 +203,9 @@ export function loadStoredTeacherAccounts(env: NodeJS.ProcessEnv = process.env):
             });
           }
         }
-        // Always ensure default 'pratham' exists unless explicitly present
-        if (!valid.some((u) => u.username === DEFAULT_TEACHER_USERNAME)) {
-          valid.unshift(createDefaultPrathamAccount(env));
+        // Only seed default 'pratham' if the file has zero valid accounts
+        if (valid.length === 0) {
+          valid.push(createDefaultPrathamAccount(env));
         }
         inMemoryTeacherStore = valid;
         return valid;
@@ -254,8 +274,8 @@ export function restoreTeacherAccountsFromBackup(
       });
     }
   }
-  if (!valid.some((u) => u.username === DEFAULT_TEACHER_USERNAME)) {
-    valid.unshift(createDefaultPrathamAccount(env));
+  if (valid.length === 0) {
+    valid.push(createDefaultPrathamAccount(env));
   }
   saveStoredTeacherAccounts(valid);
   return valid.map(stripPasswordHash);
@@ -472,13 +492,19 @@ export function deleteTeacherUser(
     return { ok: false, error: 'Teacher identifier is required.' };
   }
   const accounts = loadStoredTeacherAccounts(env);
+  const targetExists = accounts.some(
+    (u) => u.id.toLowerCase() === key || u.username.toLowerCase() === key
+  );
+  if (!targetExists) {
+    return { ok: false, error: 'Teacher user not found.' };
+  }
+  if (accounts.length <= 1) {
+    return { ok: false, error: 'At least one teacher account must remain active.' };
+  }
   const now = getMonotonicTeacherNow(accounts);
   const filtered = accounts
     .filter((u) => u.id.toLowerCase() !== key && u.username.toLowerCase() !== key)
     .map((u, idx) => (idx === 0 ? { ...u, updatedAt: now } : u));
-  if (filtered.length === accounts.length) {
-    return { ok: false, error: 'Teacher user not found.' };
-  }
   saveStoredTeacherAccounts(filtered);
   return {
     ok: true,
@@ -559,16 +585,13 @@ export function authenticateUserCredentials(
   const rawUsername = typeof usernameInput === 'string' ? usernameInput.trim().toLowerCase() : '';
   const password = typeof passwordInput === 'string' ? passwordInput : '';
 
-  if (!password) {
+  if (!password || password.length > 256) {
     return { authenticated: false };
   }
 
   const adminPassword = getConfiguredAdminPassword(env);
-  const defaultPrathamPassword = getConfiguredTeacherPassword(env);
-
-  // Always compute digests so execution time does not leak whether username exists
-  const isAdminPass = verifyPasswordConstantTime(password, adminPassword);
-  const isDefaultPrathamPass = verifyPasswordConstantTime(password, defaultPrathamPassword);
+  const candidateKey = derivePasswordKey(password);
+  const isAdminPass = timingSafeEqual(candidateKey, getCachedStaticPasswordKey(adminPassword));
 
   if ((rawUsername === 'admin' || rawUsername === '') && isAdminPass) {
     return {
@@ -589,13 +612,17 @@ export function authenticateUserCredentials(
   if (matchedTeacher) {
     const trimmedPassword = password.trim();
     const hashMatches =
-      verifyPasswordAgainstHashHex(password, matchedTeacher.passwordHashHex) ||
+      timingSafeCompareKeyToHex(candidateKey, matchedTeacher.passwordHashHex) ||
       (trimmedPassword.length > 0 &&
         trimmedPassword !== password &&
         verifyPasswordAgainstHashHex(trimmedPassword, matchedTeacher.passwordHashHex));
-    const prathamEnvFallback =
-      cleanLookupUsername === DEFAULT_TEACHER_USERNAME && isDefaultPrathamPass;
-    if (hashMatches || prathamEnvFallback) {
+    const configuredEnvPratham =
+      typeof env.TEACHER_PRATHAM_PASSWORD === 'string' && env.TEACHER_PRATHAM_PASSWORD.length > 0;
+    const prathamEnvOverride =
+      cleanLookupUsername === DEFAULT_TEACHER_USERNAME &&
+      configuredEnvPratham &&
+      timingSafeEqual(candidateKey, getCachedStaticPasswordKey(env.TEACHER_PRATHAM_PASSWORD!));
+    if (hashMatches || prathamEnvOverride) {
       return {
         authenticated: true,
         username: matchedTeacher.username,
@@ -603,7 +630,11 @@ export function authenticateUserCredentials(
         teacherProfile: stripPasswordHash(matchedTeacher),
       };
     }
-  } else if (cleanLookupUsername === DEFAULT_TEACHER_USERNAME && isDefaultPrathamPass) {
+  } else if (
+    cleanLookupUsername === DEFAULT_TEACHER_USERNAME &&
+    !hasLocalUsersFile() &&
+    timingSafeEqual(candidateKey, getCachedStaticPasswordKey(getConfiguredTeacherPassword(env)))
+  ) {
     return {
       authenticated: true,
       username: DEFAULT_TEACHER_USERNAME,

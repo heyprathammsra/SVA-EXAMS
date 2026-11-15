@@ -284,20 +284,23 @@ async function runSyncWorkerOnce(): Promise<ServerSyncStatusSnapshot> {
 
   const updatedQueue = await withQueueLock(async () => {
     const current = await readQueueFile();
+    const newerMutationArrived =
+      rerunRequested || (current.lastEnqueuedAt || 0) > (snapshotQueue.lastEnqueuedAt || 0);
     // Preserve any newly-arrived examIds enqueued while this worker run was in flight
     const newlyEnqueued = current.pendingExams.filter(
       (id) => !targetExams.includes(id)
     );
     const mergedFailed = Array.from(new Set([...failedExams, ...newlyEnqueued]));
 
-    const allDone = cloudOk && mergedFailed.length === 0 && !rerunRequested;
+    const allDone = cloudOk && mergedFailed.length === 0 && !newerMutationArrived;
     const nextQueue: PersistedSyncQueue = {
       ...current,
       pendingExams: mergedFailed,
       needsFullSync:
         snapshotQueue.needsFullSync && failedExams.length > 0 ? true : false,
-      cloudBackupPending: !cloudOk || rerunRequested,
-      teachersAuthoritative: !cloudOk ? current.teachersAuthoritative : false,
+      cloudBackupPending: !cloudOk || newerMutationArrived,
+      teachersAuthoritative:
+        !cloudOk || newerMutationArrived ? current.teachersAuthoritative : false,
       lastAttemptAt: Date.now(),
       lastSyncedAt: allDone ? nowIso : current.lastSyncedAt,
       lastError: lastError,

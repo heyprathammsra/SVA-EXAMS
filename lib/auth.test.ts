@@ -14,6 +14,7 @@ import {
   getConfiguredAdminPassword,
   getConfiguredTeacherPassword,
   getTeacherProfileByUsername,
+  listTeacherUsers,
   recordLoginFailure,
   resetAllLoginRateLimits,
   shouldApplyCloudTeachersOnLogin,
@@ -741,6 +742,70 @@ test('newly created user authenticates immediately with exact, @username, or whi
     assert.equal(shouldApplyCloudTeachersOnLogin(localStored, staleCloud, true), false);
     // Cold container without local users file SHOULD apply cloud backup
     assert.equal(shouldApplyCloudTeachersOnLogin(localStored, staleCloud, false), true);
+  } finally {
+    if (hadBackup && backupContent !== null) {
+      fs.writeFileSync(usersFile, backupContent, 'utf8');
+    } else if (fs.existsSync(usersFile)) {
+      fs.unlinkSync(usersFile);
+    }
+  }
+});
+
+test('deleting pratham stays deleted when another teacher exists and updating pratham password invalidates old default', () => {
+  const usersFile = path.join(process.cwd(), '.data', 'erp-users.json');
+  const hadBackup = fs.existsSync(usersFile);
+  const backupContent = hadBackup ? fs.readFileSync(usersFile, 'utf8') : null;
+
+  try {
+    // 1. Update pratham password -> old default sva#2026 must no longer authenticate
+    const updated = upsertTeacherUser({
+      id: 'teacher-pratham',
+      name: 'Pratham',
+      username: 'pratham',
+      password: 'NewPrathamPassword#99',
+      assignedSubject: 'Science',
+      assignedClasses: ['Sparkle'],
+      classTeacherOf: null,
+    });
+    assert.equal(updated.ok, true);
+    assert.equal(authenticateUserCredentials('pratham', 'sva#2026', {}).authenticated, false);
+    assert.equal(
+      authenticateUserCredentials('pratham', 'NewPrathamPassword#99', {}).authenticated,
+      true
+    );
+
+    // 2. Create second teacher then delete pratham -> pratham must stay deleted on reload
+    const added = upsertTeacherUser({
+      name: 'Second Teacher',
+      username: 'second_teacher_unit',
+      password: 'SecondPass#22',
+      assignedSubject: 'Maths',
+      assignedClasses: ['Sparkle'],
+      classTeacherOf: null,
+    });
+    assert.equal(added.ok, true);
+
+    const delPratham = deleteTeacherUser('pratham');
+    assert.equal(delPratham.ok, true);
+    assert.equal(getTeacherProfileByUsername('pratham'), null);
+    assert.equal(authenticateUserCredentials('pratham', 'NewPrathamPassword#99', {}).authenticated, false);
+    assert.equal(authenticateUserCredentials('pratham', 'sva#2026', {}).authenticated, false);
+    assert.equal(
+      authenticateUserCredentials('second_teacher_unit', 'SecondPass#22', {}).authenticated,
+      true
+    );
+
+    // Remove any other pre-existing accounts inside this isolated test before checking final-teacher guard
+    for (const acc of listTeacherUsers()) {
+      if (acc.username !== 'second_teacher_unit') {
+        const res = deleteTeacherUser(acc.username);
+        assert.equal(res.ok, true);
+      }
+    }
+
+    // Cannot delete the final remaining teacher
+    const delLast = deleteTeacherUser('second_teacher_unit');
+    assert.equal(delLast.ok, false);
   } finally {
     if (hadBackup && backupContent !== null) {
       fs.writeFileSync(usersFile, backupContent, 'utf8');

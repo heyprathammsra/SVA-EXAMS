@@ -423,6 +423,8 @@ export default function TeacherAccessManager({
           setSelectedUsername(payload.teachers[0].username);
         }
         showToast?.(`Removed teacher user ${confirmDeleteTeacher.name}`);
+      } else {
+        showToast?.(payload?.error || 'Could not delete teacher user');
       }
     } catch {
       showToast?.('Could not delete teacher user');
@@ -599,7 +601,12 @@ export default function TeacherAccessManager({
               </button>
             </div>
 
-            <form onSubmit={handleSaveUserForm} autoComplete="off" className="space-y-3.5 text-xs">
+            <form
+              key={`${userModalMode}-${editingTeacherId || 'new'}`}
+              onSubmit={handleSaveUserForm}
+              autoComplete="off"
+              className="space-y-3.5 text-xs"
+            >
               {/* Row 1: Name + Username */}
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
